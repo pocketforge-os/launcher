@@ -1,4 +1,4 @@
-use pf_catalog::CatalogSnapshot;
+use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
 use pf_ports::{
@@ -13,7 +13,10 @@ use pf_prefs_port::PrefsPreferencePort;
 use pf_render::RenderNote;
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_client::{SessionClient, SocketTransport};
-use pf_shell::{EvdevActionSource, GamepadRemap, footer_prompt, safe_return_options};
+use pf_shell::{
+    EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, favorite_footer_prompt,
+    footer_prompt, safe_return_options,
+};
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -48,8 +51,26 @@ fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bo
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let snapshot: CatalogSnapshot = serde_json::from_str(include_str!("../fixtures/catalog.json"))
-        .map_err(|e| e.to_string())?;
+    let fixture_mode = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
+        || !args.iter().any(|a| a == "--fbdev");
+    let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
+    let catalog = (!fixture_mode).then(|| {
+        InstalledAppProvider::new(
+            value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"),
+            state_dir.join("favorites.json"),
+            "native",
+            "aarch64",
+        )
+    });
+    let snapshot: CatalogSnapshot = if let Some(provider) = &catalog {
+        provider
+            .snapshot()
+            .map_err(|error| format!("catalog: {error:?}"))?
+    } else {
+        serde_json::from_str(include_str!("../fixtures/catalog.json")).map_err(|e| e.to_string())?
+    };
     let theme = pf_theme::flagship();
     let reduced = env::var_os("PF_REDUCE_MOTION").is_some();
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
@@ -57,18 +78,19 @@ fn main() -> Result<(), String> {
     let options = safe_return_options(&contract);
     let glyphs =
         EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
-    let footer = footer_prompt(&glyphs);
+    let mut footer = footer_prompt(&glyphs);
+    if let Some(hint) = favorite_footer_prompt(&glyphs, false) {
+        if let Some(glyph) = hint.strip_suffix("  Favorite") {
+            footer.push('\u{1f}');
+            footer.push_str(glyph);
+        }
+    }
     let mut core = fixture_core(&snapshot, &theme, reduced);
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
         core.session_backend_unavailable_at_boot();
     }
     core.set_safe_return_options(options.iter().map(|(_, label)| label.clone()));
-    let fixture_mode = args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
-        || !args.iter().any(|a| a == "--fbdev");
-    let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let mut durable;
     let mut fixture;
     let preferences: &mut dyn PreferencePort;
@@ -109,6 +131,7 @@ fn main() -> Result<(), String> {
             &footer,
             preferences,
             glyphs,
+            catalog.as_ref().expect("fbdev catalog"),
             Path::new(session_socket),
         );
     }
@@ -173,6 +196,9 @@ fn emit_f10_evidence(
     let mut core = fixture_core(snapshot, theme, false);
     core.authority_snapshot(false);
     core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "library")?;
     core.action(&ShellAction::Custom("Search".into()));
     core.set_search_query("ridgeline");
@@ -255,6 +281,7 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_fbdev(
     host: &mut FbdevHost,
     actions: &mut dyn ActionSource,
@@ -262,6 +289,7 @@ fn run_fbdev(
     activate: &str,
     preferences: &mut dyn PreferencePort,
     map: EffectiveMap,
+    catalog: &dyn FavoriteCatalog,
     session_socket: &Path,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
@@ -337,6 +365,12 @@ fn run_fbdev(
                         authority: ChangeAuthority("user".into()),
                     })
                     .map_err(|e| format!("preferences: {e:?}"))?;
+            }
+            Some(Effect::ToggleFavorite { item_id, favorite }) => {
+                match commit_favorite(catalog, &item_id, favorite) {
+                    Ok(_) => core.favorite_committed(&item_id, favorite),
+                    Err(status) => core.favorite_failed(status),
+                }
             }
             None => {}
         }

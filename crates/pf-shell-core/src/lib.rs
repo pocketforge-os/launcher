@@ -59,6 +59,15 @@ pub enum Effect {
     ConfirmRemap,
     RollbackRemap,
     CompleteFirstRun,
+    ToggleFavorite { item_id: String, favorite: bool },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LibraryFilter {
+    #[default]
+    All,
+    Favorites,
+    Ready,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +101,7 @@ struct Item {
     art: Option<ImageSource>,
     art_failed: bool,
     variants: Vec<Variant>,
+    favorite: bool,
 }
 
 impl Item {
@@ -118,6 +128,8 @@ pub struct ShellCore {
     selected_item: Option<usize>,
     search_query: String,
     search_results: Vec<usize>,
+    library_filter: LibraryFilter,
+    library_items: Vec<usize>,
     launch_focus: usize,
     active_title: String,
     crash_summary: String,
@@ -157,7 +169,8 @@ impl ShellCore {
     where
         F: FnMut(&str) -> Option<Arc<[u8]>>,
     {
-        let items = snapshot
+        let favorites = &snapshot.user_projection.favorite_item_ids;
+        let items: Vec<_> = snapshot
             .items
             .iter()
             .map(|item| {
@@ -179,6 +192,7 @@ impl ShellCore {
                     art,
                     art_failed: false,
                     variants: item.variants.clone(),
+                    favorite: favorites.binary_search(&item.id).is_ok(),
                 }
             })
             .collect();
@@ -194,6 +208,8 @@ impl ShellCore {
             selected_item: None,
             search_query: String::new(),
             search_results: (0..snapshot.items.len()).collect(),
+            library_filter: LibraryFilter::All,
+            library_items: (0..snapshot.items.len()).collect(),
             launch_focus: 0,
             active_title: String::new(),
             crash_summary: String::new(),
@@ -384,11 +400,83 @@ impl ShellCore {
             .enumerate()
             .filter(|(_, item)| {
                 let haystack = format!("{} {}", item.title, item.tags.join(" ")).to_lowercase();
-                words.iter().all(|word| haystack.contains(word))
+                let filter_matches = match self.library_filter {
+                    LibraryFilter::All => true,
+                    LibraryFilter::Favorites => item.favorite,
+                    LibraryFilter::Ready => item
+                        .variants
+                        .iter()
+                        .any(|variant| matches!(variant.availability, Availability::Ready)),
+                };
+                filter_matches && words.iter().all(|word| haystack.contains(word))
             })
             .map(|(index, _)| index)
             .collect();
         self.focus = 0;
+    }
+
+    #[must_use]
+    pub fn is_favorite(&self, item_id: &str) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.id == item_id && item.favorite)
+    }
+
+    pub fn favorite_committed(&mut self, item_id: &str, favorite: bool) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+            item.favorite = favorite;
+        }
+        self.refresh_library_items();
+        self.focus = self.focus.min(self.focus_count().saturating_sub(1));
+        self.session_status = None;
+    }
+
+    pub fn favorite_failed(&mut self, status: impl Into<String>) {
+        self.session_status = Some(status.into());
+    }
+
+    fn refresh_library_items(&mut self) {
+        self.library_items = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let included = match self.library_filter {
+                    LibraryFilter::All => true,
+                    LibraryFilter::Favorites => item.favorite,
+                    LibraryFilter::Ready => item
+                        .variants
+                        .iter()
+                        .any(|variant| matches!(variant.availability, Availability::Ready)),
+                };
+                included.then_some(index)
+            })
+            .collect();
+    }
+
+    fn focused_item_index(&self) -> Option<usize> {
+        match self.route {
+            Route::Library => self
+                .focus
+                .checked_sub(4)
+                .and_then(|i| self.library_items.get(i))
+                .copied(),
+            Route::Search => self.search_results.get(self.focus).copied(),
+            Route::Details | Route::VariantChooser => self.selected_item,
+            Route::Home => {
+                if self.focus < self.items.len() {
+                    Some(self.focus)
+                } else {
+                    self.items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| item.favorite)
+                        .nth(self.focus - self.items.len())
+                        .map(|(i, _)| i)
+                }
+            }
+            _ => None,
+        }
     }
     #[must_use]
     pub fn art_treatment(&self, item_id: &str) -> Option<ArtTreatment> {
@@ -596,6 +684,14 @@ impl ShellCore {
             };
         }
         match action {
+            ShellAction::Custom(name) if name == "Favorite" => {
+                if let Some(item) = self.focused_item_index() {
+                    return Some(Effect::ToggleFavorite {
+                        item_id: self.items[item].id.clone(),
+                        favorite: !self.items[item].favorite,
+                    });
+                }
+            }
             ShellAction::Custom(name) if name == "Search" => {
                 self.caller_route = self.route;
                 self.caller_focus = self.focus;
@@ -616,6 +712,11 @@ impl ShellCore {
             ShellAction::Back if self.route != Route::Home => self.go(Route::Home),
             ShellAction::Move(AxisMove::Right) if self.route == Route::Home => {
                 self.go(Route::Library)
+            }
+            ShellAction::Move(AxisMove::Right)
+                if self.route == Route::Library && (1..=3).contains(&self.focus) =>
+            {
+                self.focus = (self.focus + 1).min(3);
             }
             ShellAction::Move(AxisMove::Right) if self.route == Route::Library => {
                 self.go(Route::Settings)
@@ -638,6 +739,11 @@ impl ShellCore {
             }
             ShellAction::Move(AxisMove::Left) if self.route == Route::Settings => {
                 self.go(Route::Library)
+            }
+            ShellAction::Move(AxisMove::Left)
+                if self.route == Route::Library && (2..=3).contains(&self.focus) =>
+            {
+                self.focus -= 1;
             }
             ShellAction::Move(AxisMove::Left) if self.route == Route::Library => {
                 self.go(Route::Home)
@@ -706,7 +812,16 @@ impl ShellCore {
                 self.go(Route::Search);
                 return None;
             }
-            self.selected_item = Some(self.focus - 1);
+            if (1..=3).contains(&self.focus) {
+                self.library_filter = [
+                    LibraryFilter::All,
+                    LibraryFilter::Favorites,
+                    LibraryFilter::Ready,
+                ][self.focus - 1];
+                self.refresh_library_items();
+                return None;
+            }
+            self.selected_item = self.library_items.get(self.focus - 4).copied();
             self.caller_route = Route::Library;
             self.caller_focus = self.focus;
             self.go(Route::Details);
@@ -745,12 +860,13 @@ impl ShellCore {
         if self.items.is_empty() {
             return None;
         }
-        let ready = self.ready_variants(self.focus);
+        let item = self.focused_item_index()?;
+        let ready = self.ready_variants(item);
         match ready.len() {
             0 => None,
-            1 => self.launch_variant(self.focus, ready[0]),
+            1 => self.launch_variant(item, ready[0]),
             _ => {
-                self.selected_item = Some(self.focus);
+                self.selected_item = Some(item);
                 self.caller_route = Route::Home;
                 self.caller_focus = self.focus;
                 self.go(Route::VariantChooser);
@@ -832,8 +948,10 @@ impl ShellCore {
     }
     fn focus_count(&self) -> usize {
         match self.route {
-            Route::Home => self.items.len().max(1),
-            Route::Library => self.items.len() + 1,
+            Route::Home => {
+                (self.items.len() + self.items.iter().filter(|item| item.favorite).count()).max(1)
+            }
+            Route::Library => self.library_items.len() + 4,
             Route::Search => self.search_results.len().max(1),
             Route::Details => 1,
             Route::VariantChooser => self
@@ -963,10 +1081,27 @@ impl ShellCore {
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
         }
+        let footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
+            self.focused_item_index().map_or_else(
+                || base.to_owned(),
+                |item| {
+                    format!(
+                        "{base}     {glyph}  {}",
+                        if self.items[item].favorite {
+                            "Unfavorite"
+                        } else {
+                            "Favorite"
+                        }
+                    )
+                },
+            )
+        } else {
+            footer.to_owned()
+        };
         children.push(node(
             "prompts",
             Role::Text,
-            footer,
+            &footer,
             w - 600.0,
             h - 48.0,
             552.0,
@@ -1023,7 +1158,9 @@ impl ShellCore {
             "--state-rest-text",
         ));
         if self.route == Route::Home {
-            let focused = self.items.get(self.focus);
+            let focused = self
+                .focused_item_index()
+                .and_then(|index| self.items.get(index));
             let ready_count = self
                 .items
                 .iter()
@@ -1103,6 +1240,43 @@ impl ShellCore {
                 n.children = art_nodes(item, "home-card", x, 438.0, card_width, i == self.focus);
                 out.push(n);
             }
+            let favorite_items: Vec<_> = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.favorite)
+                .collect();
+            if !favorite_items.is_empty() {
+                out.push(node(
+                    "favorites-label",
+                    Role::Heading,
+                    &format!("FAVORITES · {}", favorite_items.len()),
+                    48.0,
+                    646.0,
+                    220.0,
+                    28.0,
+                    "--color-text-muted",
+                ));
+                for (shelf_index, (item_index, item)) in favorite_items.into_iter().enumerate() {
+                    let x = 286.0 + shelf_index as f32 * 174.0;
+                    let focused = self.focus == self.items.len() + shelf_index;
+                    let mut card = node(
+                        &format!("favorite-item-{}", item.id),
+                        Role::Button,
+                        if item.has_real_art() { "" } else { &item.title },
+                        x,
+                        638.0,
+                        158.0,
+                        72.0,
+                        state_token(best_availability(item), focused),
+                    );
+                    card.state.focused = focused;
+                    card.action = Some(NodeAction::Activate);
+                    card.children = art_nodes(item, "favorite-card", x, 640.0, 158.0, focused);
+                    let _ = item_index;
+                    out.push(card);
+                }
+            }
             if self.presentation == Presentation::ForcedClose {
                 out.push(node(
                     "attention",
@@ -1133,6 +1307,37 @@ impl ShellCore {
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
             out.push(search);
+            for (index, (label, filter)) in [
+                ("All", LibraryFilter::All),
+                ("Favorites", LibraryFilter::Favorites),
+                ("Ready", LibraryFilter::Ready),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let focused = self.focus == index + 1;
+                let active = self.library_filter == filter;
+                let mut chip = node(
+                    &format!("library-filter-{}", label.to_lowercase()),
+                    Role::Button,
+                    label,
+                    48.0 + index as f32 * 142.0,
+                    232.0,
+                    126.0,
+                    38.0,
+                    if focused {
+                        "--state-focused-ring"
+                    } else if active {
+                        "--state-selected-surface"
+                    } else {
+                        "--state-rest-surface"
+                    },
+                );
+                chip.state.focused = focused;
+                chip.state.selected = active;
+                chip.action = Some(NodeAction::Activate);
+                out.push(chip);
+            }
             let columns = if w >= 1100.0 {
                 6
             } else if w >= 760.0 {
@@ -1142,14 +1347,15 @@ impl ShellCore {
             };
             let card_width = (w - 96.0 - (columns - 1) as f32 * 16.0) / columns as f32;
             let row_height = 250.0;
-            let card_top = 244.0;
+            let card_top = 286.0;
             let mut visible_rows: usize = 1;
             while card_top + (visible_rows + 1) as f32 * row_height - 18.0 <= h {
                 visible_rows += 1;
             }
-            let focused_row = self.focus.saturating_sub(1) / columns;
+            let focused_row = self.focus.saturating_sub(4) / columns;
             let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
-            for (i, item) in self.items.iter().enumerate() {
+            for (i, &item_index) in self.library_items.iter().enumerate() {
+                let item = &self.items[item_index];
                 let availability = best_availability(item);
                 let column = i % columns;
                 let row = i / columns;
@@ -1170,9 +1376,9 @@ impl ShellCore {
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
                     232.0,
-                    state_token(availability, self.focus == i + 1),
+                    state_token(availability, self.focus == i + 4),
                 );
-                card.state.focused = self.focus == i + 1;
+                card.state.focused = self.focus == i + 4;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
@@ -1180,7 +1386,7 @@ impl ShellCore {
                     48.0 + column as f32 * (card_width + 16.0),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
-                    self.focus == i + 1,
+                    self.focus == i + 4,
                 );
                 out.push(card);
             }
@@ -1280,6 +1486,39 @@ impl ShellCore {
                 "--state-rest-text",
             ));
             out.extend(art_nodes(item, "detail-art", 48.0, 165.0, 304.0, false));
+            if let Some(variant) = item.variants.first() {
+                let availability = availability_text(&variant.availability, &self.presentation);
+                let state = availability.split(" — ").next().unwrap_or(&availability);
+                for (index, label) in [
+                    state.to_owned(),
+                    format!("Provider {}", variant.provenance.provider_id),
+                    format!("Edition {}", variant.id),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    out.push(node(
+                        &format!("detail-badge-{index}"),
+                        Role::Text,
+                        &label,
+                        400.0 + index as f32 * 190.0,
+                        278.0,
+                        174.0,
+                        36.0,
+                        state_token(&variant.availability, false),
+                    ));
+                }
+                out.push(node(
+                    "detail-availability-reason",
+                    Role::Text,
+                    &availability,
+                    400.0,
+                    320.0,
+                    w - 448.0,
+                    38.0,
+                    "--color-text-secondary",
+                ));
+            }
             for (variant_index, variant) in item.variants.iter().enumerate() {
                 out.push(node(
                     &format!("detail-variant-{variant_index}"),
@@ -1291,7 +1530,7 @@ impl ShellCore {
                         availability_text(&variant.availability, &self.presentation)
                     ),
                     400.0,
-                    290.0 + variant_index as f32 * 55.0,
+                    370.0 + variant_index as f32 * 55.0,
                     w - 448.0,
                     48.0,
                     state_token(&variant.availability, false),
@@ -2594,7 +2833,8 @@ mod tests {
             .collect();
         let mut core = fixture_core(items);
         core.go(Route::Library);
-        for _ in 0..481 {
+        // Search plus three filter chips precede the deterministic item index space.
+        for _ in 0..484 {
             core.action(&ShellAction::Move(AxisMove::Down));
         }
         let metrics = SurfaceMetrics {
@@ -2716,5 +2956,112 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "library-card-plate-long")
         );
+    }
+
+    #[test]
+    fn favorites_shelf_filters_and_details_badges_have_ruled_anatomy() {
+        let mut snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![
+                item(
+                    "ridge",
+                    "Ridgeline",
+                    vec![variant("standard", "ridge", Availability::Ready)],
+                ),
+                item(
+                    "tides",
+                    "Hollow Tides",
+                    vec![variant(
+                        "standard",
+                        "tides",
+                        Availability::NeedsSetup {
+                            reason: "choose a profile".into(),
+                        },
+                    )],
+                ),
+            ],
+            user_projection: UserProjection {
+                favorite_item_ids: vec!["ridge".into()],
+            },
+        };
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let home = core.scene(metrics, "").unwrap();
+        let ids: Vec<_> = home
+            .root()
+            .children
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert!(ids.contains(&"favorites-label"));
+        let favorite = home
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "favorite-item-ridge")
+            .unwrap();
+        for part in ["art", "initial", "plate", "title"] {
+            assert!(
+                favorite
+                    .children
+                    .iter()
+                    .any(|node| node.id.as_str() == format!("favorite-card-{part}-ridge"))
+            );
+        }
+        snapshot.user_projection.favorite_item_ids.clear();
+        let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
+            .scene(metrics, "")
+            .unwrap();
+        assert!(
+            !empty
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "favorites-label")
+        );
+
+        core.go(Route::Library);
+        core.focus = 2;
+        core.action(&ShellAction::Activate);
+        assert_eq!(core.library_items, vec![0]);
+        core.set_search_query("ridge");
+        assert_eq!(core.search_result_ids(), vec!["ridge"]);
+        core.set_search_query("tides");
+        assert!(core.search_result_ids().is_empty());
+
+        core.selected_item = Some(1);
+        core.go(Route::Details);
+        let details = core.scene(metrics, "").unwrap();
+        for id in [
+            "detail-badge-0",
+            "detail-badge-1",
+            "detail-badge-2",
+            "detail-availability-reason",
+        ] {
+            assert!(
+                details
+                    .root()
+                    .children
+                    .iter()
+                    .any(|node| node.id.as_str() == id),
+                "missing {id}"
+            );
+        }
+        let reason = details
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "detail-availability-reason")
+            .unwrap();
+        assert!(reason.accessible_label.contains("choose a profile"));
     }
 }

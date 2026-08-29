@@ -92,6 +92,51 @@ fn main() -> Result<(), String> {
     core.drive_session(&mut session)
         .map_err(|e| format!("{e:?}"))?;
     emit(&mut host, &core, &footer, out, "returned")?;
+    emit_f10_evidence(&mut host, &snapshot, &theme, &footer, out)?;
+    Ok(())
+}
+
+fn emit_f10_evidence(
+    host: &mut OffscreenHost,
+    snapshot: &CatalogSnapshot,
+    theme: &pf_theme::Theme,
+    footer: &str,
+    out: &Path,
+) -> Result<(), String> {
+    let mut core = ShellCore::boot(snapshot, theme, false);
+    core.authority_snapshot(false);
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+    emit(host, &core, footer, out, "library")?;
+    core.action(&ShellAction::Custom("Search".into()));
+    core.set_search_query("hollow");
+    emit(host, &core, footer, out, "search")?;
+    core.action(&ShellAction::Activate);
+    emit(host, &core, footer, out, "details")?;
+
+    let mut chooser_snapshot = snapshot.clone();
+    let item = chooser_snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.id == "glass-harbor")
+        .ok_or("chooser fixture item missing")?;
+    let mut second = item
+        .variants
+        .iter()
+        .find(|variant| matches!(variant.availability, pf_catalog::Availability::Ready))
+        .cloned()
+        .ok_or("chooser fixture ready variant missing")?;
+    second.id = "handheld".into();
+    second.provider_id = "fixture-c".into();
+    second.provenance.provider_id = "fixture-c".into();
+    second.launch_target.app_id = "glass-harbor-handheld".into();
+    item.variants.push(second);
+    let mut chooser = ShellCore::boot(&chooser_snapshot, theme, false);
+    chooser.authority_snapshot(false);
+    for _ in 0..3 {
+        chooser.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    }
+    chooser.action(&ShellAction::Activate);
+    emit(host, &chooser, footer, out, "variant-chooser")?;
     Ok(())
 }
 

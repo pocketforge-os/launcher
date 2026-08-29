@@ -3,11 +3,13 @@ use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
-    FakePowerPort, FakePreferencePort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime,
+    FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost,
+    IdlePolicy, LaunchResult, MonotonicTime, NetworkPort, NetworkState, NtpState,
     ObservedSessionState, PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult,
     PreferenceChange, PreferenceChangeResult, PreferenceError, PreferenceKey, PreferencePoll,
     PreferencePort, PreferenceValue, SessionError, SessionEvent, SessionPoll, SessionPort,
-    ShellAction, Support, TerminalReceipt,
+    ShellAction, Support, TerminalReceipt, TimeCapabilities, TimePort, TimeState, TransferPort,
+    TransferService, TransferServiceState, WifiNetwork, WifiSecurity,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -47,6 +49,57 @@ fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
 
 fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
     ShellCore::boot_with_art(snapshot, theme, reduced, fixture_art)
+}
+
+fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
+    let mut network = FakeNetworkPort::new(NetworkState {
+        interface_present: true,
+        enabled: true,
+        connected_ssid: Some("Moonlit Arcade".into()),
+        signal: Some(78),
+    });
+    network.script_scan(Ok(vec![
+        WifiNetwork {
+            ssid: "Moonlit Arcade".into(),
+            security: WifiSecurity::Personal,
+            strength: 78,
+        },
+        WifiNetwork {
+            ssid: "Cedar Workshop".into(),
+            security: WifiSecurity::Personal,
+            strength: 54,
+        },
+        WifiNetwork {
+            ssid: "Open Lantern".into(),
+            security: WifiSecurity::Open,
+            strength: 31,
+        },
+    ]));
+    let time = FakeTimePort::new(
+        TimeCapabilities {
+            manual_set_time: Support::Supported,
+        },
+        TimeState {
+            wall_clock: std::time::SystemTime::UNIX_EPOCH,
+            timezone: "UTC".into(),
+            ntp_state: NtpState::Inactive,
+        },
+    );
+    let transfer = FakeTransferPort::new(vec![
+        TransferServiceState {
+            service: TransferService::Sftp,
+            support: Support::Supported,
+            enabled: false,
+            endpoint_info: Some("Available on the local network".into()),
+        },
+        TransferServiceState {
+            service: TransferService::UsbMassStorage,
+            support: Support::Unsupported,
+            enabled: false,
+            endpoint_info: None,
+        },
+    ]);
+    (network, time, transfer)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -136,6 +189,9 @@ fn main() -> Result<(), String> {
         &mut unavailable_power
     };
     core.load_power(power);
+    let (mut network, mut time, mut transfer) = fixture_device_ports();
+    core.load_network(&mut network);
+    core.load_system(&time, &transfer);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -161,6 +217,9 @@ fn main() -> Result<(), String> {
             glyphs,
             catalog.as_ref().expect("fbdev catalog"),
             Path::new(session_socket),
+            &mut network,
+            &mut time,
+            &mut transfer,
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -177,6 +236,11 @@ fn main() -> Result<(), String> {
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         emit(&mut host, &mut core, &footer, out, "settings")?;
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(&mut host, &mut core, &footer, out, "network")?;
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(&mut host, &mut core, &footer, out, "system")?;
         core.reset_first_run();
         emit(&mut host, &mut core, &footer, out, "first-run")?;
         return Ok(());
@@ -311,7 +375,7 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_fbdev(
     host: &mut FbdevHost,
     actions: &mut dyn ActionSource,
@@ -322,6 +386,9 @@ fn run_fbdev(
     map: EffectiveMap,
     catalog: &dyn FavoriteCatalog,
     session_socket: &Path,
+    network: &mut dyn NetworkPort,
+    time: &mut dyn TimePort,
+    transfer: &mut dyn TransferPort,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = SessionClient::new(
@@ -410,6 +477,17 @@ fn run_fbdev(
             Some(Effect::SetIdlePolicy(policy)) => {
                 let result = power.set_idle_policy(policy);
                 core.idle_policy_result(result);
+            }
+            Some(Effect::ConnectWifi { ssid, credential }) => {
+                core.network_result(network.connect(&ssid, credential));
+            }
+            Some(Effect::SetTimezone(zone)) => core.timezone_result(time.set_timezone(zone)),
+            Some(Effect::SetNtp(enabled)) => core.ntp_result(time.set_ntp_enabled(enabled)),
+            Some(Effect::SetManualTime(wall_clock)) => {
+                core.manual_time_result(time.set_time(wall_clock));
+            }
+            Some(Effect::SetTransfer { service, enabled }) => {
+                core.transfer_result(transfer.set_enabled(service, enabled));
             }
             None => {}
         }

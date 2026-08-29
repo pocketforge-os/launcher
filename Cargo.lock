@@ -385,6 +385,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-prefs"
+version = "0.0.1"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=3879e912f1444b7f4d02d6efa8e5a76c44c994e8#3879e912f1444b7f4d02d6efa8e5a76c44c994e8"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pf-prefs-port"
+version = "0.0.1"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=3879e912f1444b7f4d02d6efa8e5a76c44c994e8#3879e912f1444b7f4d02d6efa8e5a76c44c994e8"
+dependencies = [
+ "pf-ports",
+ "pf-prefs",
+]
+
+[[package]]
 name = "pf-render"
 version = "0.0.1"
 source = "git+https://github.com/pocketforge-os/runtime.git?rev=3879e912f1444b7f4d02d6efa8e5a76c44c994e8#3879e912f1444b7f4d02d6efa8e5a76c44c994e8"
@@ -427,6 +445,8 @@ dependencies = [
  "pf-framehost",
  "pf-input-map",
  "pf-ports",
+ "pf-prefs",
+ "pf-prefs-port",
  "pf-scene",
  "pf-session-authority",
  "pf-session-client",

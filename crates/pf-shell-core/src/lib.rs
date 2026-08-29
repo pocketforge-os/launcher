@@ -51,6 +51,17 @@ pub enum Effect {
     EnterRecovery,
     ChangePreference(PreferenceChange),
     ResetFirstRun,
+    BeginRemap,
+    ConfirmRemap,
+    RollbackRemap,
+    CompleteFirstRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlsFlow {
+    Rows,
+    RemapPreview,
+    SafeReturnPicker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +125,8 @@ pub struct ShellCore {
     display_preferences: Vec<DisplayPreference>,
     first_run_complete: bool,
     safe_return_binding: String,
+    safe_return_options: Vec<String>,
+    controls_flow: ControlsFlow,
 }
 
 impl ShellCore {
@@ -164,6 +177,8 @@ impl ShellCore {
             display_preferences: Vec::new(),
             first_run_complete: true,
             safe_return_binding: "PF · the button below the d-pad".into(),
+            safe_return_options: Vec::new(),
+            controls_flow: ControlsFlow::Rows,
         }
     }
 
@@ -260,6 +275,15 @@ impl ShellCore {
 
     pub fn set_safe_return_binding(&mut self, label: impl Into<String>) {
         self.safe_return_binding = label.into();
+    }
+    pub fn set_safe_return_options(&mut self, options: impl IntoIterator<Item = String>) {
+        self.safe_return_options = options.into_iter().collect();
+    }
+    fn first_run_preferences(&self) -> Vec<&DisplayPreference> {
+        self.display_preferences
+            .iter()
+            .filter(|row| row.interactive)
+            .collect()
     }
     pub fn reset_first_run(&mut self) {
         self.first_run_complete = false;
@@ -380,30 +404,84 @@ impl ShellCore {
             return None;
         }
         if self.presentation == Presentation::FirstRun {
+            let rows = self.first_run_preferences();
+            let row_count = rows.len();
             return match action {
                 ShellAction::Custom(name) if name == "Start" => {
                     self.first_run_complete = true;
                     self.presentation = Presentation::Ready;
                     self.focus = 0;
-                    None
+                    Some(Effect::CompleteFirstRun)
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                    self.focus = (self.focus + 1).min(self.display_preferences.len());
+                    self.focus = (self.focus + 1).min(row_count);
                     None
                 }
                 ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
                     self.focus = self.focus.saturating_sub(1);
                     None
                 }
-                ShellAction::Activate if self.focus == self.display_preferences.len() => {
+                ShellAction::Activate if self.focus == row_count => {
                     self.first_run_complete = true;
                     self.presentation = Presentation::Ready;
                     self.focus = 0;
-                    None
+                    Some(Effect::CompleteFirstRun)
                 }
-                ShellAction::Activate => self.preference_effect(self.focus),
+                ShellAction::Activate => rows
+                    .get(self.focus)
+                    .and_then(|row| Self::preference_effect_for(row)),
                 _ => None,
             };
+        }
+        if self.route == Route::Settings && self.settings_room == SettingsRoom::Controls {
+            match self.controls_flow {
+                ControlsFlow::RemapPreview => {
+                    return match action {
+                        ShellAction::Activate => {
+                            self.controls_flow = ControlsFlow::Rows;
+                            self.focus = 0;
+                            Some(Effect::ConfirmRemap)
+                        }
+                        ShellAction::Back => {
+                            self.controls_flow = ControlsFlow::Rows;
+                            self.focus = 0;
+                            Some(Effect::RollbackRemap)
+                        }
+                        _ => None,
+                    };
+                }
+                ControlsFlow::SafeReturnPicker => {
+                    return match action {
+                        ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
+                            self.focus = (self.focus + 1)
+                                .min(self.safe_return_options.len().saturating_sub(1));
+                            None
+                        }
+                        ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
+                            self.focus = self.focus.saturating_sub(1);
+                            None
+                        }
+                        ShellAction::Back => {
+                            self.controls_flow = ControlsFlow::Rows;
+                            self.focus = 1;
+                            None
+                        }
+                        ShellAction::Activate => {
+                            let label = self.safe_return_options.get(self.focus)?.clone();
+                            self.safe_return_binding.clone_from(&label);
+                            self.controls_flow = ControlsFlow::Rows;
+                            self.focus = 1;
+                            Some(Effect::ChangePreference(PreferenceChange {
+                                key: PreferenceKey("safeReturnBinding".into()),
+                                value: PreferenceValue::Text(label),
+                                authority: ChangeAuthority("user".into()),
+                            }))
+                        }
+                        _ => None,
+                    };
+                }
+                ControlsFlow::Rows => {}
+            }
         }
         if matches!(self.presentation, Presentation::Crash) {
             return match action {
@@ -503,6 +581,18 @@ impl ShellCore {
             }
             return match self.settings_room {
                 SettingsRoom::Display => self.preference_effect(self.focus),
+                SettingsRoom::Controls if self.focus == 0 => {
+                    self.controls_flow = ControlsFlow::RemapPreview;
+                    self.focus = 0;
+                    Some(Effect::BeginRemap)
+                }
+                SettingsRoom::Controls
+                    if self.focus == 1 && !self.safe_return_options.is_empty() =>
+                {
+                    self.controls_flow = ControlsFlow::SafeReturnPicker;
+                    self.focus = 0;
+                    None
+                }
                 SettingsRoom::System if self.focus == 1 => Some(Effect::ResetFirstRun),
                 _ => None,
             };
@@ -612,6 +702,10 @@ impl ShellCore {
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
         let row = self.display_preferences.get(index)?;
+        Self::preference_effect_for(row)
+    }
+
+    fn preference_effect_for(row: &DisplayPreference) -> Option<Effect> {
         if !row.interactive {
             return None;
         }
@@ -667,7 +761,10 @@ impl ShellCore {
                 SettingsRoom::Display => {
                     self.display_preferences.len().max(1) + usize::from(self.recovery_available)
                 }
-                SettingsRoom::Controls => 2,
+                SettingsRoom::Controls => match self.controls_flow {
+                    ControlsFlow::Rows | ControlsFlow::RemapPreview => 2,
+                    ControlsFlow::SafeReturnPicker => self.safe_return_options.len().max(1),
+                },
                 SettingsRoom::System => 2 + usize::from(self.recovery_available),
             },
             Route::Quick => 2,
@@ -1190,6 +1287,49 @@ impl ShellCore {
     }
 
     fn settings_nodes(&self, out: &mut Vec<Node>, w: f32) {
+        if self.settings_room == SettingsRoom::Controls {
+            match self.controls_flow {
+                ControlsFlow::RemapPreview => {
+                    let mut preview = node(
+                        "remap-preview",
+                        Role::Button,
+                        "Previewing Activate on the north button · Activate to confirm · Back to roll back",
+                        48.0,
+                        180.0,
+                        w - 96.0,
+                        72.0,
+                        "--state-focused-ring",
+                    );
+                    preview.state.focused = true;
+                    preview.action = Some(NodeAction::Activate);
+                    out.push(preview);
+                    return;
+                }
+                ControlsFlow::SafeReturnPicker => {
+                    for (i, label) in self.safe_return_options.iter().enumerate() {
+                        let mut option = node(
+                            &format!("safe-return-option-{i}"),
+                            Role::Button,
+                            label,
+                            48.0,
+                            180.0 + i as f32 * 72.0,
+                            w - 96.0,
+                            58.0,
+                            if i == self.focus {
+                                "--state-focused-ring"
+                            } else {
+                                "--state-rest-surface"
+                            },
+                        );
+                        option.state.focused = i == self.focus;
+                        option.action = Some(NodeAction::Activate);
+                        out.push(option);
+                    }
+                    return;
+                }
+                ControlsFlow::Rows => {}
+            }
+        }
         let labels: Vec<(String, bool)> = match self.settings_room {
             SettingsRoom::Display => self
                 .display_preferences
@@ -1295,7 +1435,17 @@ impl ShellCore {
             }
         }
         if self.settings_room == SettingsRoom::Controls {
-            out.push(node("safe-options", Role::Text, "Options · Select + Start · Hold PF (about 1s) · Select + Start, press twice · Double-tap PF · Hold Select + L1 + R1 (deliberately hard to press)", 48.0, 350.0, w - 96.0, 100.0, "--color-text-secondary"));
+            let options = self.safe_return_options.join(" · ");
+            out.push(node(
+                "safe-options",
+                Role::Text,
+                &format!("Options · {options}"),
+                48.0,
+                350.0,
+                w - 96.0,
+                100.0,
+                "--color-text-secondary",
+            ));
         }
     }
 
@@ -1321,12 +1471,8 @@ impl ShellCore {
             48.0,
             "--color-text-secondary",
         ));
-        for (i, row) in self
-            .display_preferences
-            .iter()
-            .filter(|row| row.interactive)
-            .enumerate()
-        {
+        let rows = self.first_run_preferences();
+        for (i, row) in rows.iter().enumerate() {
             let mut n = node(
                 &format!("comfort-{i}"),
                 Role::Button,
@@ -1363,13 +1509,13 @@ impl ShellCore {
             540.0,
             680.0,
             54.0,
-            if self.focus == self.display_preferences.len() {
+            if self.focus == rows.len() {
                 "--state-focused-ring"
             } else {
                 "--state-rest-surface"
             },
         );
-        continue_node.state.focused = self.focus == self.display_preferences.len();
+        continue_node.state.focused = self.focus == rows.len();
         continue_node.action = Some(NodeAction::Activate);
         out.push(continue_node);
     }
@@ -1787,6 +1933,72 @@ mod tests {
             )
             .unwrap();
         assert!(format!("{scene:?}").contains("Not supported on this device"));
+    }
+    #[test]
+    fn first_run_uses_one_filtered_index_space() {
+        let values = preferences(true);
+        let mut observed = Vec::new();
+        for key in [
+            "textScale",
+            "highContrast",
+            "reduceMotion",
+            "reduceFlashing",
+        ] {
+            observed.push(values.read(&PreferenceKey(key.into())).unwrap().unwrap());
+        }
+        observed[1].applied = false;
+        observed[3].applied = false;
+        let mixed = FakePreferencePort::new(observed, ChangeAuthority("user".into()));
+        let mut c = core();
+        c.load_preferences(&mixed, false).unwrap();
+
+        let Some(Effect::ChangePreference(first)) = c.action(&ShellAction::Activate) else {
+            panic!("first visible row must activate");
+        };
+        assert_eq!(first.key, PreferenceKey("textScale".into()));
+        c.action(&ShellAction::Move(AxisMove::Down));
+        let Some(Effect::ChangePreference(second)) = c.action(&ShellAction::Activate) else {
+            panic!("second visible row must activate");
+        };
+        assert_eq!(second.key, PreferenceKey("reduceMotion".into()));
+        c.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::CompleteFirstRun)
+        );
+    }
+
+    #[test]
+    fn controls_rows_enter_real_flows_and_picker_uses_only_supplied_options() {
+        let mut c = core();
+        c.set_safe_return_options(["Select + Start".into(), "Double-tap PF".into()]);
+        c.go(Route::Settings);
+        c.settings_room = SettingsRoom::Controls;
+        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::BeginRemap));
+        assert_eq!(c.action(&ShellAction::Back), Some(Effect::RollbackRemap));
+
+        c.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        c.action(&ShellAction::Move(AxisMove::Down));
+        let Some(Effect::ChangePreference(change)) = c.action(&ShellAction::Activate) else {
+            panic!("picker must submit the shown option");
+        };
+        assert_eq!(change.key, PreferenceKey("safeReturnBinding".into()));
+        assert_eq!(change.value, PreferenceValue::Text("Double-tap PF".into()));
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let debug = format!("{scene:?}");
+        assert!(!debug.contains("L1"));
     }
     #[test]
     fn applied_accessibility_fixture_is_live_and_first_run_is_once_only() {

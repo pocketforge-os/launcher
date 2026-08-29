@@ -1723,15 +1723,15 @@ fn procedural_art_nodes(
     let label_y = if home { y + 210.0 } else { y + 176.0 };
     let label_mask = node(
         // Card labels remain available to assistive consumers, but the current renderer
-        // also paints them. Mask the full first text line before painting the inset art so
-        // neither glyph pixels nor the mask's former 1-2 px transition remain exposed.
+        // also paints them. Mask the full art region before painting the inset art so a
+        // wrapped second line cannot remain visible in the art's eight-pixel gutters.
         &format!("{context}-label-mask-{id}"),
         Role::Group,
         "",
         x,
         y - 8.0,
         width,
-        24.0,
+        if home { 166.0 } else { 144.0 },
         token,
     );
     let mut nodes = vec![

@@ -30,6 +30,7 @@ fn main() -> Result<(), String> {
         EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
     let footer = footer_prompt(&glyphs);
     let mut core = ShellCore::boot(&snapshot, &theme, reduced);
+    core.authority_snapshot(false);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -44,8 +45,12 @@ fn main() -> Result<(), String> {
         let (mut actions, _) =
             EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
                 .map_err(|e| format!("input adapter: {e:?}"))?;
-        host.present(&core.scene(host.metrics(), &footer))
-            .map_err(|e| e.to_string())?;
+        host.present(
+            core.scene(host.metrics(), &footer)
+                .as_ref()
+                .ok_or("shell has no frame")?,
+        )
+        .map_err(|e| e.to_string())?;
         return run_fbdev(&mut host, &mut actions, &mut core, &footer);
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -59,7 +64,7 @@ fn main() -> Result<(), String> {
     };
     let mut host = OffscreenHost::new(metrics);
     emit(&mut host, &core, &footer, out, "boot-home")?;
-    core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     emit(&mut host, &core, &footer, out, "focus-moved")?;
     let effect = core
         .action(&ShellAction::Activate)
@@ -115,8 +120,12 @@ fn emit_sim_frame(core: &ShellCore, prompt: &str, path: &Path) -> Result<(), Str
         },
     };
     let mut host = OffscreenHost::new(metrics);
-    host.present(&core.scene(metrics, prompt))
-        .map_err(|e| e.to_string())?;
+    host.present(
+        core.scene(metrics, prompt)
+            .as_ref()
+            .ok_or("shell has no frame")?,
+    )
+    .map_err(|e| e.to_string())?;
     let frame = host.frame().ok_or("sim frame missing")?;
     let mut out = fs::OpenOptions::new()
         .write(true)
@@ -157,7 +166,7 @@ fn run_fbdev(
             }
             continue;
         };
-        let before = (core.presentation(), core.focus());
+        let before = (core.presentation().clone(), core.focus());
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
                 session.safe_return();
@@ -167,18 +176,24 @@ fn run_fbdev(
             Some(Effect::Launch(request)) => {
                 let result = session.launch(request).map_err(|e| format!("{e:?}"))?;
                 core.launch_result(&result);
-                host.present(&core.scene(host.metrics(), activate))
-                    .map_err(|e| e.to_string())?;
+                host.present(
+                    core.scene(host.metrics(), activate)
+                        .as_ref()
+                        .ok_or("shell has no frame")?,
+                )
+                .map_err(|e| e.to_string())?;
                 core.drive_session(&mut session)
                     .map_err(|e| format!("{e:?}"))?;
             }
+            Some(Effect::EnterRecovery) => return Ok(()),
             None => {}
         }
-        if before != (core.presentation(), core.focus()) {
+        if before != (core.presentation().clone(), core.focus()) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            host.present(&core.scene(host.metrics(), activate))
-                .map_err(|e| e.to_string())?;
+            if let Some(scene) = core.scene(host.metrics(), activate) {
+                host.present(&scene).map_err(|e| e.to_string())?;
+            }
         }
     }
 }
@@ -234,8 +249,12 @@ fn emit(
     out: &Path,
     name: &str,
 ) -> Result<(), String> {
-    host.present(&core.scene(host.metrics(), prompt))
-        .map_err(|e| e.to_string())?;
+    host.present(
+        core.scene(host.metrics(), prompt)
+            .as_ref()
+            .ok_or("shell has no frame")?,
+    )
+    .map_err(|e| e.to_string())?;
     let frame = host.frame().ok_or("frame missing")?;
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;

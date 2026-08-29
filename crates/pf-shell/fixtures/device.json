@@ -3,7 +3,7 @@
   "physical_controls": [
     {"position":"east","printed_label":"A","input_code":"BTN_EAST","fallback_glyph":{"source":"pocketforge","id":"pf-face-east"}},
     {"position":"south","printed_label":"B","input_code":"BTN_SOUTH","fallback_glyph":{"source":"pocketforge","id":"pf-face-south"}},
-    {"position":"guide","printed_label":"Guide","input_code":"BTN_MODE","fallback_glyph":{"source":"pocketforge","id":"pf-guide"}},
+    {"position":"guide","printed_label":"","input_code":"BTN_MODE","fallback_glyph":{"source":"pocketforge","id":"pf-guide"}},
     {"position":"north","printed_label":"↑","input_code":"KEY_UP","fallback_glyph":{"source":"pocketforge","id":"pf-up"}},
     {"position":"west","printed_label":"←","input_code":"KEY_LEFT","fallback_glyph":{"source":"pocketforge","id":"pf-left"}},
     {"position":"start","printed_label":"↓","input_code":"KEY_DOWN","fallback_glyph":{"source":"pocketforge","id":"pf-down"}},

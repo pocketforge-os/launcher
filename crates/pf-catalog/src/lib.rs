@@ -4,7 +4,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -110,12 +110,21 @@ pub enum ProviderItemResult {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UserProjection {
     pub favorite_item_ids: Vec<String>,
+    #[serde(default)]
+    pub pinned_variant_ids: BTreeMap<String, String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FavoriteCommitResult {
     Committed(CatalogRevision),
     RevisionConflict { current: CatalogRevision },
     ItemNotFound,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VariantPinCommitResult {
+    Committed(CatalogRevision),
+    RevisionConflict { current: CatalogRevision },
+    ItemNotFound,
+    VariantNotFound,
 }
 #[derive(Clone, Debug, Eq, Error, PartialEq, Serialize, Deserialize)]
 #[error("{kind:?}: {message}")]
@@ -286,6 +295,53 @@ impl InstalledAppProvider {
         }
         self.store_projection(&p)?;
         Ok(FavoriteCommitResult::Committed(self.scan(p)?.revision))
+    }
+    /// Atomically pins (or clears) a title's default variant using the catalog projection CAS.
+    ///
+    /// # Errors
+    /// Returns an error when the catalog cannot be scanned or the projection committed.
+    pub fn set_pinned_variant(
+        &self,
+        item_id: &str,
+        variant_id: Option<&str>,
+        expected: CatalogRevision,
+    ) -> Result<VariantPinCommitResult, ProviderError> {
+        let parent = self.favorites.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.favorites.with_extension("lock"))?;
+        lock.lock_exclusive()?;
+        let current = self.snapshot()?;
+        if current.revision != expected {
+            return Ok(VariantPinCommitResult::RevisionConflict {
+                current: current.revision,
+            });
+        }
+        let Some(item) = current.items.iter().find(|item| item.id == item_id) else {
+            return Ok(VariantPinCommitResult::ItemNotFound);
+        };
+        if variant_id.is_some_and(|id| !item.variants.iter().any(|variant| variant.id == id)) {
+            return Ok(VariantPinCommitResult::VariantNotFound);
+        }
+        let mut projection = current.user_projection;
+        match variant_id {
+            Some(id) => {
+                projection
+                    .pinned_variant_ids
+                    .insert(item_id.into(), id.into());
+            }
+            None => {
+                projection.pinned_variant_ids.remove(item_id);
+            }
+        }
+        self.store_projection(&projection)?;
+        Ok(VariantPinCommitResult::Committed(
+            self.scan(projection)?.revision,
+        ))
     }
     fn load_projection(&self) -> Result<UserProjection, ProviderError> {
         match fs::read(&self.favorites) {

@@ -1,6 +1,9 @@
 //! Concrete shell adapters kept outside the pure reducer.
 
-use pf_catalog::{CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider};
+use pf_catalog::{
+    CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
+    VariantPinCommitResult,
+};
 use pf_input_map::{
     Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
     TransactionOutcome,
@@ -231,6 +234,19 @@ pub trait FavoriteCatalog {
         value: bool,
         expected: CatalogRevision,
     ) -> Result<FavoriteCommitResult, String>;
+    /// Commits or clears a per-title default variant against the expected revision.
+    ///
+    /// # Errors
+    /// Returns a provider diagnostic when variant pins are unsupported or cannot be committed.
+    fn set_pinned_variant(
+        &self,
+        item_id: &str,
+        variant_id: Option<&str>,
+        expected: CatalogRevision,
+    ) -> Result<VariantPinCommitResult, String> {
+        let _ = (item_id, variant_id, expected);
+        Err("Default-version commits are unsupported".into())
+    }
 }
 
 impl FavoriteCatalog for InstalledAppProvider {
@@ -244,6 +260,15 @@ impl FavoriteCatalog for InstalledAppProvider {
         expected: CatalogRevision,
     ) -> Result<FavoriteCommitResult, String> {
         InstalledAppProvider::set_favorite(self, id, value, expected)
+            .map_err(|error| format!("{error:?}"))
+    }
+    fn set_pinned_variant(
+        &self,
+        item_id: &str,
+        variant_id: Option<&str>,
+        expected: CatalogRevision,
+    ) -> Result<VariantPinCommitResult, String> {
+        InstalledAppProvider::set_pinned_variant(self, item_id, variant_id, expected)
             .map_err(|error| format!("{error:?}"))
     }
 }
@@ -274,6 +299,43 @@ pub fn commit_favorite(
             }
         }
         FavoriteCommitResult::ItemNotFound => Err("That title is no longer in the Library".into()),
+    }
+}
+
+/// Commits a default variant, retrying one concurrent catalog projection conflict.
+///
+/// # Errors
+/// Returns an honest status string when reads fail, the target disappears, or both CAS attempts
+/// conflict.
+pub fn commit_pinned_variant(
+    catalog: &dyn FavoriteCatalog,
+    item_id: &str,
+    variant_id: Option<&str>,
+) -> Result<CatalogSnapshot, String> {
+    let first = catalog.snapshot()?;
+    match catalog.set_pinned_variant(item_id, variant_id, first.revision)? {
+        VariantPinCommitResult::Committed(_) => catalog.snapshot(),
+        VariantPinCommitResult::RevisionConflict { .. } => {
+            let refreshed = catalog.snapshot()?;
+            match catalog.set_pinned_variant(item_id, variant_id, refreshed.revision)? {
+                VariantPinCommitResult::Committed(_) => catalog.snapshot(),
+                VariantPinCommitResult::RevisionConflict { .. } => {
+                    Err("Default version changed elsewhere; try again".into())
+                }
+                VariantPinCommitResult::ItemNotFound => {
+                    Err("That title is no longer in the Library".into())
+                }
+                VariantPinCommitResult::VariantNotFound => {
+                    Err("That version is no longer available".into())
+                }
+            }
+        }
+        VariantPinCommitResult::ItemNotFound => {
+            Err("That title is no longer in the Library".into())
+        }
+        VariantPinCommitResult::VariantNotFound => {
+            Err("That version is no longer available".into())
+        }
     }
 }
 

@@ -175,6 +175,51 @@ fn favorites_are_atomic_revisioned_and_persistent() {
 }
 
 #[test]
+fn variant_pins_are_cas_backed_and_persist_in_the_catalog_projection() {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    fs::create_dir(&root).unwrap();
+    let state = t.path().join("state/catalog-overlay.json");
+    write(
+        &root,
+        "one",
+        &manifest("com.example.one", "One", "pocketforge/a133-powervr", ""),
+    );
+    let p = provider(&root, &state);
+    let first = p.snapshot().unwrap();
+    let item_id = first.items[0].id.clone();
+    let variant_id = first.items[0].variants[0].id.clone();
+    assert!(matches!(
+        p.set_pinned_variant(&item_id, Some(&variant_id), first.revision)
+            .unwrap(),
+        pf_catalog::VariantPinCommitResult::Committed(_)
+    ));
+    let pinned = provider(&root, &state).snapshot().unwrap();
+    assert_eq!(
+        pinned.user_projection.pinned_variant_ids.get(&item_id),
+        Some(&variant_id)
+    );
+    assert!(matches!(
+        p.set_pinned_variant(&item_id, None, first.revision)
+            .unwrap(),
+        pf_catalog::VariantPinCommitResult::RevisionConflict { .. }
+    ));
+    assert!(matches!(
+        p.set_pinned_variant(&item_id, None, pinned.revision)
+            .unwrap(),
+        pf_catalog::VariantPinCommitResult::Committed(_)
+    ));
+    assert!(
+        provider(&root, &state)
+            .snapshot()
+            .unwrap()
+            .user_projection
+            .pinned_variant_ids
+            .is_empty()
+    );
+}
+
+#[test]
 fn concurrent_favorite_commits_compare_and_swap() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");

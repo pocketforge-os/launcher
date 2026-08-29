@@ -1,0 +1,25 @@
+[package]
+name = "pf-shell"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc = "0.2.175"
+pf-catalog = { path = "../pf-catalog" }
+pf-shell-core = { path = "../pf-shell-core" }
+pf-framehost.workspace = true
+pf-input-map.workspace = true
+pf-ports.workspace = true
+pf-scene.workspace = true
+pf-theme.workspace = true
+png = "0.17.16"
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+tempfile = "3.21.0"
+
+[lints]
+workspace = true

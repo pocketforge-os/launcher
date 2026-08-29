@@ -1,0 +1,21 @@
+{
+  "schema_version": 1, "device_id": "pocketforge-sim-gamepad", "protected_actions": ["SafeReturn"],
+  "physical_controls": [
+    {"position":"east","printed_label":"A","input_code":"BTN_EAST","fallback_glyph":{"source":"pocketforge","id":"pf-face-east"}},
+    {"position":"south","printed_label":"B","input_code":"BTN_SOUTH","fallback_glyph":{"source":"pocketforge","id":"pf-face-south"}},
+    {"position":"guide","printed_label":"Guide","input_code":"BTN_MODE","fallback_glyph":{"source":"pocketforge","id":"pf-guide"}},
+    {"position":"north","printed_label":"↑","input_code":"KEY_UP","fallback_glyph":{"source":"pocketforge","id":"pf-up"}},
+    {"position":"west","printed_label":"←","input_code":"KEY_LEFT","fallback_glyph":{"source":"pocketforge","id":"pf-left"}},
+    {"position":"start","printed_label":"↓","input_code":"KEY_DOWN","fallback_glyph":{"source":"pocketforge","id":"pf-down"}},
+    {"position":"select","printed_label":"→","input_code":"KEY_RIGHT","fallback_glyph":{"source":"pocketforge","id":"pf-right"}}
+  ],
+  "effective_map": [
+    {"context":"global","action":"Activate","binding":{"shape":"single_press","controls":["east"]}},
+    {"context":"global","action":"Back","binding":{"shape":"single_press","controls":["south"]}},
+    {"context":"global","action":"SafeReturn","binding":{"shape":"single_press","controls":["guide"]}},
+    {"context":"shell","action":"Move.up","binding":{"shape":"single_press","controls":["north"]}},
+    {"context":"shell","action":"Move.down","binding":{"shape":"single_press","controls":["start"]}},
+    {"context":"shell","action":"Move.left","binding":{"shape":"single_press","controls":["west"]}},
+    {"context":"shell","action":"Move.right","binding":{"shape":"single_press","controls":["select"]}}
+  ]
+}

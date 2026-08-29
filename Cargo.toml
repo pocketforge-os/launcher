@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pf-catalog"]
+members = ["crates/pf-catalog", "crates/pf-shell-core", "crates/pf-shell"]
 resolver = "2"
 
 [workspace.package]
@@ -14,3 +14,10 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
+[workspace.dependencies]
+pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }
+pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }
+pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }
+pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }
+pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }
+pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "2bbae0e3e016b595afa2ec65b7b2579d6e9ae60b" }

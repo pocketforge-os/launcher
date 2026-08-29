@@ -1,0 +1,8 @@
+{
+  "revision": 1, "observed_at_unix_seconds": 0, "provider_results": [],
+  "items": [
+    {"id":"celeste","title":"Celeste","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"celeste","descriptor_path":"fixtures/celeste.toml","observed_digest":"fixture"}}]},
+    {"id":"sonic-mania","title":"Sonic Mania","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"sonic-mania","descriptor_path":"fixtures/sonic.toml","observed_digest":"fixture"}}]},
+    {"id":"short-hike","title":"A Short Hike","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"short-hike","descriptor_path":"fixtures/hike.toml","observed_digest":"fixture"}}]}
+  ], "user_projection":{"favorite_item_ids":[]}
+}

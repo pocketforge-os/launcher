@@ -1,4 +1,4 @@
-use pf_catalog::CatalogSnapshot;
+use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
 use pf_ports::{
@@ -13,7 +13,10 @@ use pf_prefs_port::PrefsPreferencePort;
 use pf_render::RenderNote;
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_client::{SessionClient, SocketTransport};
-use pf_shell::{EvdevActionSource, GamepadRemap, footer_prompt, safe_return_options};
+use pf_shell::{
+    EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, favorite_footer_prompt,
+    footer_prompt, safe_return_options,
+};
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -48,8 +51,26 @@ fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bo
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let snapshot: CatalogSnapshot = serde_json::from_str(include_str!("../fixtures/catalog.json"))
-        .map_err(|e| e.to_string())?;
+    let fixture_mode = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
+        || !args.iter().any(|a| a == "--fbdev");
+    let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
+    let catalog = (!fixture_mode).then(|| {
+        InstalledAppProvider::new(
+            value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"),
+            state_dir.join("favorites.json"),
+            "native",
+            "aarch64",
+        )
+    });
+    let snapshot: CatalogSnapshot = if let Some(provider) = &catalog {
+        provider
+            .snapshot()
+            .map_err(|error| format!("catalog: {error:?}"))?
+    } else {
+        serde_json::from_str(include_str!("../fixtures/catalog.json")).map_err(|e| e.to_string())?
+    };
     let theme = pf_theme::flagship();
     let reduced = env::var_os("PF_REDUCE_MOTION").is_some();
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
@@ -57,18 +78,19 @@ fn main() -> Result<(), String> {
     let options = safe_return_options(&contract);
     let glyphs =
         EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
-    let footer = footer_prompt(&glyphs);
+    let mut footer = footer_prompt(&glyphs);
+    if let Some(hint) = favorite_footer_prompt(&glyphs, false) {
+        if let Some(glyph) = hint.strip_suffix("  Favorite") {
+            footer.push('\u{1f}');
+            footer.push_str(glyph);
+        }
+    }
     let mut core = fixture_core(&snapshot, &theme, reduced);
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
         core.session_backend_unavailable_at_boot();
     }
     core.set_safe_return_options(options.iter().map(|(_, label)| label.clone()));
-    let fixture_mode = args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
-        || !args.iter().any(|a| a == "--fbdev");
-    let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let mut durable;
     let mut fixture;
     let preferences: &mut dyn PreferencePort;
@@ -109,6 +131,7 @@ fn main() -> Result<(), String> {
             &footer,
             preferences,
             glyphs,
+            catalog.as_ref().expect("fbdev catalog"),
             Path::new(session_socket),
         );
     }
@@ -173,6 +196,9 @@ fn emit_f10_evidence(
     let mut core = fixture_core(snapshot, theme, false);
     core.authority_snapshot(false);
     core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "library")?;
     core.action(&ShellAction::Custom("Search".into()));
     core.set_search_query("ridgeline");
@@ -255,6 +281,7 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_fbdev(
     host: &mut FbdevHost,
     actions: &mut dyn ActionSource,
@@ -262,6 +289,7 @@ fn run_fbdev(
     activate: &str,
     preferences: &mut dyn PreferencePort,
     map: EffectiveMap,
+    catalog: &dyn FavoriteCatalog,
     session_socket: &Path,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
@@ -338,6 +366,12 @@ fn run_fbdev(
                     })
                     .map_err(|e| format!("preferences: {e:?}"))?;
             }
+            Some(Effect::ToggleFavorite { item_id, favorite }) => {
+                match commit_favorite(catalog, &item_id, favorite) {
+                    Ok(_) => core.favorite_committed(&item_id, favorite),
+                    Err(status) => core.favorite_failed(status),
+                }
+            }
             None => {}
         }
         if before != redraw_state(core) {
@@ -348,12 +382,21 @@ fn run_fbdev(
     }
 }
 
-fn redraw_state(core: &ShellCore) -> (pf_shell_core::Presentation, usize, bool, Option<String>) {
+fn redraw_state(
+    core: &ShellCore,
+) -> (
+    pf_shell_core::Presentation,
+    usize,
+    bool,
+    Option<String>,
+    u64,
+) {
     (
         core.presentation().clone(),
         core.focus(),
         core.authority_unavailable(),
         core.session_status().map(str::to_owned),
+        core.revision(),
     )
 }
 
@@ -657,6 +700,27 @@ mod durable_tests {
 
     struct UnavailableSession;
 
+    struct AlwaysConflictingFavorites {
+        snapshot: CatalogSnapshot,
+    }
+
+    impl FavoriteCatalog for AlwaysConflictingFavorites {
+        fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+
+        fn set_favorite(
+            &self,
+            _id: &str,
+            _value: bool,
+            _expected: pf_catalog::CatalogRevision,
+        ) -> Result<pf_catalog::FavoriteCommitResult, String> {
+            Ok(pf_catalog::FavoriteCommitResult::RevisionConflict {
+                current: self.snapshot.revision,
+            })
+        }
+    }
+
     impl SessionPort for UnavailableSession {
         fn launch(
             &mut self,
@@ -672,6 +736,53 @@ mod durable_tests {
         fn history(&self) -> &[SessionEvent] {
             &[]
         }
+    }
+
+    #[test]
+    fn favorite_toggle_success_changes_home_redraw_key() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::ToggleFavorite { item_id, favorite } = core
+            .action(&ShellAction::Custom("Favorite".into()))
+            .expect("home title supports favorite toggle")
+        else {
+            panic!("favorite action must emit a toggle effect");
+        };
+        let before_commit = redraw_state(&core);
+
+        core.favorite_committed(&item_id, favorite);
+
+        assert_ne!(before_commit, redraw_state(&core));
+        assert_eq!(core.is_favorite(&item_id), favorite);
+    }
+
+    #[test]
+    fn favorite_toggle_cas_failure_changes_redraw_key_for_toast() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let catalog = AlwaysConflictingFavorites {
+            snapshot: snapshot.clone(),
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::ToggleFavorite { item_id, favorite } = core
+            .action(&ShellAction::Custom("Favorite".into()))
+            .expect("home title supports favorite toggle")
+        else {
+            panic!("favorite action must emit a toggle effect");
+        };
+        let before_failure = redraw_state(&core);
+
+        let status = commit_favorite(&catalog, &item_id, favorite).unwrap_err();
+        core.favorite_failed(status);
+
+        assert_ne!(before_failure, redraw_state(&core));
+        assert_eq!(
+            core.session_status(),
+            Some("Favorites changed elsewhere; try again")
+        );
     }
 
     #[test]

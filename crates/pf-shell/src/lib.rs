@@ -1,5 +1,6 @@
 //! Concrete shell adapters kept outside the pure reducer.
 
+use pf_catalog::{CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider};
 use pf_input_map::{
     Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
     TransactionOutcome,
@@ -196,6 +197,86 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
     }
 }
 
+/// Adds the favorite affordance only when the effective map actually resolves it.
+pub fn favorite_footer_prompt(resolver: &dyn GlyphResolver, favorite: bool) -> Option<String> {
+    match resolver.resolve(&ShellAction::Custom("Quick".into())) {
+        Ok(GlyphResult::Resolved(binding)) => {
+            let glyph = if binding.printed_label.is_empty() {
+                binding.source_fallback
+            } else {
+                binding.printed_label
+            };
+            Some(format!(
+                "{glyph}  {}",
+                if favorite { "Unfavorite" } else { "Favorite" }
+            ))
+        }
+        _ => None,
+    }
+}
+
+pub trait FavoriteCatalog {
+    /// Returns the latest immutable catalog projection.
+    ///
+    /// # Errors
+    /// Returns a provider diagnostic when the catalog cannot be read.
+    fn snapshot(&self) -> Result<CatalogSnapshot, String>;
+    /// Commits a favorite value against the expected catalog revision.
+    ///
+    /// # Errors
+    /// Returns a provider diagnostic when the overlay cannot be committed.
+    fn set_favorite(
+        &self,
+        id: &str,
+        value: bool,
+        expected: CatalogRevision,
+    ) -> Result<FavoriteCommitResult, String>;
+}
+
+impl FavoriteCatalog for InstalledAppProvider {
+    fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+        InstalledAppProvider::snapshot(self).map_err(|error| format!("{error:?}"))
+    }
+    fn set_favorite(
+        &self,
+        id: &str,
+        value: bool,
+        expected: CatalogRevision,
+    ) -> Result<FavoriteCommitResult, String> {
+        InstalledAppProvider::set_favorite(self, id, value, expected)
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
+/// Performs the catalog overlay read-modify-commit, retrying one concurrent CAS conflict.
+///
+/// # Errors
+/// Returns an honest status string when either read fails, the item disappears, or both CAS
+/// attempts conflict.
+pub fn commit_favorite(
+    catalog: &dyn FavoriteCatalog,
+    id: &str,
+    value: bool,
+) -> Result<CatalogSnapshot, String> {
+    let first = catalog.snapshot()?;
+    match catalog.set_favorite(id, value, first.revision)? {
+        FavoriteCommitResult::Committed(_) => catalog.snapshot(),
+        FavoriteCommitResult::RevisionConflict { .. } => {
+            let refreshed = catalog.snapshot()?;
+            match catalog.set_favorite(id, value, refreshed.revision)? {
+                FavoriteCommitResult::Committed(_) => catalog.snapshot(),
+                FavoriteCommitResult::RevisionConflict { .. } => {
+                    Err("Favorites changed elsewhere; try again".into())
+                }
+                FavoriteCommitResult::ItemNotFound => {
+                    Err("That title is no longer in the Library".into())
+                }
+            }
+        }
+        FavoriteCommitResult::ItemNotFound => Err("That title is no longer in the Library".into()),
+    }
+}
+
 /// Evidence-ranked Safe Return choices supported by the current physical controls. The shipped
 /// effective binding remains the per-device default and is deliberately not duplicated here.
 #[must_use]
@@ -328,7 +409,8 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        "SafeReturn" | "Quick" => ShellAction::Custom(name.into()),
+        "SafeReturn" => ShellAction::Custom(name.into()),
+        "Quick" => ShellAction::Custom("Favorite".into()),
         _ => return None,
     })
 }
@@ -356,6 +438,30 @@ mod tests {
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
 
+    struct ConflictOnce {
+        snapshot: CatalogSnapshot,
+        calls: std::sync::Mutex<usize>,
+    }
+    impl FavoriteCatalog for ConflictOnce {
+        fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+        fn set_favorite(
+            &self,
+            _id: &str,
+            _value: bool,
+            _expected: CatalogRevision,
+        ) -> Result<FavoriteCommitResult, String> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            Ok(if *calls == 1 {
+                FavoriteCommitResult::RevisionConflict { current: 2 }
+            } else {
+                FavoriteCommitResult::Committed(3)
+            })
+        }
+    }
+
     #[test]
     fn footer_only_advertises_implemented_effective_map_actions() {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
@@ -368,9 +474,25 @@ mod tests {
         assert!(!footer.contains("Search"));
         assert!(!footer.contains("Quick"));
         assert_eq!(
-            effective.resolve(&ShellAction::Custom("Quick".into())),
-            Ok(GlyphResult::UnsupportedAction)
+            favorite_footer_prompt(&effective, false).as_deref(),
+            Some("X  Favorite")
         );
+        assert_eq!(
+            favorite_footer_prompt(&effective, true).as_deref(),
+            Some("X  Unfavorite")
+        );
+    }
+
+    #[test]
+    fn favorite_commit_retries_one_cas_conflict() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let catalog = ConflictOnce {
+            snapshot,
+            calls: std::sync::Mutex::new(0),
+        };
+        commit_favorite(&catalog, "ridgeline", true).unwrap();
+        assert_eq!(*catalog.calls.lock().unwrap(), 2);
     }
     #[test]
     fn evdev_effective_map_drives_focus_and_protected_guide() {

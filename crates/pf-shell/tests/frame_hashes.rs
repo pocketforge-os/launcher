@@ -14,20 +14,20 @@ fn vertical_slice_frame_hashes_are_stable() {
     );
     let lines = String::from_utf8(run.stdout).unwrap();
     for expected in [
-        "ff4937d23307cbd20fe438f33eaacd545d899cbb503a32cc80787ee6f6b0a7c7  ",
-        "e3d1cce4b375d1c0ccde3df6cb2bb76f7f71f612907a07514dfd89d9670aa8ae  ",
-        "f9f4e1a90ac2092ba013078f9e160e400aac247e35e4a97800770a4669c0a8f2  ",
-        "4862da723def81878c1ca491b37cd6b20361de9d2cac5c234807d3c241587a6f  ",
-        "c79da4ebc7c4c567e1d8a4e30085dbb3cdc1738b4c9da363cdf5faa496b45017  ",
-        "2865186161371bfe2f18ca438a7a087faefc1bfb223009f7321b192631b63334  ",
-        "071570a0d4db0ea37f85546c780f464d0fc097724cabdca9a3b3fed5818ccbe6  ",
-        "110d95adac519f2907cb2f9679749b02a7867d159f783b541f235840414e5490  ",
+        "f784ca679181183cef5a368efb2ac16785f39afffcdf8219e34ced2dc6d3475a  ",
+        "14f95fdcd4875cf08c1109df11e74f690ab1208eaf6fda9c5ebd3a3afcc196c3  ",
+        "8d5491d8be2e776fb817783c1211dd5b87aea4874dec45b985d231ac8081e0c4  ",
+        "2d5bf8bfe2ba06eb7967adab05de52de47bfd6a73bfd1ce14f1189496183a374  ",
+        "ed834653df734bce10b27975dd9902fb522cfbb2adbea1b540d2082a36199915  ",
+        "d183cf77d9516f39e2dca6f2c86ccb57b2fad5dc29d1c39acc0fdd7e99558a45  ",
+        "20930cc253e2f9b91753d764f1f288ebc2ff66092ecb839218080e667ad0ec89  ",
+        "c536f4a909a8e2bc41958884baf187e77cf4e6c24c607536c15c98692daf15af  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("e3d1cce"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("14f95fd"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("4862da7"),
+        lines.lines().nth(3).unwrap().starts_with("2d5bf8b"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -87,6 +87,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("ac77458414a703fc7ac332fc481bc2f3291b3e0cdb69dff2e163569c7e8cfe30  ")
+        transcript.contains("79693b01d9a8f7b916a062209af509011e62181ea133e842eaf461ea30ceeb34  ")
     );
 }

@@ -2,9 +2,10 @@ use pf_catalog::CatalogSnapshot;
 use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
 use pf_ports::{
-    ActionEvent, ActionPoll, ActionSource, Deadline, FrameHost, LaunchResult, MonotonicTime,
-    ObservedSessionState, SessionError, SessionEvent, SessionPoll, SessionPort, ShellAction,
-    TerminalReceipt,
+    ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
+    FakePreferencePort, FrameHost, LaunchResult, MonotonicTime, ObservedSessionState,
+    PreferenceKey, PreferencePort, PreferenceValue, SessionError, SessionEvent, SessionPoll,
+    SessionPort, ShellAction, TerminalReceipt,
 };
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_shell::{EvdevActionSource, footer_prompt};
@@ -31,6 +32,9 @@ fn main() -> Result<(), String> {
     let footer = footer_prompt(&glyphs);
     let mut core = ShellCore::boot(&snapshot, &theme, reduced);
     core.authority_snapshot(false);
+    let mut preferences = fixture_preferences();
+    core.load_preferences(&preferences, !args.iter().any(|a| a == "--first-run"))
+        .map_err(|e| format!("preferences: {e:?}"))?;
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -51,7 +55,13 @@ fn main() -> Result<(), String> {
                 .ok_or("shell has no frame")?,
         )
         .map_err(|e| e.to_string())?;
-        return run_fbdev(&mut host, &mut actions, &mut core, &footer);
+        return run_fbdev(
+            &mut host,
+            &mut actions,
+            &mut core,
+            &footer,
+            &mut preferences,
+        );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
@@ -63,6 +73,14 @@ fn main() -> Result<(), String> {
         orientation: Orientation::Landscape,
     };
     let mut host = OffscreenHost::new(metrics);
+    if args.iter().any(|a| a == "--settings-evidence") {
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(&mut host, &core, &footer, out, "settings")?;
+        core.reset_first_run();
+        emit(&mut host, &core, &footer, out, "first-run")?;
+        return Ok(());
+    }
     emit(&mut host, &core, &footer, out, "boot-home")?;
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     emit(&mut host, &core, &footer, out, "focus-moved")?;
@@ -198,6 +216,7 @@ fn run_fbdev(
     actions: &mut dyn ActionSource,
     core: &mut ShellCore,
     activate: &str,
+    preferences: &mut dyn PreferencePort,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = InteractiveSession::default();
@@ -231,6 +250,14 @@ fn run_fbdev(
                     .map_err(|e| format!("{e:?}"))?;
             }
             Some(Effect::EnterRecovery) => return Ok(()),
+            Some(Effect::ChangePreference(change)) => {
+                preferences
+                    .submit_change(change)
+                    .map_err(|e| format!("preferences: {e:?}"))?;
+                core.drive_preferences(preferences)
+                    .map_err(|e| format!("preferences: {e:?}"))?;
+            }
+            Some(Effect::ResetFirstRun) => core.reset_first_run(),
             None => {}
         }
         if before != (core.presentation().clone(), core.focus()) {
@@ -241,6 +268,23 @@ fn run_fbdev(
             }
         }
     }
+}
+
+fn fixture_preferences() -> FakePreferencePort {
+    let values = [
+        ("textScale", PreferenceValue::Text("100%".into())),
+        ("highContrast", PreferenceValue::Bool(false)),
+        ("reduceMotion", PreferenceValue::Bool(false)),
+        ("reduceFlashing", PreferenceValue::Bool(false)),
+    ]
+    .into_iter()
+    .map(|(key, value)| EffectivePreference {
+        key: PreferenceKey(key.into()),
+        effective: value.clone(),
+        stored: value,
+        applied: true,
+    });
+    FakePreferencePort::new(values, ChangeAuthority("user".into()))
 }
 
 #[derive(Default)]

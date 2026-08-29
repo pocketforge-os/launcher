@@ -13,8 +13,9 @@
 
 use pf_catalog::{AppKind, Availability, CatalogSnapshot, Variant};
 use pf_ports::{
-    Deadline, LaunchRequest, LaunchResult, MonotonicTime, ObservedSessionState, SessionEvent,
-    SessionPoll, SessionPort, ShellAction, TerminalReceipt,
+    ChangeAuthority, Deadline, EffectivePreference, LaunchRequest, LaunchResult, MonotonicTime,
+    ObservedSessionState, PreferenceChange, PreferenceKey, PreferencePoll, PreferencePort,
+    PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, TerminalReceipt,
 };
 use pf_scene::{AxisMove, Bounds, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics};
 use pf_theme::Theme;
@@ -32,6 +33,7 @@ pub enum Route {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Presentation {
+    FirstRun,
     Booting,
     Ready,
     Starting,
@@ -42,11 +44,28 @@ pub enum Presentation {
     RecoveryRequired,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Launch(LaunchRequest),
     SafeReturn,
     EnterRecovery,
+    ChangePreference(PreferenceChange),
+    ResetFirstRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsRoom {
+    Display,
+    Controls,
+    System,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DisplayPreference {
+    key: &'static str,
+    label: &'static str,
+    effective: PreferenceValue,
+    interactive: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +107,13 @@ pub struct ShellCore {
     just_returned: bool,
     motion_ms: u32,
     reduced_motion: bool,
+    high_contrast: bool,
+    reduce_flashing: bool,
+    text_scale: u16,
+    settings_room: SettingsRoom,
+    display_preferences: Vec<DisplayPreference>,
+    first_run_complete: bool,
+    safe_return_binding: String,
 }
 
 impl ShellCore {
@@ -131,7 +157,126 @@ impl ShellCore {
                 .expect("motion.launch")
                 .duration_ms,
             reduced_motion,
+            high_contrast: false,
+            reduce_flashing: false,
+            text_scale: 100,
+            settings_room: SettingsRoom::Display,
+            display_preferences: Vec::new(),
+            first_run_complete: true,
+            safe_return_binding: "PF · the button below the d-pad".into(),
         }
+    }
+
+    /// Loads Settings exclusively through the runtime preference boundary. A row is interactive
+    /// only when the port reports an applied value; stored-only values remain visibly honest.
+    pub fn load_preferences(
+        &mut self,
+        port: &dyn PreferencePort,
+        first_run_complete: bool,
+    ) -> Result<(), pf_ports::PreferenceError> {
+        self.display_preferences.clear();
+        for (key, label, default) in [
+            (
+                "textScale",
+                "Text size",
+                PreferenceValue::Text("100%".into()),
+            ),
+            (
+                "highContrast",
+                "High contrast",
+                PreferenceValue::Bool(false),
+            ),
+            (
+                "reduceMotion",
+                "Reduce motion",
+                PreferenceValue::Bool(false),
+            ),
+            (
+                "reduceFlashing",
+                "Reduce flashing",
+                PreferenceValue::Bool(false),
+            ),
+        ] {
+            let observed = port.read(&PreferenceKey(key.into()))?;
+            let effective = observed.as_ref().map_or(default, |p| p.effective.clone());
+            let interactive = observed.as_ref().is_some_and(|p| p.applied);
+            self.apply_effective(key, &effective);
+            self.display_preferences.push(DisplayPreference {
+                key,
+                label,
+                effective,
+                interactive,
+            });
+        }
+        self.first_run_complete = first_run_complete;
+        if !first_run_complete {
+            self.presentation = Presentation::FirstRun;
+            self.focus = 0;
+        }
+        Ok(())
+    }
+
+    pub fn preference_changed(&mut self, change: &EffectivePreference) {
+        if !change.applied {
+            return;
+        }
+        self.apply_effective(&change.key.0, &change.effective);
+        if let Some(row) = self
+            .display_preferences
+            .iter_mut()
+            .find(|row| row.key == change.key.0)
+        {
+            row.effective = change.effective.clone();
+            row.interactive = true;
+        }
+    }
+
+    pub fn drive_preferences(
+        &mut self,
+        port: &mut dyn PreferencePort,
+    ) -> Result<(), pf_ports::PreferenceError> {
+        while let PreferencePoll::Changed(change) =
+            port.next_change(Deadline(MonotonicTime::ZERO))?
+        {
+            self.preference_changed(&change);
+        }
+        Ok(())
+    }
+
+    fn apply_effective(&mut self, key: &str, value: &PreferenceValue) {
+        match (key, value) {
+            ("textScale", PreferenceValue::Text(value)) => {
+                self.text_scale = value.trim_end_matches('%').parse().unwrap_or(100)
+            }
+            ("highContrast", PreferenceValue::Bool(value)) => self.high_contrast = *value,
+            ("reduceMotion", PreferenceValue::Bool(value)) => {
+                self.reduced_motion = *value;
+                self.motion_ms = if *value { 0 } else { 180 };
+            }
+            ("reduceFlashing", PreferenceValue::Bool(value)) => self.reduce_flashing = *value,
+            _ => {}
+        }
+    }
+
+    pub fn set_safe_return_binding(&mut self, label: impl Into<String>) {
+        self.safe_return_binding = label.into();
+    }
+    pub fn reset_first_run(&mut self) {
+        self.first_run_complete = false;
+        self.presentation = Presentation::FirstRun;
+        self.focus = 0;
+    }
+    #[must_use]
+    pub const fn text_scale(&self) -> u16 {
+        self.text_scale
+    }
+    #[must_use]
+    pub const fn high_contrast(&self) -> bool {
+        self.high_contrast
+    }
+    #[must_use]
+    pub const fn reduce_flashing(&self) -> bool {
+        self.reduce_flashing
     }
 
     pub fn authority_snapshot(&mut self, recovery_available: bool) {
@@ -234,6 +379,32 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
+        if self.presentation == Presentation::FirstRun {
+            return match action {
+                ShellAction::Custom(name) if name == "Start" => {
+                    self.first_run_complete = true;
+                    self.presentation = Presentation::Ready;
+                    self.focus = 0;
+                    None
+                }
+                ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
+                    self.focus = (self.focus + 1).min(self.display_preferences.len());
+                    None
+                }
+                ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
+                    self.focus = self.focus.saturating_sub(1);
+                    None
+                }
+                ShellAction::Activate if self.focus == self.display_preferences.len() => {
+                    self.first_run_complete = true;
+                    self.presentation = Presentation::Ready;
+                    self.focus = 0;
+                    None
+                }
+                ShellAction::Activate => self.preference_effect(self.focus),
+                _ => None,
+            };
+        }
         if matches!(self.presentation, Presentation::Crash) {
             return match action {
                 ShellAction::Back => {
@@ -288,6 +459,22 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Right) if self.route == Route::Library => {
                 self.go(Route::Settings)
             }
+            ShellAction::Move(AxisMove::Right) if self.route == Route::Settings => {
+                self.settings_room = match self.settings_room {
+                    SettingsRoom::Display => SettingsRoom::Controls,
+                    SettingsRoom::Controls | SettingsRoom::System => SettingsRoom::System,
+                };
+                self.focus = 0;
+            }
+            ShellAction::Move(AxisMove::Left)
+                if self.route == Route::Settings && self.settings_room != SettingsRoom::Display =>
+            {
+                self.settings_room = match self.settings_room {
+                    SettingsRoom::System => SettingsRoom::Controls,
+                    SettingsRoom::Controls | SettingsRoom::Display => SettingsRoom::Display,
+                };
+                self.focus = 0;
+            }
             ShellAction::Move(AxisMove::Left) if self.route == Route::Settings => {
                 self.go(Route::Library)
             }
@@ -307,6 +494,19 @@ impl ShellCore {
     }
 
     fn activate(&mut self) -> Option<Effect> {
+        if self.route == Route::Settings {
+            if self.recovery_available
+                && self.settings_room == SettingsRoom::Display
+                && self.focus == self.display_preferences.len().max(1)
+            {
+                return Some(Effect::EnterRecovery);
+            }
+            return match self.settings_room {
+                SettingsRoom::Display => self.preference_effect(self.focus),
+                SettingsRoom::System if self.focus == 1 => Some(Effect::ResetFirstRun),
+                _ => None,
+            };
+        }
         if self.route == Route::Settings
             && self.recovery_available
             && self.focus + 1 == self.focus_count()
@@ -410,6 +610,30 @@ impl ShellCore {
         Some(Effect::Launch(LaunchRequest { item_id: request }))
     }
 
+    fn preference_effect(&self, index: usize) -> Option<Effect> {
+        let row = self.display_preferences.get(index)?;
+        if !row.interactive {
+            return None;
+        }
+        let value = match &row.effective {
+            PreferenceValue::Bool(value) => PreferenceValue::Bool(!value),
+            PreferenceValue::Text(value) => PreferenceValue::Text(
+                match value.as_str() {
+                    "100%" => "150%",
+                    "150%" => "200%",
+                    _ => "100%",
+                }
+                .into(),
+            ),
+            PreferenceValue::Integer(value) => PreferenceValue::Integer(*value),
+        };
+        Some(Effect::ChangePreference(PreferenceChange {
+            key: PreferenceKey(row.key.into()),
+            value,
+            authority: ChangeAuthority("user".into()),
+        }))
+    }
+
     fn go(&mut self, route: Route) {
         self.saved_focus[self.route_index()] = self.focus;
         if route == Route::Quick {
@@ -439,7 +663,13 @@ impl ShellCore {
                 .selected_item
                 .map_or(0, |item| self.ready_variants(item).len())
                 .max(1),
-            Route::Settings => 1 + usize::from(self.recovery_available),
+            Route::Settings => match self.settings_room {
+                SettingsRoom::Display => {
+                    self.display_preferences.len().max(1) + usize::from(self.recovery_available)
+                }
+                SettingsRoom::Controls => 2,
+                SettingsRoom::System => 2 + usize::from(self.recovery_available),
+            },
             Route::Quick => 2,
         }
     }
@@ -532,6 +762,7 @@ impl ShellCore {
             ),
         ];
         match self.presentation {
+            Presentation::FirstRun => self.first_run_nodes(&mut children, w),
             Presentation::Crash => self.crash_nodes(&mut children, w, h),
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
@@ -578,7 +809,11 @@ impl ShellCore {
             Route::Search => "SEARCH",
             Route::Details => "DETAILS",
             Route::VariantChooser => "HOW DO YOU WANT TO PLAY?",
-            Route::Settings => "SETTINGS",
+            Route::Settings => match self.settings_room {
+                SettingsRoom::Display => "SETTINGS · DISPLAY",
+                SettingsRoom::Controls => "SETTINGS · CONTROLS",
+                SettingsRoom::System => "SETTINGS · SYSTEM",
+            },
             Route::Quick => unreachable!(),
         };
         out.push(node(
@@ -921,6 +1156,8 @@ impl ShellCore {
                     "--state-unavailable-surface",
                 ));
             }
+        } else if self.route == Route::Settings {
+            self.settings_nodes(out, w);
         } else {
             let labels: Vec<&str> = if self.recovery_available {
                 vec![
@@ -950,6 +1187,191 @@ impl ShellCore {
                 out.push(n);
             }
         }
+    }
+
+    fn settings_nodes(&self, out: &mut Vec<Node>, w: f32) {
+        let labels: Vec<(String, bool)> = match self.settings_room {
+            SettingsRoom::Display => self
+                .display_preferences
+                .iter()
+                .map(|row| {
+                    let value = match &row.effective {
+                        PreferenceValue::Bool(v) => {
+                            if *v {
+                                "On".into()
+                            } else {
+                                "Off".into()
+                            }
+                        }
+                        PreferenceValue::Text(v) => v.clone(),
+                        PreferenceValue::Integer(v) => v.to_string(),
+                    };
+                    (
+                        if row.interactive {
+                            format!("{} · {value}", row.label)
+                        } else {
+                            format!("{} · — Not supported on this device", row.label)
+                        },
+                        row.interactive,
+                    )
+                })
+                .collect(),
+            SettingsRoom::Controls => vec![
+                (
+                    "Button remap · preview and gamepad-safe rollback".into(),
+                    true,
+                ),
+                (
+                    format!(
+                        "Safe Return · {} · choose binding",
+                        self.safe_return_binding
+                    ),
+                    true,
+                ),
+            ],
+            SettingsRoom::System => vec![
+                ("Device · PocketForge simulator · Runtime 1".into(), false),
+                ("Show accessibility comfort panel again".into(), true),
+            ],
+        };
+        for (i, (label, interactive)) in labels.into_iter().enumerate() {
+            let mut n = node(
+                &format!("settings-row-{i}"),
+                if interactive {
+                    Role::Button
+                } else {
+                    Role::Text
+                },
+                &label,
+                48.0,
+                180.0 + i as f32 * 72.0 * f32::from(self.text_scale) / 100.0,
+                w - 96.0,
+                58.0 * f32::from(self.text_scale) / 100.0,
+                if !interactive {
+                    "--state-unavailable-surface"
+                } else if i == self.focus {
+                    "--state-focused-ring"
+                } else {
+                    "--state-rest-surface"
+                },
+            );
+            n.state.focused = i == self.focus;
+            n.state.disabled = !interactive;
+            if interactive {
+                n.action = Some(NodeAction::Activate);
+            }
+            out.push(n);
+        }
+        if self.settings_room == SettingsRoom::Display {
+            out.push(node(
+                "unsupported-note",
+                Role::Text,
+                "ⓘ Brightness and mono audio are unavailable; no control is shown.",
+                48.0,
+                590.0,
+                w - 96.0,
+                44.0,
+                "--color-text-secondary",
+            ));
+            if self.recovery_available {
+                let i = self.display_preferences.len().max(1);
+                let mut recovery = node(
+                    "settings-recovery",
+                    Role::Button,
+                    "Open independent recovery",
+                    48.0,
+                    520.0,
+                    w - 96.0,
+                    54.0,
+                    if self.focus == i {
+                        "--state-focused-ring"
+                    } else {
+                        "--state-rest-surface"
+                    },
+                );
+                recovery.state.focused = self.focus == i;
+                recovery.action = Some(NodeAction::Activate);
+                out.push(recovery);
+            }
+        }
+        if self.settings_room == SettingsRoom::Controls {
+            out.push(node("safe-options", Role::Text, "Options · Select + Start · Hold PF (about 1s) · Select + Start, press twice · Double-tap PF · Hold Select + L1 + R1 (deliberately hard to press)", 48.0, 350.0, w - 96.0, 100.0, "--color-text-secondary"));
+        }
+    }
+
+    fn first_run_nodes(&self, out: &mut Vec<Node>, w: f32) {
+        out.clear();
+        out.push(node(
+            "first-run-title",
+            Role::Heading,
+            "FIRST RUN · Make it comfortable",
+            w / 2.0 - 340.0,
+            54.0,
+            680.0,
+            56.0,
+            "--state-rest-text",
+        ));
+        out.push(node(
+            "first-run-copy",
+            Role::Text,
+            "All of this lives in Settings → Accessibility and can change any time.",
+            w / 2.0 - 340.0,
+            112.0,
+            680.0,
+            48.0,
+            "--color-text-secondary",
+        ));
+        for (i, row) in self
+            .display_preferences
+            .iter()
+            .filter(|row| row.interactive)
+            .enumerate()
+        {
+            let mut n = node(
+                &format!("comfort-{i}"),
+                Role::Button,
+                row.label,
+                w / 2.0 - 340.0,
+                180.0 + i as f32 * 64.0,
+                680.0,
+                52.0,
+                if i == self.focus {
+                    "--state-focused-ring"
+                } else {
+                    "--state-rest-surface"
+                },
+            );
+            n.state.focused = i == self.focus;
+            n.action = Some(NodeAction::Activate);
+            out.push(n);
+        }
+        out.push(node(
+            "safe-return-teach",
+            Role::Text,
+            &format!("{} returns you here.", self.safe_return_binding),
+            w / 2.0 - 340.0,
+            470.0,
+            680.0,
+            48.0,
+            "--color-text-secondary",
+        ));
+        let mut continue_node = node(
+            "continue",
+            Role::Button,
+            "Continue · START",
+            w / 2.0 - 340.0,
+            540.0,
+            680.0,
+            54.0,
+            if self.focus == self.display_preferences.len() {
+                "--state-focused-ring"
+            } else {
+                "--state-rest-surface"
+            },
+        );
+        continue_node.state.focused = self.focus == self.display_preferences.len();
+        continue_node.action = Some(NodeAction::Activate);
+        out.push(continue_node);
     }
     fn quick_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
         // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
@@ -1246,6 +1668,7 @@ mod tests {
     use pf_catalog::{
         AppKind, AppManifestRef, Presentation as CP, Provenance, UserProjection, Variant,
     };
+    use pf_ports::{FakePreferencePort, PreferenceChangeResult};
     use std::path::PathBuf;
     fn snapshot() -> CatalogSnapshot {
         CatalogSnapshot {
@@ -1292,6 +1715,117 @@ mod tests {
         let mut c = ShellCore::boot(&snapshot(), &pf_theme::flagship(), false);
         c.authority_snapshot(false);
         c
+    }
+    fn preferences(applied: bool) -> FakePreferencePort {
+        FakePreferencePort::new(
+            [
+                EffectivePreference {
+                    key: PreferenceKey("textScale".into()),
+                    effective: PreferenceValue::Text("100%".into()),
+                    stored: PreferenceValue::Text("100%".into()),
+                    applied,
+                },
+                EffectivePreference {
+                    key: PreferenceKey("highContrast".into()),
+                    effective: PreferenceValue::Bool(false),
+                    stored: PreferenceValue::Bool(false),
+                    applied,
+                },
+                EffectivePreference {
+                    key: PreferenceKey("reduceMotion".into()),
+                    effective: PreferenceValue::Bool(false),
+                    stored: PreferenceValue::Bool(false),
+                    applied,
+                },
+                EffectivePreference {
+                    key: PreferenceKey("reduceFlashing".into()),
+                    effective: PreferenceValue::Bool(false),
+                    stored: PreferenceValue::Bool(false),
+                    applied,
+                },
+            ],
+            ChangeAuthority("user".into()),
+        )
+    }
+    #[test]
+    fn supported_rows_change_only_after_applied_observation() {
+        let mut c = core();
+        let mut port = preferences(true);
+        c.load_preferences(&port, true).unwrap();
+        c.go(Route::Settings);
+        let Some(Effect::ChangePreference(change)) = c.action(&ShellAction::Activate) else {
+            panic!("supported row must be interactive")
+        };
+        assert_eq!(
+            c.text_scale(),
+            100,
+            "submission is never rendered optimistically"
+        );
+        assert_eq!(
+            port.submit_change(change).unwrap(),
+            PreferenceChangeResult::Accepted
+        );
+        c.drive_preferences(&mut port).unwrap();
+        assert_eq!(c.text_scale(), 150);
+
+        let mut unsupported = core();
+        unsupported
+            .load_preferences(&preferences(false), true)
+            .unwrap();
+        unsupported.go(Route::Settings);
+        assert_eq!(unsupported.action(&ShellAction::Activate), None);
+        let scene = unsupported
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(format!("{scene:?}").contains("Not supported on this device"));
+    }
+    #[test]
+    fn applied_accessibility_fixture_is_live_and_first_run_is_once_only() {
+        let mut c = core();
+        c.load_preferences(&preferences(true), false).unwrap();
+        assert_eq!(c.presentation(), &Presentation::FirstRun);
+        for change in [
+            ("textScale", PreferenceValue::Text("200%".into())),
+            ("highContrast", PreferenceValue::Bool(true)),
+            ("reduceMotion", PreferenceValue::Bool(true)),
+            ("reduceFlashing", PreferenceValue::Bool(true)),
+        ] {
+            c.preference_changed(&EffectivePreference {
+                key: PreferenceKey(change.0.into()),
+                effective: change.1.clone(),
+                stored: change.1,
+                applied: true,
+            });
+        }
+        assert_eq!(
+            (
+                c.text_scale(),
+                c.high_contrast(),
+                c.reduced_motion(),
+                c.reduce_flashing()
+            ),
+            (200, true, true, true)
+        );
+        c.action(&ShellAction::Custom("Start".into()));
+        assert_eq!(c.presentation(), &Presentation::Ready);
+        c.load_preferences(&preferences(true), true).unwrap();
+        assert_eq!(c.presentation(), &Presentation::Ready);
+        c.reset_first_run();
+        assert_eq!(c.presentation(), &Presentation::FirstRun);
+        assert_eq!(
+            c.action(&ShellAction::Back),
+            None,
+            "Back cannot abandon first run"
+        );
     }
     #[test]
     fn back_restores_route_focus_and_one_owner() {

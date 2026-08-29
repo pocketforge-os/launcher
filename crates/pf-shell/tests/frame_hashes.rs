@@ -39,3 +39,31 @@ fn vertical_slice_frame_hashes_are_stable() {
         assert!(lines.contains(route), "missing F10 evidence route {route}");
     }
 }
+
+#[test]
+fn settings_and_first_run_frame_hashes_are_stable() {
+    let out = tempfile::tempdir().unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
+        .args([
+            "--offscreen",
+            "--settings-evidence",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let transcript = String::from_utf8(run.stdout).unwrap();
+    assert!(
+        transcript.contains("65211c13df7af5e8922830219bcec8a734892e695f6a654cd23e3ff4d7a384f5  ")
+    );
+    assert!(
+        transcript.contains("37eefd15618388a50107ecf2cb963bdaa4009171e4a7dcc922062d2ef77c762b  ")
+    );
+    assert!(out.path().join("settings.png").is_file());
+    assert!(out.path().join("first-run.png").is_file());
+}

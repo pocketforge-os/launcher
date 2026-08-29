@@ -1164,8 +1164,7 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
     if item
         .icon_reference
         .as_deref()
-        .filter(|_| item.icon_decodable)
-        .is_some()
+        .is_some_and(|_| item.icon_decodable)
     {
         // Interim until the render stack rasterizes catalog images: keep the procedural
         // art well, but omit the edition plate so real art remains visually distinct.

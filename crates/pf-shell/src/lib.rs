@@ -133,16 +133,40 @@ pub fn prompt(resolver: &dyn GlyphResolver, action: &ShellAction) -> String {
 
 /// Builds the footer from implemented actions that are present in the effective map.
 pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
-    match resolver.resolve(&ShellAction::Activate) {
+    let open = match resolver.resolve(&ShellAction::Activate) {
         Ok(GlyphResult::Resolved(binding)) => {
             let glyph = if binding.printed_label.is_empty() {
-                binding.source_fallback
+                if binding.source_fallback.eq_ignore_ascii_case("guide") {
+                    "PF".into()
+                } else {
+                    binding.source_fallback
+                }
             } else {
                 binding.printed_label
             };
             format!("{glyph}  Open")
         }
         _ => String::new(),
+    };
+    let safe = match resolver.resolve(&ShellAction::Custom("SafeReturn".into())) {
+        Ok(GlyphResult::Resolved(binding)) => {
+            let glyph = if binding.printed_label.is_empty() {
+                if binding.source_fallback == "pf-guide" {
+                    "PF".into()
+                } else {
+                    binding.source_fallback
+                }
+            } else {
+                binding.printed_label
+            };
+            format!("{glyph}  Safe Return · button below the d-pad")
+        }
+        _ => "Select+Start  Safe Return".into(),
+    };
+    if open.is_empty() {
+        safe
+    } else {
+        format!("{open}     {safe}")
     }
 }
 
@@ -187,7 +211,10 @@ mod tests {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let effective = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let footer = footer_prompt(&effective);
-        assert_eq!(footer, "A  Open");
+        assert_eq!(
+            footer,
+            "A  Open     PF  Safe Return · button below the d-pad"
+        );
         assert!(!footer.contains("Search"));
         assert!(!footer.contains("Quick"));
         assert_eq!(

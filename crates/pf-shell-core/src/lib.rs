@@ -1054,10 +1054,10 @@ impl ShellCore {
     }
 }
 
-fn edition_plate_nodes(
+fn procedural_art_nodes(
     id: &str,
     title: &str,
-    edition: &str,
+    edition: Option<&str>,
     context: &str,
     x: f32,
     y: f32,
@@ -1087,11 +1087,23 @@ fn edition_plate_nodes(
     let home = context == "home-card";
     let kind_y = if home { y + 166.0 } else { y + 142.0 };
     let label_y = if home { y + 210.0 } else { y + 176.0 };
-    vec![
+    let mut nodes = vec![
+        // Card labels remain available to assistive consumers, but the current renderer
+        // also paints them. Cover the inset above the art well so no glyph fragments leak.
+        node(
+            &format!("{context}-label-clip-{id}"),
+            Role::Group,
+            "",
+            x,
+            y - 8.0,
+            width,
+            12.0,
+            token,
+        ),
         node(
             &format!("{context}-art-{id}"),
             Role::Group,
-            &format!("Procedural art for {title}"),
+            "",
             x + 8.0,
             y,
             width - 16.0,
@@ -1118,7 +1130,9 @@ fn edition_plate_nodes(
             58.0,
             token,
         ),
-        node(
+    ];
+    if let Some(edition) = edition {
+        nodes.push(node(
             &format!("{context}-plate-{id}"),
             Role::Text,
             edition,
@@ -1127,62 +1141,40 @@ fn edition_plate_nodes(
             width - 24.0,
             24.0,
             token,
-        ),
-        node(
-            &format!("{context}-title-{id}"),
-            Role::Text,
-            title,
-            x,
-            label_y,
-            width,
-            28.0,
-            if focused {
-                "--state-focused-text"
-            } else {
-                "--color-text-secondary"
-            },
-        ),
-    ]
+        ));
+    }
+    nodes.push(node(
+        &format!("{context}-title-{id}"),
+        Role::Text,
+        title,
+        x,
+        label_y,
+        width,
+        28.0,
+        if focused {
+            "--state-focused-text"
+        } else {
+            "--color-text-secondary"
+        },
+    ));
+    nodes
 }
 
 fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
-    if let Some(reference) = item
+    if item
         .icon_reference
         .as_deref()
         .filter(|_| item.icon_decodable)
+        .is_some()
     {
-        let home = context == "home-card";
-        return vec![
-            node(
-                &format!("{context}-catalog-art-{}", item.id),
-                Role::Group,
-                &format!("Catalog art for {} from {reference}", item.title),
-                x + 8.0,
-                y,
-                width - 16.0,
-                if home { 158.0 } else { 136.0 },
-                "--state-rest-surface",
-            ),
-            node(
-                &format!("{context}-title-{}", item.id),
-                Role::Text,
-                &item.title,
-                x,
-                if home { y + 210.0 } else { y + 176.0 },
-                width,
-                28.0,
-                if focused {
-                    "--state-focused-text"
-                } else {
-                    "--color-text-secondary"
-                },
-            ),
-        ];
+        // Interim until the render stack rasterizes catalog images: keep the procedural
+        // art well, but omit the edition plate so real art remains visually distinct.
+        return procedural_art_nodes(&item.id, &item.title, None, context, x, y, width, focused);
     }
-    edition_plate_nodes(
+    procedural_art_nodes(
         &item.id,
         &item.title,
-        kind_text(&item.kind),
+        Some(kind_text(&item.kind)),
         context,
         x,
         y,
@@ -1589,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn edition_plate_replaces_missing_or_corrupt_art_stably() {
+    fn real_art_uses_an_unframed_procedural_well_and_fallback_uses_a_plate() {
         let mut catalog_item = item(
             "plate-id",
             "Paper Comet",
@@ -1621,15 +1613,31 @@ mod tests {
             .find(|node| node.id.as_str() == "item-plate-id")
             .unwrap();
         assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-catalog-art-plate-id"
-                && node.accessible_label.contains("art/paper-comet.png")
+            node.id.as_str() == "home-card-art-plate-id" && node.accessible_label.is_empty()
         }));
+        assert!(card.children.iter().any(|node| {
+            node.id.as_str() == "home-card-label-clip-plate-id" && node.accessible_label.is_empty()
+        }));
+        assert!(
+            card.children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-motif-plate-id")
+        );
+        assert!(
+            card.children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-initial-plate-id")
+        );
         assert!(
             !card
                 .children
                 .iter()
                 .any(|node| node.id.as_str() == "home-card-plate-plate-id")
         );
+        assert!(card.children.iter().all(|node| {
+            !node.accessible_label.contains("art/paper-comet.png")
+                && !node.accessible_label.contains("Catalog art")
+        }));
 
         let mut corrupt_item = item(
             "plate-id",

@@ -504,16 +504,28 @@ impl ShellCore {
             return None;
         }
         let (w, h) = (metrics.logical_width, metrics.logical_height);
-        let mut children = vec![node(
-            "rooms",
-            Role::Text,
-            "L     Home     Library     Settings     R",
-            w / 2.0 - 220.0,
-            16.0,
-            440.0,
-            32.0,
-            "--state-rest-text",
-        )];
+        let mut children = vec![
+            node(
+                "rooms",
+                Role::Text,
+                "L     Home     Library     Settings     R",
+                w / 2.0 - 220.0,
+                16.0,
+                440.0,
+                32.0,
+                "--state-rest-text",
+            ),
+            node(
+                "status-cluster",
+                Role::Text,
+                "Wi-Fi   82%   9:41",
+                w - 248.0,
+                16.0,
+                200.0,
+                32.0,
+                "--color-text-secondary",
+            ),
+        ];
         match self.presentation {
             Presentation::Crash => self.crash_nodes(&mut children, w, h),
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
@@ -537,7 +549,7 @@ impl ShellCore {
         let root = Node::new(
             NodeId::new("quiet-console").unwrap(),
             Role::Group,
-            "Quiet Console",
+            "",
             Bounds::new(0.0, 0.0, w, h),
             "--color-surface-canvas",
         )
@@ -575,17 +587,70 @@ impl ShellCore {
             "--state-rest-text",
         ));
         if self.route == Route::Home {
+            let focused = self.items.get(self.focus);
+            let ready_count = self
+                .items
+                .iter()
+                .filter(|item| {
+                    item.variants
+                        .iter()
+                        .any(|variant| matches!(variant.availability, Availability::Ready))
+                })
+                .count();
+            out.extend([
+                node(
+                    "hero-title",
+                    Role::Heading,
+                    focused.map_or("Nothing ready", |item| item.title.as_str()),
+                    48.0,
+                    154.0,
+                    620.0,
+                    64.0,
+                    "--state-rest-text",
+                ),
+                node(
+                    "hero-status",
+                    Role::Text,
+                    if matches!(self.presentation, Presentation::Starting) {
+                        "● Starting · Game · Installed"
+                    } else {
+                        "● Ready · Game · Installed"
+                    },
+                    48.0,
+                    226.0,
+                    480.0,
+                    32.0,
+                    if matches!(self.presentation, Presentation::Starting) {
+                        "--color-text-muted"
+                    } else {
+                        "--color-status-ready"
+                    },
+                ),
+                node(
+                    "ready-now-label",
+                    Role::Heading,
+                    &format!("READY NOW · {ready_count}"),
+                    48.0,
+                    398.0,
+                    220.0,
+                    28.0,
+                    "--color-text-muted",
+                ),
+            ]);
+            let gap = 24.0;
+            let card_width = 158.0_f32.min((w - 96.0) / self.items.len().max(1) as f32 - gap);
             for (i, item) in self.items.iter().enumerate() {
                 let availability = best_availability(item);
                 let status = availability_text(availability, &self.presentation);
+                let x = 48.0 + i as f32 * (card_width + gap);
                 let mut n = node(
                     &format!("item-{}", item.id),
                     Role::Button,
                     &format!("{} — {status}", item.title),
-                    48.0 + i as f32 * 210.0,
+                    x,
+                    430.0,
+                    card_width,
                     210.0,
-                    190.0,
-                    250.0,
                     state_token(availability, i == self.focus),
                 );
                 n.action = Some(NodeAction::Activate);
@@ -594,6 +659,16 @@ impl ShellCore {
                     .variants
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
+                n.children = edition_plate_nodes(
+                    &item.id,
+                    &item.title,
+                    kind_text(&item.kind),
+                    "home-card",
+                    x,
+                    438.0,
+                    card_width,
+                    i == self.focus,
+                );
                 out.push(n);
             }
             if self.presentation == Presentation::ForcedClose {
@@ -636,22 +711,14 @@ impl ShellCore {
             let card_width = (w - 96.0 - (columns - 1) as f32 * 16.0) / columns as f32;
             for (i, item) in self.items.iter().enumerate() {
                 let availability = best_availability(item);
-                let plate = self.art_treatment(&item.id, false).expect("known item");
-                let art = match plate {
-                    ArtTreatment::CatalogArt => "ART".to_owned(),
-                    ArtTreatment::EditionPlate { palette, motif } => {
-                        format!("EDITION PLATE P{palette} M{motif}")
-                    }
-                };
                 let column = i % columns;
                 let row = i / columns;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::Button,
                     &format!(
-                        "{} · {} · {}",
+                        "{} · {}",
                         item.title,
-                        art,
                         availability_text(availability, &self.presentation)
                     ),
                     48.0 + column as f32 * (card_width + 16.0),
@@ -662,6 +729,16 @@ impl ShellCore {
                 );
                 card.state.focused = self.focus == i + 1;
                 card.action = Some(NodeAction::Activate);
+                card.children = edition_plate_nodes(
+                    &item.id,
+                    &item.title,
+                    kind_text(&item.kind),
+                    "library-card",
+                    48.0 + column as f32 * (card_width + 16.0),
+                    252.0 + row as f32 * 250.0,
+                    card_width,
+                    self.focus == i + 1,
+                );
                 out.push(card);
             }
         } else if self.route == Route::Search {
@@ -758,6 +835,16 @@ impl ShellCore {
                 w - 448.0,
                 58.0,
                 "--state-rest-text",
+            ));
+            out.extend(edition_plate_nodes(
+                &item.id,
+                &item.title,
+                kind_text(&item.kind),
+                "detail-art",
+                48.0,
+                165.0,
+                304.0,
+                false,
             ));
             for (variant_index, variant) in item.variants.iter().enumerate() {
                 out.push(node(
@@ -972,6 +1059,97 @@ impl ShellCore {
             out.push(n);
         }
     }
+}
+
+fn edition_plate_nodes(
+    id: &str,
+    title: &str,
+    edition: &str,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    focused: bool,
+) -> Vec<Node> {
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+    });
+    let motif = match (hash / 6) % 6 {
+        0 => "╱  ╱  ╱\n  ╱  ╱",
+        1 => "≈ ≈ ≈\n ≈ ≈ ≈",
+        2 => "· · · ·\n · · ·",
+        3 => "○   ◌\n  ◉",
+        4 => "⌁ ⌁ ⌁\n ⌁ ⌁",
+        _ => "\\ | /\n— ◉ —",
+    };
+    let token = [
+        "--deco-plate-a-bg",
+        "--deco-plate-b-bg",
+        "--deco-plate-c-bg",
+        "--deco-plate-d-bg",
+        "--deco-plate-e-bg",
+        "--deco-plate-f-bg",
+    ][(hash % 6) as usize];
+    let monogram = title.chars().next().unwrap_or('·').to_string();
+    let home = context == "home-card";
+    let kind_y = if home { y + 166.0 } else { y + 142.0 };
+    let label_y = if home { y + 210.0 } else { y + 176.0 };
+    vec![
+        node(
+            &format!("{context}-art-{id}"),
+            Role::Group,
+            &format!("Procedural art for {title}"),
+            x + 8.0,
+            y,
+            width - 16.0,
+            if home { 158.0 } else { 136.0 },
+            token,
+        ),
+        node(
+            &format!("{context}-motif-{id}"),
+            Role::Text,
+            motif,
+            x + 8.0,
+            y,
+            width - 16.0,
+            60.0,
+            token,
+        ),
+        node(
+            &format!("{context}-initial-{id}"),
+            Role::Text,
+            &monogram,
+            x + width * 0.27,
+            y + 72.0,
+            width * 0.46,
+            58.0,
+            token,
+        ),
+        node(
+            &format!("{context}-plate-{id}"),
+            Role::Text,
+            edition,
+            x + 12.0,
+            kind_y,
+            width - 24.0,
+            24.0,
+            token,
+        ),
+        node(
+            &format!("{context}-title-{id}"),
+            Role::Text,
+            title,
+            x,
+            label_y,
+            width,
+            28.0,
+            if focused {
+                "--state-focused-text"
+            } else {
+                "--color-text-secondary"
+            },
+        ),
+    ]
 }
 
 fn availability_text(a: &Availability, p: &Presentation) -> String {
@@ -1386,6 +1564,64 @@ mod tests {
     }
 
     #[test]
+    fn home_scene_preserves_full_anatomy() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            if node.id.as_str() == id {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find(child, id))
+        }
+
+        let core = fixture_core(vec![
+            item(
+                "ridge",
+                "Ridgeline",
+                vec![variant("native", "ridge", Availability::Ready)],
+            ),
+            item(
+                "tides",
+                "Hollow Tides",
+                vec![variant("native", "tides", Availability::Ready)],
+            ),
+        ]);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open · B Back",
+            )
+            .unwrap();
+        for (id, role) in [
+            ("hero-title", Role::Heading),
+            ("hero-status", Role::Text),
+            ("ready-now-label", Role::Heading),
+            ("status-cluster", Role::Text),
+        ] {
+            assert_eq!(find(scene.root(), id).map(|node| node.role), Some(role));
+        }
+        for id in ["ridge", "tides"] {
+            for (part, role) in [
+                ("art", Role::Group),
+                ("initial", Role::Text),
+                ("plate", Role::Text),
+                ("title", Role::Text),
+            ] {
+                let node_id = format!("home-card-{part}-{id}");
+                assert_eq!(
+                    find(scene.root(), &node_id).map(|node| node.role),
+                    Some(role),
+                    "missing Home card anatomy node {node_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn max_text_scale_routes_keep_full_truthful_labels() {
         let mut core = fixture_core(vec![item(
             "long",
@@ -1421,6 +1657,11 @@ mod tests {
             card.accessible_label
                 .contains("connect to Wi-Fi to use this edition")
         );
-        assert!(card.accessible_label.contains("EDITION PLATE"));
+        assert!(!card.accessible_label.contains("EDITION PLATE"));
+        assert!(
+            card.children
+                .iter()
+                .any(|node| node.id.as_str() == "library-card-plate-long")
+        );
     }
 }

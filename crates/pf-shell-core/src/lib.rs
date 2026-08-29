@@ -164,6 +164,7 @@ pub struct ShellCore {
     controls_flow: ControlsFlow,
     power_capabilities: Vec<PowerCapability>,
     applied_idle_policy: IdlePolicy,
+    idle_policy_loaded: bool,
     power_status: Option<String>,
     power_dialog: PowerDialog,
 }
@@ -252,6 +253,7 @@ impl ShellCore {
             controls_flow: ControlsFlow::Rows,
             power_capabilities: Vec::new(),
             applied_idle_policy: IdlePolicy::default(),
+            idle_policy_loaded: false,
             power_status: None,
             power_dialog: PowerDialog::Closed,
         }
@@ -337,14 +339,23 @@ impl ShellCore {
 
     pub fn load_power(&mut self, port: &dyn PowerPort) {
         self.bump_revision();
-        if let (Ok(capabilities), Ok(policy)) = (port.capabilities(), port.idle_policy()) {
-            self.power_capabilities = capabilities;
-            self.applied_idle_policy = policy;
-            self.power_status = None;
-        } else {
-            self.power_capabilities.clear();
-            self.power_status = Some("Power controls are unavailable".into());
+        let capabilities = port.capabilities();
+        let idle_policy = port.idle_policy();
+
+        match &capabilities {
+            Ok(capabilities) => self.power_capabilities.clone_from(capabilities),
+            Err(_) => self.power_capabilities.clear(),
         }
+        self.idle_policy_loaded = idle_policy.is_ok();
+        if let Ok(policy) = idle_policy {
+            self.applied_idle_policy = policy;
+        }
+        self.power_status = match (capabilities.is_err(), self.idle_policy_loaded) {
+            (false, true) => None,
+            (true, true) => Some("Power actions are unavailable".into()),
+            (false, false) => Some("Auto-sleep is unavailable".into()),
+            (true, false) => Some("Power controls are unavailable".into()),
+        };
     }
 
     pub fn power_request_result(&mut self, result: Result<PowerRequestResult, PowerError>) {
@@ -364,6 +375,7 @@ impl ShellCore {
         match result {
             Ok(result) => {
                 self.applied_idle_policy = result.applied;
+                self.idle_policy_loaded = true;
                 self.power_status = None;
             }
             Err(_) => self.power_status = Some("Auto-sleep could not be changed".into()),
@@ -942,7 +954,7 @@ impl ShellCore {
                 row if self.sleep_row() == Some(row) => {
                     Some(Effect::RequestPower(PowerAction::Sleep))
                 }
-                row if row == self.idle_row() => {
+                row if self.idle_policy_loaded && row == self.idle_row() => {
                     let minutes = self
                         .applied_idle_policy
                         .sleep_after
@@ -1124,7 +1136,7 @@ impl ShellCore {
                 },
                 SettingsRoom::System => 2 + usize::from(self.recovery_available),
             },
-            Route::Quick => self.idle_row() + 1,
+            Route::Quick => self.idle_row() + usize::from(self.idle_policy_loaded),
         }
     }
 
@@ -2103,15 +2115,19 @@ impl ShellCore {
         if let Some(index) = self.sleep_row() {
             rows.push((index, "sleep", "Sleep"));
         }
-        let idle_label = match self
-            .applied_idle_policy
-            .sleep_after
-            .map(|value| value.as_secs() / 60)
-        {
-            None => "Auto-sleep · Off".to_owned(),
-            Some(minutes) => format!("Auto-sleep · {minutes} min"),
-        };
-        rows.push((self.idle_row(), "idle", &idle_label));
+        let idle_label = self.idle_policy_loaded.then(|| {
+            match self
+                .applied_idle_policy
+                .sleep_after
+                .map(|value| value.as_secs() / 60)
+            {
+                None => "Auto-sleep · Off".to_owned(),
+                Some(minutes) => format!("Auto-sleep · {minutes} min"),
+            }
+        });
+        if let Some(label) = &idle_label {
+            rows.push((self.idle_row(), "idle", label));
+        }
         for (index, id, label) in rows {
             let enabled = match index {
                 2 => self.supports_power(PowerAction::PowerOff),
@@ -3397,6 +3413,92 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "quick-power-sleep")
         );
+    }
+
+    #[test]
+    fn quick_power_keeps_capabilities_when_idle_policy_load_fails() {
+        let mut core = core();
+        let mut power = FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        );
+        power.idle_policy_result = Err(PowerError::BackendUnavailable);
+
+        core.load_power(&power);
+        core.go(Route::Quick);
+        let scene = quick_scene(&core);
+        for id in ["quick-power-power-off", "quick-power-restart"] {
+            let row = scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(!row.state.disabled, "{id} should retain capability result");
+            assert_eq!(row.action, Some(NodeAction::Activate));
+        }
+        assert!(
+            !scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "quick-power-idle")
+        );
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "quick-power-status"
+                && node.accessible_label == "Auto-sleep is unavailable"
+        }));
+    }
+
+    #[test]
+    fn quick_power_keeps_idle_policy_when_capabilities_load_fails() {
+        let mut core = core();
+        let mut power = FakePowerPort::new(
+            vec![],
+            IdlePolicy {
+                sleep_after: Some(Duration::from_secs(15 * 60)),
+                power_off_after: None,
+            },
+        );
+        power.capabilities_result = Err(PowerError::BackendUnavailable);
+
+        core.load_power(&power);
+        core.go(Route::Quick);
+        let scene = quick_scene(&core);
+        let idle = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "quick-power-idle")
+            .unwrap();
+        assert_eq!(idle.accessible_label, "Auto-sleep · 15 min");
+        assert!(!idle.state.disabled);
+        for id in ["quick-power-power-off", "quick-power-restart"] {
+            let row = scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(
+                row.state.disabled,
+                "{id} should degrade without capabilities"
+            );
+            assert_eq!(row.action, None);
+        }
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "quick-power-status"
+                && node.accessible_label == "Power actions are unavailable"
+        }));
     }
 
     #[test]

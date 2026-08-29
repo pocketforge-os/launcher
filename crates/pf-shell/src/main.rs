@@ -84,7 +84,7 @@ fn main() -> Result<(), String> {
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
             str::to_owned,
         );
-        return emit_sim_frame(&core, &footer, Path::new(&path));
+        return emit_sim_frame(&mut core, &footer, Path::new(&path));
     }
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
@@ -93,7 +93,7 @@ fn main() -> Result<(), String> {
         let (mut actions, _) =
             EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
                 .map_err(|e| format!("input adapter: {e:?}"))?;
-        present_fbdev(&mut host, &mut core, &footer)?;
+        present(&mut host, &mut core, &footer)?;
         return run_fbdev(
             &mut host,
             &mut actions,
@@ -198,7 +198,7 @@ fn emit_f10_evidence(
     Ok(())
 }
 
-fn emit_sim_frame(core: &ShellCore, prompt: &str, path: &Path) -> Result<(), String> {
+fn emit_sim_frame(core: &mut ShellCore, prompt: &str, path: &Path) -> Result<(), String> {
     let width = env_dimension("PF_FB_WIDTH", 1280)?;
     let height = env_dimension("PF_FB_HEIGHT", 720)?;
     let stride = env_dimension("PF_FB_STRIDE", width * 4)?;
@@ -223,12 +223,7 @@ fn emit_sim_frame(core: &ShellCore, prompt: &str, path: &Path) -> Result<(), Str
         },
     };
     let mut host = OffscreenHost::new(metrics);
-    host.present(
-        core.scene(metrics, prompt)
-            .as_ref()
-            .ok_or("shell has no frame")?,
-    )
-    .map_err(|e| e.to_string())?;
+    present(&mut host, core, prompt)?;
     let frame = host.frame().ok_or("sim frame missing")?;
     let mut out = fs::OpenOptions::new()
         .write(true)
@@ -282,12 +277,7 @@ fn run_fbdev(
             Some(Effect::Launch(request)) => {
                 let result = session.launch(request).map_err(|e| format!("{e:?}"))?;
                 core.launch_result(&result);
-                host.present(
-                    core.scene(host.metrics(), activate)
-                        .as_ref()
-                        .ok_or("shell has no frame")?,
-                )
-                .map_err(|e| e.to_string())?;
+                present(host, core, activate)?;
                 core.drive_session(&mut session)
                     .map_err(|e| format!("{e:?}"))?;
             }
@@ -329,9 +319,7 @@ fn run_fbdev(
         if before != (core.presentation().clone(), core.focus()) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            if let Some(scene) = core.scene(host.metrics(), activate) {
-                host.present(&scene).map_err(|e| e.to_string())?;
-            }
+            present(host, core, activate)?;
         }
     }
 }
@@ -547,7 +535,7 @@ fn emit(
     out: &Path,
     name: &str,
 ) -> Result<(), String> {
-    present_offscreen(host, core, prompt)?;
+    present(host, core, prompt)?;
     let frame = host.frame().ok_or("frame missing")?;
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;
@@ -573,8 +561,24 @@ fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
         .collect()
 }
 
-fn present_offscreen(
-    host: &mut OffscreenHost,
+trait RenderedFrameHost: FrameHost {
+    fn render_notes(&self) -> Option<&[RenderNote]>;
+}
+
+impl RenderedFrameHost for OffscreenHost {
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        self.frame().map(|frame| frame.notes.as_slice())
+    }
+}
+
+impl RenderedFrameHost for FbdevHost {
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        self.frame().map(|frame| frame.notes.as_slice())
+    }
+}
+
+fn present(
+    host: &mut impl RenderedFrameHost,
     core: &mut ShellCore,
     prompt: &str,
 ) -> Result<(), String> {
@@ -585,29 +589,8 @@ fn present_offscreen(
     )
     .map_err(|e| e.to_string())?;
     let rejected = host
-        .frame()
-        .is_some_and(|frame| core.reject_art_sources(failed_source_ids(&frame.notes)));
-    if rejected {
-        host.present(
-            core.scene(host.metrics(), prompt)
-                .as_ref()
-                .ok_or("shell has no fallback frame")?,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn present_fbdev(host: &mut FbdevHost, core: &mut ShellCore, prompt: &str) -> Result<(), String> {
-    host.present(
-        core.scene(host.metrics(), prompt)
-            .as_ref()
-            .ok_or("shell has no frame")?,
-    )
-    .map_err(|e| e.to_string())?;
-    let rejected = host
-        .frame()
-        .is_some_and(|frame| core.reject_art_sources(failed_source_ids(&frame.notes)));
+        .render_notes()
+        .is_some_and(|notes| core.reject_art_sources(failed_source_ids(notes)));
     if rejected {
         host.present(
             core.scene(host.metrics(), prompt)
@@ -634,7 +617,7 @@ mod durable_tests {
     use super::*;
 
     #[test]
-    fn corrupt_fixture_render_note_replaces_image_with_plate() {
+    fn corrupt_fixture_render_note_replaces_image_with_plate_on_redraw() {
         let mut snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         snapshot.items[0].presentation.icon_reference = Some("art/corrupt.png".into());
@@ -653,7 +636,10 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         };
         let mut host = OffscreenHost::new(metrics);
-        present_offscreen(&mut host, &mut core, "A Open").unwrap();
+        // Exercise the same presentation entry point used after an interactive action,
+        // rather than relying on the launcher's initial-frame call.
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        present(&mut host, &mut core, "A Open").unwrap();
         assert!(matches!(
             core.art_treatment("ridgeline"),
             Some(pf_shell_core::ArtTreatment::EditionPlate { .. })

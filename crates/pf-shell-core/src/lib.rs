@@ -94,6 +94,12 @@ struct Item {
     variants: Vec<Variant>,
 }
 
+impl Item {
+    fn has_real_art(&self) -> bool {
+        self.art.is_some() && !self.art_failed
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtTreatment {
     CatalogArt,
@@ -1031,10 +1037,15 @@ impl ShellCore {
                 let availability = best_availability(item);
                 let status = availability_text(availability, &self.presentation);
                 let x = 48.0 + i as f32 * (card_width + gap);
+                let card_label = if item.has_real_art() {
+                    String::new()
+                } else {
+                    format!("{} — {status}", item.title)
+                };
                 let mut n = node(
                     &format!("item-{}", item.id),
                     Role::Button,
-                    &format!("{} — {status}", item.title),
+                    &card_label,
                     x,
                     430.0,
                     card_width,
@@ -1100,14 +1111,19 @@ impl ShellCore {
                 let availability = best_availability(item);
                 let column = i % columns;
                 let row = i / columns;
-                let mut card = node(
-                    &format!("library-item-{}", item.id),
-                    Role::Button,
-                    &format!(
+                let card_label = if item.has_real_art() {
+                    String::new()
+                } else {
+                    format!(
                         "{} · {}",
                         item.title,
                         availability_text(availability, &self.presentation)
-                    ),
+                    )
+                };
+                let mut card = node(
+                    &format!("library-item-{}", item.id),
+                    Role::Button,
+                    &card_label,
                     48.0 + column as f32 * (card_width + 16.0),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
@@ -2485,9 +2501,14 @@ mod tests {
             }
         ));
         assert!(!card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-motif-plate-id"
-                || node.id.as_str() == "home-card-initial-plate-id"
+            matches!(
+                node.id.as_str(),
+                "home-card-label-mask-plate-id"
+                    | "home-card-motif-plate-id"
+                    | "home-card-initial-plate-id"
+            )
         }));
+        assert!(card.accessible_label.is_empty());
         assert!(card.children.iter().any(|node| {
             node.id.as_str() == "home-card-plate-plate-id" && node.accessible_label == "GAME"
         }));

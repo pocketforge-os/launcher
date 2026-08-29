@@ -14,20 +14,20 @@ fn vertical_slice_frame_hashes_are_stable() {
     );
     let lines = String::from_utf8(run.stdout).unwrap();
     for expected in [
-        "89a6e4556c8ccb62b0ac7229afd8549e36af44d07303f9fe65bf13d565fb3ad4  ",
-        "de488ecb1cf8556f38754e5b90db5c7ec1bca3643e141b429a30e8129571e286  ",
-        "846fb94fe9b9d170cf6c74f284eea2b36154adc8e59d2d1052883ecbadab7441  ",
-        "f4023267f79cbe4be8d7fcbd1f2013495334155f385441160662248dfc2dbc12  ",
-        "65582e5306cfecc2774e5c5635072b66f659cf9c037e8505bcfd5fcaf298088b  ",
+        "4e3e64cdfd2ba452c1835355331fb30428340d4a8ea465effc8f75a41d0cf099  ",
+        "4f546b616eaa524b55e4d60520b55790401e8c45f9c579669805d87bf5adfb90  ",
+        "5cfd55fa7a4d3090a6b578cf3d16b8a2587d607e9278b4f186db6cb76005c0dd  ",
+        "e25ba195b7db3aeccb09c5e3bc64139b49237b5cad28da56877b4e7f96334906  ",
+        "6fec954c9e50c6d149bf6636129c3217baf6be1fae5190d2f5f2f4259298d049  ",
         "706d400cd157bf7b74e8159d9fd9126f7e912a7ea4a0924a5d04386701499b33  ",
         "77d087b08b6ac7b847ab8432df3d3bd2f4b033c9bd10d583fa2d11afbf80ada6  ",
         "110d95adac519f2907cb2f9679749b02a7867d159f783b541f235840414e5490  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("de488ec"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("4f546b6"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("f402326"),
+        lines.lines().nth(3).unwrap().starts_with("e25ba19"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [

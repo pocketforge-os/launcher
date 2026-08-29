@@ -136,6 +136,7 @@ enum SystemRow {
     Ntp,
     ManualTime,
     Transfer(TransferService),
+    Accessibility,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,6 +471,7 @@ impl ShellCore {
                     .map(|state| SystemRow::Transfer(state.service)),
             );
         }
+        rows.push(SystemRow::Accessibility);
         rows
     }
 
@@ -1192,6 +1194,7 @@ impl ShellCore {
                             enabled: !enabled,
                         })
                     }
+                    SystemRow::Accessibility => Some(Effect::ResetFirstRun),
                 },
                 SettingsRoom::Controls => None,
             };
@@ -2293,6 +2296,7 @@ impl ShellCore {
                             true,
                         )
                     }
+                    SystemRow::Accessibility => ("Accessibility & comfort".into(), true),
                 })
                 .collect(),
         };
@@ -3231,9 +3235,25 @@ mod tests {
         let active = format!("{:?}", settings_scene(&core));
         assert!(active.contains("Automatic time · On"));
         assert!(!active.contains("Set time manually"));
-        for id in ["settings-row-0", "settings-row-1"] {
+        assert!(active.contains("Accessibility & comfort"));
+        assert_eq!(core.focus_count(), 4);
+        for id in [
+            "settings-row-0",
+            "settings-row-1",
+            "settings-row-2",
+            "settings-row-3",
+        ] {
             assert!(active.contains(id));
         }
+
+        for _ in 0..3 {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        assert_eq!(core.focus(), 3);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::ResetFirstRun)
+        );
     }
 
     #[test]

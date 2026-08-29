@@ -1000,7 +1000,7 @@ mod durable_tests {
         );
 
         let result = write_png(FlushFailingWriter, &frame);
-        core.screenshot_result(result.as_ref().map(|_| "unused").map_err(|_| ()));
+        core.screenshot_result(result.as_ref().map(|()| "unused").map_err(|_| ()));
 
         assert!(result.is_err());
         assert_eq!(core.session_status(), Some("Screenshot could not be saved"));

@@ -18,6 +18,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "14f95fdcd4875cf08c1109df11e74f690ab1208eaf6fda9c5ebd3a3afcc196c3  ",
         "8d5491d8be2e776fb817783c1211dd5b87aea4874dec45b985d231ac8081e0c4  ",
         "2d5bf8bfe2ba06eb7967adab05de52de47bfd6a73bfd1ce14f1189496183a374  ",
+        "7406be94de19901de71d391fc4e9d0da4f7eaa001ff21df4d586839e467b44cb  ",
         "ed834653df734bce10b27975dd9902fb522cfbb2adbea1b540d2082a36199915  ",
         "d183cf77d9516f39e2dca6f2c86ccb57b2fad5dc29d1c39acc0fdd7e99558a45  ",
         "20930cc253e2f9b91753d764f1f288ebc2ff66092ecb839218080e667ad0ec89  ",
@@ -35,6 +36,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "search.png",
         "details.png",
         "variant-chooser.png",
+        "quick-power.png",
     ] {
         assert!(lines.contains(route), "missing F10 evidence route {route}");
     }

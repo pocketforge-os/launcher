@@ -17,6 +17,16 @@ jobs:
           git fetch --depth=1 origin "${GITHUB_SHA}"
           git reset --hard FETCH_HEAD
           git clean -fdx
+      - name: Install stable Rust toolchain
+        run: |
+          . "$HOME/.cargo/env"
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --component rustfmt --component clippy
+          rustup default stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked

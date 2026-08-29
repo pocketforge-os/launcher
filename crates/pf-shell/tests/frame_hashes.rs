@@ -59,10 +59,10 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("65211c13df7af5e8922830219bcec8a734892e695f6a654cd23e3ff4d7a384f5  ")
+        transcript.contains("0c93216b0126acff1a6097034338defc86c73b242eaf54be79417fee8e2f3736  ")
     );
     assert!(
-        transcript.contains("37eefd15618388a50107ecf2cb963bdaa4009171e4a7dcc922062d2ef77c762b  ")
+        transcript.contains("adcc55c717383ace233142c224a884d76e38cdb0dc461dd29dae72df3354d919  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("first-run.png").is_file());

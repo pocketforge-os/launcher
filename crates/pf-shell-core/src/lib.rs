@@ -1450,7 +1450,6 @@ impl ShellCore {
     }
 
     fn first_run_nodes(&self, out: &mut Vec<Node>, w: f32) {
-        out.clear();
         out.push(node(
             "first-run-title",
             Role::Heading,
@@ -1951,6 +1950,22 @@ mod tests {
         let mixed = FakePreferencePort::new(observed, ChangeAuthority("user".into()));
         let mut c = core();
         c.load_preferences(&mixed, false).unwrap();
+
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let debug = format!("{scene:?}");
+        assert!(debug.contains("rooms"));
+        assert!(debug.contains("status-cluster"));
 
         let Some(Effect::ChangePreference(first)) = c.action(&ShellAction::Activate) else {
             panic!("first visible row must activate");

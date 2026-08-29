@@ -1,6 +1,9 @@
 //! Concrete shell adapters kept outside the pure reducer.
 
-use pf_input_map::{BindingShape, DeviceContract, EffectiveMap, MemoryStore};
+use pf_input_map::{
+    Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
+    TransactionOutcome,
+};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ActionSourceError, Deadline, GlyphResolver, GlyphResult,
     InputSourceId, ShellAction,
@@ -170,6 +173,130 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
     }
 }
 
+/// Evidence-ranked Safe Return choices supported by the current physical controls. The shipped
+/// effective binding remains the per-device default and is deliberately not duplicated here.
+#[must_use]
+pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> {
+    let present = |controls: &[&str]| {
+        controls.iter().all(|wanted| {
+            contract
+                .physical_controls
+                .iter()
+                .any(|c| c.position == *wanted)
+        })
+    };
+    let mut out = Vec::new();
+    let mut add = |binding: Binding, label: &str| {
+        if binding.controls.iter().all(|c| present(&[c])) {
+            out.push((binding, label.into()));
+        }
+    };
+    add(
+        Binding {
+            shape: BindingShape::Chord,
+            controls: vec!["select".into(), "start".into()],
+            max_interval_ms: None,
+            min_duration_ms: None,
+        },
+        "Select + Start",
+    );
+    add(
+        Binding {
+            shape: BindingShape::Hold,
+            controls: vec!["guide".into()],
+            max_interval_ms: None,
+            min_duration_ms: Some(1000),
+        },
+        "Hold PF · the button below the d-pad (about 1s)",
+    );
+    add(
+        Binding {
+            shape: BindingShape::DoublePress,
+            controls: vec!["select".into(), "start".into()],
+            max_interval_ms: Some(600),
+            min_duration_ms: None,
+        },
+        "Select + Start, press twice",
+    );
+    add(
+        Binding {
+            shape: BindingShape::DoublePress,
+            controls: vec!["guide".into()],
+            max_interval_ms: Some(600),
+            min_duration_ms: None,
+        },
+        "Double-tap PF · the button below the d-pad",
+    );
+    add(
+        Binding {
+            shape: BindingShape::Hold,
+            controls: vec!["select".into(), "l1".into(), "r1".into()],
+            max_interval_ms: None,
+            min_duration_ms: Some(1000),
+        },
+        "Hold Select + L1 + R1 · deliberately hard to press",
+    );
+    out
+}
+
+/// Thin product-facing transaction wrapper. During preview all gamepad actions remain usable;
+/// Back and the focused Revert action both atomically restore the effective map.
+pub struct GamepadRemap {
+    engine: RemapEngine<MemoryStore>,
+    previewing: bool,
+}
+impl GamepadRemap {
+    #[must_use]
+    pub fn new(map: EffectiveMap) -> Self {
+        Self {
+            engine: RemapEngine::new(map, MemoryStore::default()),
+            previewing: false,
+        }
+    }
+    /// Starts a validated candidate preview.
+    ///
+    /// # Errors
+    /// Returns the input-map validation error when the candidate is absent, collides, or strands
+    /// a protected action.
+    pub fn preview(
+        &mut self,
+        context: &str,
+        action: &str,
+        binding: Binding,
+    ) -> Result<(), MapError> {
+        self.engine.begin(context, action, binding)?;
+        self.previewing = true;
+        Ok(())
+    }
+    /// Applies a gamepad action while previewing.
+    ///
+    /// # Errors
+    /// Returns an input-map transaction or persistence error.
+    pub fn gamepad_action(
+        &mut self,
+        action: &ShellAction,
+    ) -> Result<Option<TransactionOutcome>, MapError> {
+        if !self.previewing {
+            return Ok(None);
+        }
+        match action {
+            ShellAction::Back => {
+                self.previewing = false;
+                self.engine.revert().map(Some)
+            }
+            ShellAction::Activate => {
+                self.previewing = false;
+                self.engine.confirm().map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    #[must_use]
+    pub fn map(&self) -> &EffectiveMap {
+        self.engine.map()
+    }
+}
+
 fn semantic_action(name: &str) -> Option<ShellAction> {
     Some(match name {
         "Activate" => ShellAction::Activate,
@@ -248,5 +375,53 @@ mod tests {
                 "SafeReturn".into()
             )))
         );
+    }
+    #[test]
+    fn safe_return_choices_are_ranked_and_device_filtered() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let labels: Vec<_> = safe_return_options(&contract)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Select + Start",
+                "Hold PF · the button below the d-pad (about 1s)",
+                "Select + Start, press twice",
+                "Double-tap PF · the button below the d-pad"
+            ]
+        );
+        assert!(
+            labels.iter().all(|label| !label.contains("L1")),
+            "absent controls are not offered"
+        );
+    }
+    #[test]
+    fn rollback_is_usable_with_gamepad_back_and_preserves_effective_glyph() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        let before = prompt(&map, &ShellAction::Activate);
+        let mut remap = GamepadRemap::new(map);
+        remap
+            .preview("global", "Activate", Binding::single("north"))
+            .unwrap();
+        assert_eq!(
+            remap.gamepad_action(&ShellAction::Back).unwrap(),
+            Some(TransactionOutcome::RolledBack(
+                pf_input_map::RollbackReason::Reverted
+            ))
+        );
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), before);
+    }
+    #[test]
+    fn stranding_collision_is_refused_before_preview() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        let mut remap = GamepadRemap::new(map);
+        assert!(matches!(
+            remap.preview("global", "Activate", Binding::single("south")),
+            Err(MapError::Collision { .. })
+        ));
     }
 }

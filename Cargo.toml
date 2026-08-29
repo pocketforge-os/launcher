@@ -21,6 +21,8 @@ pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879
 pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
 pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
 pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
+pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
+pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
 pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
 pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }
 pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "3879e912f1444b7f4d02d6efa8e5a76c44c994e8" }

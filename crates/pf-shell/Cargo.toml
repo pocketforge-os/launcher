@@ -11,6 +11,8 @@ pf-catalog = { path = "../pf-catalog" }
 pf-shell-core = { path = "../pf-shell-core" }
 pf-framehost.workspace = true
 pf-input-map.workspace = true
+pf-prefs.workspace = true
+pf-prefs-port.workspace = true
 pf-ports.workspace = true
 pf-scene.workspace = true
 pf-theme.workspace = true

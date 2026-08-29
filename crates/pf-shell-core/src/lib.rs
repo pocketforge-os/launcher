@@ -63,6 +63,8 @@ pub struct ShellCore {
     launch_focus: usize,
     active_title: String,
     crash_summary: String,
+    crash_receipt_id: String,
+    crash_exit_detail: String,
     recovery_available: bool,
     pending_ack: bool,
     just_returned: bool,
@@ -100,6 +102,8 @@ impl ShellCore {
             launch_focus: 0,
             active_title: String::new(),
             crash_summary: String::new(),
+            crash_receipt_id: String::new(),
+            crash_exit_detail: String::new(),
             recovery_available: false,
             pending_ack: false,
             just_returned: false,
@@ -166,10 +170,21 @@ impl ShellCore {
         }
         if matches!(self.presentation, Presentation::Crash) {
             return match action {
-                ShellAction::Back | ShellAction::Activate => {
+                ShellAction::Back => {
                     self.presentation = Presentation::Ready;
                     self.go(Route::Home);
                     None
+                }
+                ShellAction::Activate if self.focus == 0 => {
+                    self.presentation = Presentation::Ready;
+                    self.go(Route::Home);
+                    None
+                }
+                ShellAction::Activate => {
+                    self.focus = self.launch_focus;
+                    self.presentation = Presentation::Ready;
+                    self.go(Route::Home);
+                    self.activate()
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                     self.focus = 1;
@@ -300,9 +315,14 @@ impl ShellCore {
                 self.focus = self.launch_focus;
                 self.pending_ack = true;
             }
-            SessionEvent::Terminal(TerminalReceipt::Crash { summary, .. }) => {
+            SessionEvent::Terminal(TerminalReceipt::Crash {
+                session_id,
+                summary,
+            }) => {
                 self.presentation = Presentation::Crash;
                 self.crash_summary.clone_from(summary);
+                self.crash_receipt_id.clone_from(session_id);
+                self.crash_exit_detail.clone_from(summary);
                 self.focus = 0;
                 self.pending_ack = true;
             }
@@ -531,7 +551,20 @@ impl ShellCore {
             50.0,
             "--color-status-attention",
         ));
-        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 380.0, w - 360.0, 60.0, "--color-text-secondary"));
+        out.push(node(
+            "crash-diagnostic",
+            Role::Text,
+            &format!(
+                "{} · kept on this device · {}",
+                self.crash_receipt_id, self.crash_exit_detail
+            ),
+            180.0,
+            370.0,
+            w - 360.0,
+            40.0,
+            "--color-text-secondary",
+        ));
+        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 420.0, w - 360.0, 60.0, "--color-text-secondary"));
         for (i, label) in ["Back to Home", "Open again"].iter().enumerate() {
             let mut n = node(
                 &format!("crash-action-{i}"),
@@ -717,6 +750,72 @@ mod tests {
             },
         ));
         assert!(!c.has_shell_frame());
+    }
+    #[test]
+    fn crash_actions_relaunch_or_dismiss_by_focus() {
+        let mut c = core();
+        c.focus = 1;
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "receipt-7".into(),
+            summary: "exit status 9".into(),
+        }));
+
+        c.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        assert_eq!(c.presentation(), &Presentation::Starting);
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "receipt-8".into(),
+            summary: "signal 11".into(),
+        }));
+        assert_eq!(c.focus(), 0);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+    }
+    #[test]
+    fn crash_scene_includes_local_receipt_diagnostic() {
+        let mut c = core();
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "receipt-7".into(),
+            summary: "exit status 9".into(),
+        }));
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let diagnostic = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "crash-diagnostic")
+            .expect("crash diagnostic row");
+        assert_eq!(
+            diagnostic.accessible_label,
+            "receipt-7 · kept on this device · exit status 9"
+        );
+        assert_eq!(diagnostic.style_token, "--color-text-secondary");
     }
     #[test]
     fn recovery_entry_is_authority_gated() {

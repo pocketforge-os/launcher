@@ -1,7 +1,12 @@
 use pf_catalog::{
     Availability, FavoriteCommitResult, InstalledAppProvider, ManifestErrorKind, ProviderItemResult,
 };
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, Barrier},
+    thread,
+};
 use tempfile::tempdir;
 
 fn manifest(id: &str, title: &str, family: &str, extra: &str) -> String {
@@ -166,6 +171,81 @@ fn favorites_are_atomic_revisioned_and_persistent() {
         !fs::read_to_string(root.join("one/app.toml"))
             .unwrap()
             .contains("favorite")
+    );
+}
+
+#[test]
+fn concurrent_favorite_commits_compare_and_swap() {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    fs::create_dir(&root).unwrap();
+    let state = t.path().join("state/favorites.json");
+    for id in ["one", "two"] {
+        write(
+            &root,
+            id,
+            &manifest(
+                &format!("com.example.{id}"),
+                id,
+                "pocketforge/a133-powervr",
+                "",
+            ),
+        );
+    }
+
+    let provider = Arc::new(provider(&root, &state));
+    let initial = provider.snapshot().unwrap();
+    let ids: Vec<_> = initial.items.iter().map(|item| item.id.clone()).collect();
+    let barrier = Arc::new(Barrier::new(3));
+    let handles: Vec<_> = ids
+        .iter()
+        .cloned()
+        .map(|id| {
+            let provider = Arc::clone(&provider);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                (
+                    id.clone(),
+                    provider.set_favorite(&id, true, initial.revision).unwrap(),
+                )
+            })
+        })
+        .collect();
+
+    barrier.wait();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, result)| matches!(result, FavoriteCommitResult::Committed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, result)| matches!(result, FavoriteCommitResult::RevisionConflict { .. }))
+            .count(),
+        1
+    );
+    let winner = results
+        .iter()
+        .find_map(|(id, result)| matches!(result, FavoriteCommitResult::Committed(_)).then_some(id))
+        .unwrap();
+    let final_snapshot = provider.snapshot().unwrap();
+    assert_eq!(
+        final_snapshot.user_projection.favorite_item_ids.as_slice(),
+        std::slice::from_ref(winner)
+    );
+    assert!(
+        fs::read_dir(state.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
     );
 }
 

@@ -1,5 +1,6 @@
 //! Installed-application catalog with immutable snapshots and a separate favorites overlay.
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -7,8 +8,11 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub type CatalogRevision = u64;
 
@@ -251,6 +255,16 @@ impl InstalledAppProvider {
         value: bool,
         expected: CatalogRevision,
     ) -> Result<FavoriteCommitResult, ProviderError> {
+        let parent = self.favorites.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.favorites.with_extension("lock"))?;
+        lock.lock_exclusive()?;
+
         let current = self.snapshot()?;
         if current.revision != expected {
             return Ok(FavoriteCommitResult::RevisionConflict {
@@ -281,15 +295,24 @@ impl InstalledAppProvider {
     fn store_projection(&self, p: &UserProjection) -> Result<(), ProviderError> {
         let parent = self.favorites.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
-        let tmp = self.favorites.with_extension("tmp");
-        let _ = fs::remove_file(&tmp);
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(&serde_json::to_vec(p)?)?;
-        f.sync_all()?;
-        fs::rename(tmp, &self.favorites)?;
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .favorites
+            .with_extension(format!("tmp.{}.{sequence}", std::process::id()));
+        let result = (|| {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            f.write_all(&serde_json::to_vec(p)?)?;
+            f.sync_all()?;
+            fs::rename(&tmp, &self.favorites)?;
+            Ok::<_, ProviderError>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result?;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     }

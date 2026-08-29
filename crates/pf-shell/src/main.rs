@@ -19,6 +19,7 @@ use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, commit_pinned_variant,
+    control_bindings,
     favorite_footer_prompt, footer_prompt, safe_return_options,
 };
 use pf_shell_core::{Effect, ShellCore};
@@ -141,6 +142,7 @@ fn main() -> Result<(), String> {
         }
     }
     let mut core = fixture_core(&snapshot, &theme, reduced);
+    core.set_control_bindings(control_bindings(&glyphs));
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
         core.session_backend_unavailable_at_boot();
@@ -212,7 +214,7 @@ fn main() -> Result<(), String> {
             &mut host,
             &mut actions,
             &mut core,
-            &footer,
+            footer,
             preferences,
             power,
             glyphs,
@@ -239,6 +241,7 @@ fn main() -> Result<(), String> {
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         emit(&mut host, &mut core, &footer, out, "settings")?;
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(&mut host, &mut core, &footer, out, "controls")?;
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         emit(&mut host, &mut core, &footer, out, "network")?;
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
@@ -391,9 +394,9 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_fbdev(
     host: &mut FbdevHost,
-    actions: &mut dyn ActionSource,
+    actions: &mut EvdevActionSource,
     core: &mut ShellCore,
-    activate: &str,
+    mut activate: String,
     preferences: &mut dyn PreferencePort,
     power: &mut dyn PowerPort,
     map: EffectiveMap,
@@ -414,7 +417,7 @@ fn run_fbdev(
         Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
         Err(error) => return Err(format!("session: {error:?}")),
     }
-    present(host, core, activate)?;
+    present(host, core, &activate)?;
     let mut remap = GamepadRemap::new(map);
     loop {
         let before = redraw_state(core);
@@ -427,7 +430,7 @@ fn run_fbdev(
                 return Ok(());
             }
             if before != redraw_state(core) {
-                present(host, core, activate)?;
+                present(host, core, &activate)?;
             }
             continue;
         };
@@ -439,7 +442,7 @@ fn run_fbdev(
                 Ok(result) => {
                     core.session_backend_reachable();
                     core.launch_result(&result);
-                    present(host, core, activate)?;
+                    present(host, core, &activate)?;
                     drive_socket_session(core, &mut session)?;
                 }
                 Err(SessionError::BackendUnavailable) => core.session_backend_unavailable(),
@@ -454,20 +457,38 @@ fn run_fbdev(
                     .map_err(|e| format!("preferences: {e:?}"))?;
             }
             Some(Effect::ResetFirstRun) => core.reset_first_run(),
-            Some(Effect::BeginRemap) => {
-                remap
-                    .preview("global", "Activate", pf_input_map::Binding::single("north"))
-                    .map_err(|e| format!("remap preview: {e:?}"))?;
-            }
+            Some(Effect::CaptureRemap) => actions.capture_next_button(),
+            Some(Effect::BeginRemap {
+                context,
+                action,
+                control,
+            }) => match remap.preview(&context, &action, pf_input_map::Binding::single(control)) {
+                Ok(()) => {}
+                Err(pf_input_map::MapError::Collision { second, .. }) => {
+                    core.remap_refused(&second);
+                }
+                Err(error) => return Err(format!("remap preview: {error:?}")),
+            },
             Some(Effect::ConfirmRemap) => {
                 remap
                     .gamepad_action(&ShellAction::Activate)
                     .map_err(|e| format!("remap confirm: {e:?}"))?;
+                core.remap_committed(control_bindings(remap.map()));
+                actions.apply_effective_map(remap.map());
+                activate = footer_prompt(remap.map());
             }
             Some(Effect::RollbackRemap) => {
                 remap
                     .gamepad_action(&ShellAction::Back)
                     .map_err(|e| format!("remap rollback: {e:?}"))?;
+            }
+            Some(Effect::ResetRemaps) => {
+                remap
+                    .reset_defaults()
+                    .map_err(|e| format!("remap reset: {e:?}"))?;
+                core.remaps_reset(control_bindings(remap.map()));
+                actions.apply_effective_map(remap.map());
+                activate = footer_prompt(remap.map());
             }
             Some(Effect::CompleteFirstRun) => {
                 preferences
@@ -531,7 +552,7 @@ fn run_fbdev(
         if before != redraw_state(core) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            present(host, core, activate)?;
+            present(host, core, &activate)?;
         }
     }
 }

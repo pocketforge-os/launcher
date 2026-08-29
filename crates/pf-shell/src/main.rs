@@ -13,7 +13,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::RenderNote;
+use pf_render::{RasterFrame, RenderNote};
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -221,6 +221,7 @@ fn main() -> Result<(), String> {
             &mut network,
             &mut time,
             &mut transfer,
+            &state_dir,
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -401,6 +402,7 @@ fn run_fbdev(
     network: &mut dyn NetworkPort,
     time: &mut dyn TimePort,
     transfer: &mut dyn TransferPort,
+    state_dir: &Path,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = SessionClient::new(
@@ -482,6 +484,22 @@ fn run_fbdev(
                     Err(status) => core.favorite_failed(status),
                 }
             }
+            Some(Effect::CaptureScreenshot) => {
+                let result = host
+                    .frame()
+                    .ok_or_else(|| "composed frame is unavailable".to_owned())
+                    .and_then(|frame| capture_screenshot(frame, state_dir, &FsScreenshotWriter));
+                match result {
+                    Ok(path) => {
+                        let file_name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("screenshot.png");
+                        core.screenshot_result(Ok(file_name));
+                    }
+                    Err(_) => core.screenshot_result(Err(())),
+                }
+            }
             Some(Effect::RequestPower(action)) => {
                 let result = power.request(action);
                 core.power_request_result(result);
@@ -509,6 +527,47 @@ fn run_fbdev(
             present(host, core, activate)?;
         }
     }
+}
+
+trait ScreenshotWriter {
+    fn write_png(&self, path: &Path, frame: &RasterFrame) -> Result<(), String>;
+}
+
+struct FsScreenshotWriter;
+
+impl ScreenshotWriter for FsScreenshotWriter {
+    fn write_png(&self, path: &Path, frame: &RasterFrame) -> Result<(), String> {
+        let file = fs::File::create(path).map_err(|error| error.to_string())?;
+        write_png(file, frame)
+    }
+}
+
+fn write_png(sink: impl Write, frame: &RasterFrame) -> Result<(), String> {
+    let mut buf = BufWriter::new(sink);
+    let mut encoder = png::Encoder::new(&mut buf, frame.width, frame.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+    writer
+        .write_image_data(&frame.rgba)
+        .map_err(|error| error.to_string())?;
+    writer.finish().map_err(|error| error.to_string())?;
+    buf.flush().map_err(|error| error.to_string())
+}
+
+fn capture_screenshot(
+    frame: &RasterFrame,
+    state_dir: &Path,
+    writer: &dyn ScreenshotWriter,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(state_dir).map_err(|error| error.to_string())?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let path = state_dir.join(format!("screenshot-{timestamp}.png"));
+    writer.write_png(&path, frame)?;
+    Ok(path)
 }
 
 struct UnavailablePowerPort;
@@ -858,10 +917,93 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    struct FailingScreenshotWriter;
+
+    impl ScreenshotWriter for FailingScreenshotWriter {
+        fn write_png(&self, _path: &Path, _frame: &RasterFrame) -> Result<(), String> {
+            Err("injected write failure".into())
+        }
+    }
+
+    struct FlushFailingWriter;
+
+    impl Write for FlushFailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected flush failure"))
+        }
+    }
+
     struct UnavailableSession;
 
     struct AlwaysConflictingFavorites {
         snapshot: CatalogSnapshot,
+    }
+
+    #[test]
+    fn screenshot_is_a_decodable_frame_sized_png() {
+        let state = tempfile::tempdir().unwrap();
+        let frame = RasterFrame {
+            width: 3,
+            height: 2,
+            rgba: vec![0x7f; 3 * 2 * 4],
+            damage: None,
+            notes: Vec::new(),
+        };
+
+        let path = capture_screenshot(&frame, state.path(), &FsScreenshotWriter).unwrap();
+        let decoder = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!(reader.info().width, frame.width);
+        assert_eq!(reader.info().height, frame.height);
+    }
+
+    #[test]
+    fn screenshot_writer_failure_drives_failure_toast() {
+        let state = tempfile::tempdir().unwrap();
+        let frame = RasterFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            damage: None,
+            notes: Vec::new(),
+        };
+        let mut core = fixture_core(
+            &serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap(),
+            &pf_theme::flagship(),
+            false,
+        );
+
+        let result = capture_screenshot(&frame, state.path(), &FailingScreenshotWriter);
+        core.screenshot_result(result.as_ref().map(|_| "unused").map_err(|_| ()));
+
+        assert!(result.is_err());
+        assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
+    }
+
+    #[test]
+    fn screenshot_flush_failure_drives_failure_toast() {
+        let frame = RasterFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            damage: None,
+            notes: Vec::new(),
+        };
+        let mut core = fixture_core(
+            &serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap(),
+            &pf_theme::flagship(),
+            false,
+        );
+
+        let result = write_png(FlushFailingWriter, &frame);
+        core.screenshot_result(result.as_ref().map(|()| "unused").map_err(|_| ()));
+
+        assert!(result.is_err());
+        assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
     }
 
     impl FavoriteCatalog for AlwaysConflictingFavorites {

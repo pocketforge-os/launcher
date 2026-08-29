@@ -445,6 +445,10 @@ impl ShellCore {
     pub const fn authority_unavailable(&self) -> bool {
         self.authority_unavailable
     }
+    #[must_use]
+    pub fn session_status(&self) -> Option<&str> {
+        self.session_status.as_deref()
+    }
     pub fn session_backend_unavailable_at_boot(&mut self) {
         self.authority_unavailable = true;
         self.session_status = None;

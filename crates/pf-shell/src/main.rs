@@ -277,16 +277,20 @@ fn run_fbdev(
     present(host, core, activate)?;
     let mut remap = GamepadRemap::new(map);
     loop {
+        let before = redraw_state(core);
         let poll = actions
             .next_action(deadline)
             .map_err(|e| format!("input: {e:?}"))?;
+        drive_socket_session(core, &mut session)?;
         let ActionPoll::Event(ActionEvent::Action(action)) = poll else {
             if matches!(poll, ActionPoll::Closed) {
                 return Ok(());
             }
+            if before != redraw_state(core) {
+                present(host, core, activate)?;
+            }
             continue;
         };
-        let before = (core.presentation().clone(), core.focus());
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
                 drive_socket_session(core, &mut session)?;
@@ -336,12 +340,21 @@ fn run_fbdev(
             }
             None => {}
         }
-        if before != (core.presentation().clone(), core.focus()) {
+        if before != redraw_state(core) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
             present(host, core, activate)?;
         }
     }
+}
+
+fn redraw_state(core: &ShellCore) -> (pf_shell_core::Presentation, usize, bool, Option<String>) {
+    (
+        core.presentation().clone(),
+        core.focus(),
+        core.authority_unavailable(),
+        core.session_status().map(str::to_owned),
+    )
 }
 
 fn wait_for_session_authority(
@@ -711,11 +724,13 @@ mod durable_tests {
         let Effect::Launch(request) = core.action(&ShellAction::Activate).unwrap() else {
             panic!("ready fixture must launch");
         };
+        let before = redraw_state(&core);
         assert_eq!(
             session.launch(request),
             Err(SessionError::BackendUnavailable)
         );
         core.session_backend_unavailable();
+        assert_ne!(before, redraw_state(&core));
         assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
         let scene = core.scene(metrics, "").unwrap();
         let status = scene
@@ -728,6 +743,64 @@ mod durable_tests {
             status.accessible_label,
             "The session service isn't reachable"
         );
+        let mut host = OffscreenHost::new(metrics);
+        present(&mut host, &mut core, "A Open").unwrap();
+        assert!(host.frame().is_some());
+    }
+
+    #[test]
+    fn returned_receipt_after_idle_is_consumed_without_an_action() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::Launch(request) = core.action(&ShellAction::Activate).unwrap() else {
+            panic!("ready fixture must launch");
+        };
+        let mut session = pf_ports::FakeSession::new(
+            Ok(LaunchResult::Accepted {
+                session_id: "late-session".into(),
+            }),
+            [
+                pf_ports::ScriptedSession::Idle,
+                pf_ports::ScriptedSession::Event(SessionEvent::Observed(
+                    ObservedSessionState::Running,
+                )),
+                pf_ports::ScriptedSession::Event(SessionEvent::Observed(
+                    ObservedSessionState::ObservationComplete,
+                )),
+                pf_ports::ScriptedSession::Event(SessionEvent::Terminal(
+                    TerminalReceipt::Returned {
+                        session_id: "late-session".into(),
+                    },
+                )),
+                pf_ports::ScriptedSession::Idle,
+            ],
+        );
+        core.launch_result(&session.launch(request).unwrap());
+
+        core.drive_session(&mut session).unwrap();
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Starting);
+        let before = redraw_state(&core);
+
+        // This is the next idle-loop cadence: there is deliberately no action.
+        core.drive_session(&mut session).unwrap();
+        assert_ne!(before, redraw_state(&core));
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Returned);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "route-heading" && node.accessible_label == "RECENT · JUST NOW"
+        }));
+        let mut host = OffscreenHost::new(metrics);
+        present(&mut host, &mut core, "A Open").unwrap();
+        assert!(host.frame().is_some());
     }
 
     #[test]

@@ -460,6 +460,7 @@ dependencies = [
  "pf-theme",
  "pf-wire",
  "png",
+ "rustix",
  "serde_json",
  "sha2",
  "tempfile",

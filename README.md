@@ -1,12 +1,20 @@
-# PocketForge Launcher
+# PocketForge launcher
 
-Thin SDL3 + GLES2 app launcher for PocketForge. Gamepad-native, ~15 MB resident. Responsibilities:
+This workspace contains `pf-catalog`, the launcher's source-owned installed-application
+catalog foundation. It validates canonical `app.toml` descriptors, preserves invalid
+descriptors as typed provider results, builds immutable content-revisioned snapshots,
+and stores favorites as a separate atomic PocketForge projection.
 
-1. **Supervisor**: `fork`/`exec` selected app, `waitpid`, redraw on return.
-2. **App discovery**: scan `/opt/pocketforge/apps/*/app.toml`, render grid.
-3. **Fb-ownership handoff**: close `/dev/fb0` before child app, reopen on return.
-4. **Network gating**: wait for `wlan0` default route when `needs_network = true`.
+The model deliberately contains only a typed `AppManifestRef`; raw executable and
+health commands remain descriptor/trust-authority inputs and are never catalog data.
+The public revision, provider-result, and favorite-commit semantics mirror the merged
+`pocketforge-os/runtime` `pf-ports::CatalogPort` contract (runtime#46) without adding a
+runtime dependency. A later adapter can narrow the richer catalog items into that port.
 
-Consumes `libsdl3-sunxifb`'s release artifact (`libSDL3-pocketforge.so.0`). Produces the `pocketforge-launcher` binary consumed by the image builder.
+Run the complete local gate with:
 
-Populated in **Phase 2**. See the [pocketforge-os](https://github.com/pocketforge-os) org for the full repo set.
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```

@@ -13,10 +13,13 @@
 
 use pf_catalog::{AppKind, Availability, CatalogSnapshot, Variant};
 use pf_ports::{
-    AppliedIdlePolicy, ChangeAuthority, Deadline, EffectivePreference, IdlePolicy, LaunchRequest,
-    LaunchResult, MonotonicTime, ObservedSessionState, PowerAction, PowerCapability, PowerError,
-    PowerPort, PowerRequestResult, PreferenceChange, PreferenceKey, PreferencePoll, PreferencePort,
-    PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, Support, TerminalReceipt,
+    AppliedIdlePolicy, AppliedTransferState, AppliedValue, ChangeAuthority, ConnectResult,
+    Deadline, EffectivePreference, IdlePolicy, LaunchRequest, LaunchResult, MonotonicTime,
+    NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
+    PowerError, PowerPort, PowerRequestResult, PreferenceChange, PreferenceKey, PreferencePoll,
+    PreferencePort, PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, Support,
+    TerminalReceipt, TimeCapabilities, TimePort, TransferPort, TransferService,
+    TransferServiceState, WifiCredential, WifiNetwork,
 };
 use pf_scene::{
     AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
@@ -24,7 +27,27 @@ use pf_scene::{
 use pf_theme::Theme;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
+
+fn applied_bool_status(
+    label: &str,
+    result: &Result<AppliedValue<bool>, pf_ports::TimeError>,
+) -> String {
+    match result {
+        Ok(value) if value.requested == value.applied => format!(
+            "{label} applied · {}",
+            if value.applied { "On" } else { "Off" }
+        ),
+        Ok(value) => format!(
+            "{label} requested {} · applied {}",
+            if value.requested { "On" } else { "Off" },
+            if value.applied { "On" } else { "Off" }
+        ),
+        Err(error) => format!("{label} unavailable · {error:?}"),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
@@ -61,9 +84,23 @@ pub enum Effect {
     ConfirmRemap,
     RollbackRemap,
     CompleteFirstRun,
-    ToggleFavorite { item_id: String, favorite: bool },
+    ToggleFavorite {
+        item_id: String,
+        favorite: bool,
+    },
     RequestPower(PowerAction),
     SetIdlePolicy(IdlePolicy),
+    ConnectWifi {
+        ssid: String,
+        credential: WifiCredential,
+    },
+    SetTimezone(String),
+    SetNtp(bool),
+    SetManualTime(SystemTime),
+    SetTransfer {
+        service: TransferService,
+        enabled: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,9 +125,25 @@ enum ControlsFlow {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkFlow {
+    Rows,
+    Credential,
+}
+
+#[derive(Clone, Copy)]
+enum SystemRow {
+    Timezone,
+    Ntp,
+    ManualTime,
+    Transfer(TransferService),
+    Accessibility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsRoom {
     Display,
     Controls,
+    Network,
     System,
 }
 
@@ -167,6 +220,16 @@ pub struct ShellCore {
     idle_policy_loaded: bool,
     power_status: Option<String>,
     power_dialog: PowerDialog,
+    network_flow: NetworkFlow,
+    network_state: Result<NetworkState, String>,
+    wifi_networks: Vec<WifiNetwork>,
+    selected_wifi: Option<usize>,
+    wifi_credential: WifiCredential,
+    network_status: Option<String>,
+    time_capabilities: Result<TimeCapabilities, String>,
+    time_state: Result<pf_ports::TimeState, String>,
+    transfer_services: Result<Vec<TransferServiceState>, String>,
+    system_status: Option<String>,
 }
 
 impl ShellCore {
@@ -256,7 +319,160 @@ impl ShellCore {
             idle_policy_loaded: false,
             power_status: None,
             power_dialog: PowerDialog::Closed,
+            network_flow: NetworkFlow::Rows,
+            network_state: Err("Network status unavailable".into()),
+            wifi_networks: Vec::new(),
+            selected_wifi: None,
+            wifi_credential: WifiCredential::new(Vec::new()),
+            network_status: None,
+            time_capabilities: Err("Time controls unavailable".into()),
+            time_state: Err("Time status unavailable".into()),
+            transfer_services: Err("Transfer status unavailable".into()),
+            system_status: None,
         }
+    }
+
+    pub fn load_network(&mut self, port: &mut dyn NetworkPort) {
+        self.bump_revision();
+        self.network_state = port
+            .state()
+            .map_err(|error| format!("Network unavailable · {error:?}"));
+        self.wifi_networks = port.scan().unwrap_or_else(|error| {
+            self.network_status = Some(format!("Scan unavailable · {error:?}"));
+            Vec::new()
+        });
+    }
+
+    pub fn load_system(&mut self, time: &dyn TimePort, transfer: &dyn TransferPort) {
+        self.bump_revision();
+        self.time_capabilities = time
+            .capabilities()
+            .map_err(|e| format!("Time controls unavailable · {e:?}"));
+        self.time_state = time
+            .read()
+            .map_err(|e| format!("Time status unavailable · {e:?}"));
+        self.transfer_services = transfer
+            .services()
+            .map_err(|e| format!("Transfer unavailable · {e:?}"));
+    }
+
+    pub fn set_wifi_passphrase(&mut self, secret: impl Into<Vec<u8>>) {
+        self.bump_revision();
+        self.wifi_credential = WifiCredential::new(secret);
+    }
+
+    pub fn network_result(&mut self, result: Result<ConnectResult, pf_ports::NetworkError>) {
+        self.bump_revision();
+        self.network_status = Some(match result {
+            Ok(ConnectResult::Progress(progress)) => format!("Joining · {progress:?}"),
+            Ok(ConnectResult::Connected { ssid }) => format!("Connected · {ssid}"),
+            Ok(ConnectResult::Refused) => "Connection failed · authentication refused".into(),
+            Ok(ConnectResult::NetworkNotFound) => "Connection failed · network not found".into(),
+            Err(error) => format!("Connection unavailable · {error:?}"),
+        });
+        self.network_flow = NetworkFlow::Rows;
+        self.wifi_credential = WifiCredential::new(Vec::new());
+    }
+
+    pub fn timezone_result(&mut self, result: Result<AppliedValue<String>, pf_ports::TimeError>) {
+        self.system_status = Some(match &result {
+            Ok(value) if value.requested == value.applied => {
+                format!("Timezone applied · {}", value.applied)
+            }
+            Ok(value) => format!("Requested {} · applied {}", value.requested, value.applied),
+            Err(error) => format!("Timezone unavailable · {error:?}"),
+        });
+        if let (Some(state), Ok(value)) = (self.time_state.as_mut().ok(), result) {
+            state.timezone = value.applied;
+        }
+        self.bump_revision();
+    }
+
+    pub fn ntp_result(&mut self, result: Result<AppliedValue<bool>, pf_ports::TimeError>) {
+        self.system_status = Some(applied_bool_status("Automatic time", &result));
+        if let (Some(state), Ok(value)) = (self.time_state.as_mut().ok(), result) {
+            state.ntp_state = if value.applied {
+                NtpState::Active
+            } else {
+                NtpState::Inactive
+            };
+        }
+        self.bump_revision();
+    }
+
+    pub fn manual_time_result(
+        &mut self,
+        result: Result<AppliedValue<SystemTime>, pf_ports::TimeError>,
+    ) {
+        self.system_status = Some(match &result {
+            Ok(value) if value.requested == value.applied => "Manual time applied".into(),
+            Ok(_) => "Manual time requested · device applied a different time".into(),
+            Err(error) => format!("Manual time unavailable · {error:?}"),
+        });
+        if let (Ok(state), Ok(value)) = (&mut self.time_state, result) {
+            state.wall_clock = value.applied;
+        }
+        self.bump_revision();
+    }
+
+    pub fn transfer_result(
+        &mut self,
+        result: Result<AppliedTransferState, pf_ports::TransferError>,
+    ) {
+        self.system_status = Some(match &result {
+            Ok(value) => applied_bool_status(
+                "File transfer",
+                &Ok(AppliedValue {
+                    requested: value.requested,
+                    applied: value.applied.enabled,
+                }),
+            ),
+            Err(error) => format!("File transfer unavailable · {error:?}"),
+        });
+        if let (Ok(states), Ok(value)) = (&mut self.transfer_services, result) {
+            if let Some(state) = states
+                .iter_mut()
+                .find(|state| state.service == value.applied.service)
+            {
+                *state = value.applied;
+            }
+        }
+        self.bump_revision();
+    }
+
+    fn system_rows(&self) -> Vec<SystemRow> {
+        let mut rows = Vec::new();
+        if self.time_state.is_ok() {
+            rows.push(SystemRow::Timezone);
+        }
+        if self
+            .time_state
+            .as_ref()
+            .is_ok_and(|state| state.ntp_state != NtpState::Unsupported)
+        {
+            rows.push(SystemRow::Ntp);
+        }
+        if self
+            .time_capabilities
+            .as_ref()
+            .is_ok_and(|capabilities| capabilities.manual_set_time == Support::Supported)
+            && self
+                .time_state
+                .as_ref()
+                .is_ok_and(|state| state.ntp_state != NtpState::Active)
+        {
+            rows.push(SystemRow::ManualTime);
+        }
+        if let Ok(services) = &self.transfer_services {
+            rows.extend(
+                services
+                    .iter()
+                    .filter(|state| state.support == Support::Supported)
+                    .map(|state| SystemRow::Transfer(state.service)),
+            );
+        }
+        rows.push(SystemRow::Accessibility);
+        rows
     }
 
     /// Loads Settings exclusively through the runtime preference boundary. A row is interactive
@@ -793,6 +1009,27 @@ impl ShellCore {
                 ControlsFlow::Rows => {}
             }
         }
+        if self.route == Route::Settings
+            && self.settings_room == SettingsRoom::Network
+            && self.network_flow == NetworkFlow::Credential
+        {
+            return match action {
+                ShellAction::Back => {
+                    self.network_flow = NetworkFlow::Rows;
+                    self.wifi_credential = WifiCredential::new(Vec::new());
+                    None
+                }
+                ShellAction::Activate => {
+                    let ssid = self.wifi_networks.get(self.selected_wifi?)?.ssid.clone();
+                    let credential = std::mem::replace(
+                        &mut self.wifi_credential,
+                        WifiCredential::new(Vec::new()),
+                    );
+                    Some(Effect::ConnectWifi { ssid, credential })
+                }
+                _ => None,
+            };
+        }
         if matches!(self.presentation, Presentation::Crash) {
             return match action {
                 ShellAction::Back => {
@@ -863,7 +1100,8 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Right) if self.route == Route::Settings => {
                 self.settings_room = match self.settings_room {
                     SettingsRoom::Display => SettingsRoom::Controls,
-                    SettingsRoom::Controls | SettingsRoom::System => SettingsRoom::System,
+                    SettingsRoom::Controls => SettingsRoom::Network,
+                    SettingsRoom::Network | SettingsRoom::System => SettingsRoom::System,
                 };
                 self.focus = 0;
             }
@@ -871,7 +1109,8 @@ impl ShellCore {
                 if self.route == Route::Settings && self.settings_room != SettingsRoom::Display =>
             {
                 self.settings_room = match self.settings_room {
-                    SettingsRoom::System => SettingsRoom::Controls,
+                    SettingsRoom::System => SettingsRoom::Network,
+                    SettingsRoom::Network => SettingsRoom::Controls,
                     SettingsRoom::Controls | SettingsRoom::Display => SettingsRoom::Display,
                 };
                 self.focus = 0;
@@ -921,8 +1160,43 @@ impl ShellCore {
                     self.focus = 0;
                     None
                 }
-                SettingsRoom::System if self.focus == 1 => Some(Effect::ResetFirstRun),
-                _ => None,
+                SettingsRoom::Network => {
+                    self.selected_wifi = Some(self.focus);
+                    self.network_flow = NetworkFlow::Credential;
+                    self.wifi_credential = WifiCredential::new(Vec::new());
+                    None
+                }
+                SettingsRoom::System => match self.system_rows().get(self.focus).copied()? {
+                    SystemRow::Timezone => {
+                        let current = self.time_state.as_ref().ok()?.timezone.as_str();
+                        let next = TIMEZONES
+                            .iter()
+                            .position(|zone| *zone == current)
+                            .map_or(0, |index| (index + 1) % TIMEZONES.len());
+                        Some(Effect::SetTimezone(TIMEZONES[next].into()))
+                    }
+                    SystemRow::Ntp => Some(Effect::SetNtp(
+                        self.time_state.as_ref().ok()?.ntp_state != NtpState::Active,
+                    )),
+                    SystemRow::ManualTime => Some(Effect::SetManualTime(
+                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
+                    )),
+                    SystemRow::Transfer(service) => {
+                        let enabled = self
+                            .transfer_services
+                            .as_ref()
+                            .ok()?
+                            .iter()
+                            .find(|state| state.service == service)?
+                            .enabled;
+                        Some(Effect::SetTransfer {
+                            service,
+                            enabled: !enabled,
+                        })
+                    }
+                    SystemRow::Accessibility => Some(Effect::ResetFirstRun),
+                },
+                SettingsRoom::Controls => None,
             };
         }
         if self.route == Route::Settings
@@ -1134,7 +1408,11 @@ impl ShellCore {
                     ControlsFlow::Rows | ControlsFlow::RemapPreview => 2,
                     ControlsFlow::SafeReturnPicker => self.safe_return_options.len().max(1),
                 },
-                SettingsRoom::System => 2 + usize::from(self.recovery_available),
+                SettingsRoom::Network => match self.network_flow {
+                    NetworkFlow::Rows => self.wifi_networks.len().max(1),
+                    NetworkFlow::Credential => 1,
+                },
+                SettingsRoom::System => self.system_rows().len().max(1),
             },
             Route::Quick => self.idle_row() + usize::from(self.idle_policy_loaded),
         }
@@ -1317,6 +1595,7 @@ impl ShellCore {
             Route::Settings => match self.settings_room {
                 SettingsRoom::Display => "SETTINGS · DISPLAY",
                 SettingsRoom::Controls => "SETTINGS · CONTROLS",
+                SettingsRoom::Network => "SETTINGS · NETWORK",
                 SettingsRoom::System => "SETTINGS · SYSTEM",
             },
             Route::Quick => unreachable!(),
@@ -1809,6 +2088,39 @@ impl ShellCore {
     }
 
     fn settings_nodes(&self, out: &mut Vec<Node>, w: f32) {
+        if self.settings_room == SettingsRoom::Network
+            && self.network_flow == NetworkFlow::Credential
+        {
+            let ssid = self
+                .selected_wifi
+                .and_then(|index| self.wifi_networks.get(index))
+                .map_or("Network", |network| network.ssid.as_str());
+            let mask = "•".repeat(self.wifi_credential.expose_secret().len());
+            let mut entry = node(
+                "wifi-credential-entry",
+                Role::Button,
+                &format!("Join {ssid} · Passphrase {mask}"),
+                48.0,
+                180.0,
+                w - 96.0,
+                72.0,
+                "--state-focused-ring",
+            );
+            entry.state.focused = true;
+            entry.action = Some(NodeAction::Activate);
+            out.push(entry);
+            out.push(node(
+                "wifi-credential-privacy",
+                Role::Text,
+                "Passphrase hidden · Activate to connect · Back to cancel",
+                48.0,
+                270.0,
+                w - 96.0,
+                44.0,
+                "--color-text-secondary",
+            ));
+            return;
+        }
         if self.settings_room == SettingsRoom::Controls {
             match self.controls_flow {
                 ControlsFlow::RemapPreview => {
@@ -1891,10 +2203,102 @@ impl ShellCore {
                     true,
                 ),
             ],
-            SettingsRoom::System => vec![
-                ("Device · PocketForge simulator · Runtime 1".into(), false),
-                ("Show accessibility comfort panel again".into(), true),
-            ],
+            SettingsRoom::Network => {
+                if self.wifi_networks.is_empty() {
+                    vec![(
+                        self.network_status
+                            .clone()
+                            .or_else(|| self.network_state.as_ref().err().cloned())
+                            .unwrap_or_else(|| "No networks found".into()),
+                        false,
+                    )]
+                } else {
+                    self.wifi_networks
+                        .iter()
+                        .map(|network| {
+                            let security = match network.security {
+                                pf_ports::WifiSecurity::Open => "Open",
+                                pf_ports::WifiSecurity::Personal => "Personal",
+                                pf_ports::WifiSecurity::Enterprise => "Enterprise",
+                                pf_ports::WifiSecurity::Unknown => "Unknown security",
+                            };
+                            let connected = self
+                                .network_state
+                                .as_ref()
+                                .ok()
+                                .and_then(|state| state.connected_ssid.as_deref())
+                                .is_some_and(|ssid| ssid == network.ssid);
+                            (
+                                format!(
+                                    "{} · {security} · {}%{}",
+                                    network.ssid,
+                                    network.strength,
+                                    if connected { " · Connected" } else { "" }
+                                ),
+                                true,
+                            )
+                        })
+                        .collect()
+                }
+            }
+            SettingsRoom::System if self.system_rows().is_empty() => vec![(
+                self.time_state
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .or_else(|| self.transfer_services.as_ref().err().cloned())
+                    .unwrap_or_else(|| "System controls unavailable".into()),
+                false,
+            )],
+            SettingsRoom::System => self
+                .system_rows()
+                .into_iter()
+                .map(|row| match row {
+                    SystemRow::Timezone => (
+                        self.time_state.as_ref().map_or_else(Clone::clone, |state| {
+                            format!("Timezone · {}", state.timezone)
+                        }),
+                        true,
+                    ),
+                    SystemRow::Ntp => (
+                        format!(
+                            "Automatic time · {}",
+                            if self
+                                .time_state
+                                .as_ref()
+                                .is_ok_and(|state| state.ntp_state == NtpState::Active)
+                            {
+                                "On"
+                            } else {
+                                "Off"
+                            }
+                        ),
+                        true,
+                    ),
+                    SystemRow::ManualTime => ("Set time manually · 2027-01-15 08:00".into(), true),
+                    SystemRow::Transfer(service) => {
+                        let state = self.transfer_services.as_ref().ok().and_then(|states| {
+                            states.iter().find(|state| state.service == service)
+                        });
+                        let name = match service {
+                            TransferService::Sftp => "SFTP transfer",
+                            TransferService::UsbMassStorage => "USB storage transfer",
+                        };
+                        (
+                            format!(
+                                "{name} · {}",
+                                if state.is_some_and(|state| state.enabled) {
+                                    "On"
+                                } else {
+                                    "Off"
+                                }
+                            ),
+                            true,
+                        )
+                    }
+                    SystemRow::Accessibility => ("Accessibility & comfort".into(), true),
+                })
+                .collect(),
         };
         for (i, (label, interactive)) in labels.into_iter().enumerate() {
             let mut n = node(
@@ -1968,6 +2372,50 @@ impl ShellCore {
                 100.0,
                 "--color-text-secondary",
             ));
+        }
+        if self.settings_room == SettingsRoom::Network {
+            if let Some(status) = &self.network_status {
+                out.push(node(
+                    "network-status",
+                    Role::Text,
+                    status,
+                    48.0,
+                    540.0,
+                    w - 96.0,
+                    44.0,
+                    "--color-text-secondary",
+                ));
+            }
+        }
+        if self.settings_room == SettingsRoom::System {
+            if self
+                .time_state
+                .as_ref()
+                .is_ok_and(|state| state.ntp_state == NtpState::Unsupported)
+            {
+                out.push(node(
+                    "ntp-unsupported-note",
+                    Role::Text,
+                    "Automatic time unavailable on this device",
+                    48.0,
+                    500.0,
+                    w - 96.0,
+                    40.0,
+                    "--color-text-secondary",
+                ));
+            }
+            if let Some(status) = &self.system_status {
+                out.push(node(
+                    "system-status",
+                    Role::Text,
+                    status,
+                    48.0,
+                    550.0,
+                    w - 96.0,
+                    44.0,
+                    "--color-text-secondary",
+                ));
+            }
         }
     }
 
@@ -2676,6 +3124,175 @@ mod tests {
             .unwrap();
         let debug = format!("{scene:?}");
         assert!(!debug.contains("L1"));
+    }
+
+    fn device_ports(
+        ntp: NtpState,
+    ) -> (
+        pf_ports::FakeNetworkPort,
+        pf_ports::FakeTimePort,
+        pf_ports::FakeTransferPort,
+    ) {
+        let mut network = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: None,
+            signal: None,
+        });
+        network.script_scan(Ok(vec![WifiNetwork {
+            ssid: "Cedar Workshop".into(),
+            security: pf_ports::WifiSecurity::Personal,
+            strength: 64,
+        }]));
+        let time = pf_ports::FakeTimePort::new(
+            TimeCapabilities {
+                manual_set_time: Support::Supported,
+            },
+            pf_ports::TimeState {
+                wall_clock: SystemTime::UNIX_EPOCH,
+                timezone: "UTC".into(),
+                ntp_state: ntp,
+            },
+        );
+        let transfer = pf_ports::FakeTransferPort::new(vec![TransferServiceState {
+            service: TransferService::Sftp,
+            support: Support::Supported,
+            enabled: false,
+            endpoint_info: None,
+        }]);
+        (network, time, transfer)
+    }
+
+    fn settings_scene(core: &ShellCore) -> Scene {
+        core.scene(
+            SurfaceMetrics {
+                logical_width: 1280.,
+                logical_height: 720.,
+                scale: 1.,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            },
+            "A Open · B Back",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn network_room_masks_credentials_and_reports_contract_degradation_states() {
+        let (mut network, _, _) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_network(&mut network);
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::Network;
+        core.action(&ShellAction::Activate);
+        core.set_wifi_passphrase(b"pine-secret".to_vec());
+        let debug = format!("{:?}", settings_scene(&core));
+        assert!(debug.contains("•••••••••••"));
+        assert!(!debug.contains("pine-secret"));
+        let effect = core.action(&ShellAction::Activate).unwrap();
+        let Effect::ConnectWifi { credential, .. } = effect else {
+            panic!("credential flow must connect")
+        };
+        assert_eq!(credential.expose_secret(), b"pine-secret");
+        assert!(!format!("{credential:?}").contains("pine-secret"));
+
+        for (result, label) in [
+            (
+                Ok(ConnectResult::Progress(
+                    pf_ports::ConnectProgress::Authenticating,
+                )),
+                "Joining · Authenticating",
+            ),
+            (Ok(ConnectResult::Refused), "authentication refused"),
+            (
+                Ok(ConnectResult::Connected {
+                    ssid: "Cedar Workshop".into(),
+                }),
+                "Connected · Cedar Workshop",
+            ),
+        ] {
+            core.network_result(result);
+            assert!(format!("{:?}", settings_scene(&core)).contains(label));
+        }
+    }
+
+    #[test]
+    fn system_room_gates_ntp_and_manual_time_and_renders_ruled_anatomy() {
+        let (_, unsupported_time, transfer) = device_ports(NtpState::Unsupported);
+        let mut core = core();
+        core.load_system(&unsupported_time, &transfer);
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::System;
+        let debug = format!("{:?}", settings_scene(&core));
+        assert!(
+            !debug.contains("settings-row-1\", role: Button, accessible_label: \"Automatic time")
+        );
+        assert!(debug.contains("ntp-unsupported-note"));
+        assert!(debug.contains("Set time manually"));
+
+        let (_, active_time, transfer) = device_ports(NtpState::Active);
+        core.load_system(&active_time, &transfer);
+        let active = format!("{:?}", settings_scene(&core));
+        assert!(active.contains("Automatic time · On"));
+        assert!(!active.contains("Set time manually"));
+        assert!(active.contains("Accessibility & comfort"));
+        assert_eq!(core.focus_count(), 4);
+        for id in [
+            "settings-row-0",
+            "settings-row-1",
+            "settings-row-2",
+            "settings-row-3",
+        ] {
+            assert!(active.contains(id));
+        }
+
+        for _ in 0..3 {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        assert_eq!(core.focus(), 3);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::ResetFirstRun)
+        );
+    }
+
+    #[test]
+    fn system_requested_vs_applied_divergence_is_explicit() {
+        let (_, time, transfer) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_system(&time, &transfer);
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::System;
+        core.timezone_result(Ok(AppliedValue {
+            requested: "Europe/London".into(),
+            applied: "UTC".into(),
+        }));
+        assert!(
+            format!("{:?}", settings_scene(&core))
+                .contains("Requested Europe/London · applied UTC")
+        );
+        core.ntp_result(Ok(AppliedValue {
+            requested: true,
+            applied: false,
+        }));
+        assert!(
+            format!("{:?}", settings_scene(&core))
+                .contains("Automatic time requested On · applied Off")
+        );
+        core.transfer_result(Ok(AppliedTransferState {
+            requested: true,
+            applied: TransferServiceState {
+                service: TransferService::Sftp,
+                support: Support::Supported,
+                enabled: false,
+                endpoint_info: None,
+            },
+            warning: None,
+        }));
+        assert!(
+            format!("{:?}", settings_scene(&core))
+                .contains("File transfer requested On · applied Off")
+        );
     }
     #[test]
     fn applied_accessibility_fixture_is_live_and_first_run_is_once_only() {

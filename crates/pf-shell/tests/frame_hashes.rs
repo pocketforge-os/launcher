@@ -66,7 +66,15 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     assert!(
         transcript.contains("adcc55c717383ace233142c224a884d76e38cdb0dc461dd29dae72df3354d919  ")
     );
+    assert!(
+        transcript.contains("ddbcb6a272918daceb3aaa7f7bb9e347a0191bd7ebd229892814399c37ce4d17  ")
+    );
+    assert!(
+        transcript.contains("945fbb288770a59408b10970e2925059a2f17ec5c912e28a6dd4354c4b929e9a  ")
+    );
     assert!(out.path().join("settings.png").is_file());
+    assert!(out.path().join("network.png").is_file());
+    assert!(out.path().join("system.png").is_file());
     assert!(out.path().join("first-run.png").is_file());
 }
 

@@ -36,6 +36,8 @@ pub struct CatalogItem {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     pub icon_reference: Option<String>,
+    #[serde(default)]
+    pub icon_decodable: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -466,12 +468,14 @@ impl InstalledAppProvider {
                 observed_digest: digest,
             },
         };
+        let icon_reference = m.app.icon;
         items.push(CatalogItem {
             id,
             title: m.app.name.unwrap_or(m.app.id),
             kind: m.app.category.unwrap_or(AppKind::Game),
             presentation: Presentation {
-                icon_reference: m.app.icon,
+                icon_decodable: icon_reference.is_some(),
+                icon_reference,
             },
             tags: vec![],
             variants: vec![variant],

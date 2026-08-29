@@ -56,6 +56,7 @@ struct Item {
     kind: AppKind,
     tags: Vec<String>,
     icon_reference: Option<String>,
+    icon_decodable: bool,
     variants: Vec<Variant>,
 }
 
@@ -101,6 +102,7 @@ impl ShellCore {
                 kind: item.kind.clone(),
                 tags: item.tags.clone(),
                 icon_reference: item.presentation.icon_reference.clone(),
+                icon_decodable: item.presentation.icon_decodable,
                 variants: item.variants.clone(),
             })
             .collect();
@@ -181,9 +183,9 @@ impl ShellCore {
         self.focus = 0;
     }
     #[must_use]
-    pub fn art_treatment(&self, item_id: &str, art_is_decodable: bool) -> Option<ArtTreatment> {
+    pub fn art_treatment(&self, item_id: &str) -> Option<ArtTreatment> {
         let item = self.items.iter().find(|item| item.id == item_id)?;
-        if item.icon_reference.is_some() && art_is_decodable {
+        if item.icon_reference.is_some() && item.icon_decodable {
             return Some(ArtTreatment::CatalogArt);
         }
         let hash = item
@@ -365,6 +367,9 @@ impl ShellCore {
             return self.launch_variant(item, variant);
         }
         if self.route != Route::Home {
+            return None;
+        }
+        if self.items.is_empty() {
             return None;
         }
         let ready = self.ready_variants(self.focus);
@@ -560,7 +565,7 @@ impl ShellCore {
         )
     }
 
-    fn route_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+    fn route_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
         let heading = match self.route {
             Route::Home => {
                 if self.just_returned {
@@ -659,16 +664,7 @@ impl ShellCore {
                     .variants
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
-                n.children = edition_plate_nodes(
-                    &item.id,
-                    &item.title,
-                    kind_text(&item.kind),
-                    "home-card",
-                    x,
-                    438.0,
-                    card_width,
-                    i == self.focus,
-                );
+                n.children = art_nodes(item, "home-card", x, 438.0, card_width, i == self.focus);
                 out.push(n);
             }
             if self.presentation == Presentation::ForcedClose {
@@ -709,6 +705,14 @@ impl ShellCore {
                 3
             };
             let card_width = (w - 96.0 - (columns - 1) as f32 * 16.0) / columns as f32;
+            let row_height = 250.0;
+            let card_top = 244.0;
+            let mut visible_rows: usize = 1;
+            while card_top + (visible_rows + 1) as f32 * row_height - 18.0 <= h {
+                visible_rows += 1;
+            }
+            let focused_row = self.focus.saturating_sub(1) / columns;
+            let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
             for (i, item) in self.items.iter().enumerate() {
                 let availability = best_availability(item);
                 let column = i % columns;
@@ -722,20 +726,18 @@ impl ShellCore {
                         availability_text(availability, &self.presentation)
                     ),
                     48.0 + column as f32 * (card_width + 16.0),
-                    244.0 + row as f32 * 250.0,
+                    card_top + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
                     232.0,
                     state_token(availability, self.focus == i + 1),
                 );
                 card.state.focused = self.focus == i + 1;
                 card.action = Some(NodeAction::Activate);
-                card.children = edition_plate_nodes(
-                    &item.id,
-                    &item.title,
-                    kind_text(&item.kind),
+                card.children = art_nodes(
+                    item,
                     "library-card",
                     48.0 + column as f32 * (card_width + 16.0),
-                    252.0 + row as f32 * 250.0,
+                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
                     self.focus == i + 1,
                 );
@@ -836,16 +838,7 @@ impl ShellCore {
                 58.0,
                 "--state-rest-text",
             ));
-            out.extend(edition_plate_nodes(
-                &item.id,
-                &item.title,
-                kind_text(&item.kind),
-                "detail-art",
-                48.0,
-                165.0,
-                304.0,
-                false,
-            ));
+            out.extend(art_nodes(item, "detail-art", 48.0, 165.0, 304.0, false));
             for (variant_index, variant) in item.variants.iter().enumerate() {
                 out.push(node(
                     &format!("detail-variant-{variant_index}"),
@@ -1152,6 +1145,52 @@ fn edition_plate_nodes(
     ]
 }
 
+fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
+    if let Some(reference) = item
+        .icon_reference
+        .as_deref()
+        .filter(|_| item.icon_decodable)
+    {
+        let home = context == "home-card";
+        return vec![
+            node(
+                &format!("{context}-catalog-art-{}", item.id),
+                Role::Group,
+                &format!("Catalog art for {} from {reference}", item.title),
+                x + 8.0,
+                y,
+                width - 16.0,
+                if home { 158.0 } else { 136.0 },
+                "--state-rest-surface",
+            ),
+            node(
+                &format!("{context}-title-{}", item.id),
+                Role::Text,
+                &item.title,
+                x,
+                if home { y + 210.0 } else { y + 176.0 },
+                width,
+                28.0,
+                if focused {
+                    "--state-focused-text"
+                } else {
+                    "--color-text-secondary"
+                },
+            ),
+        ];
+    }
+    edition_plate_nodes(
+        &item.id,
+        &item.title,
+        kind_text(&item.kind),
+        context,
+        x,
+        y,
+        width,
+        focused,
+    )
+}
+
 fn availability_text(a: &Availability, p: &Presentation) -> String {
     match a {
         Availability::Ready if matches!(p, Presentation::Starting) => "Starting".into(),
@@ -1232,6 +1271,7 @@ mod tests {
                     kind: AppKind::Game,
                     presentation: CP {
                         icon_reference: None,
+                        icon_decodable: false,
                     },
                     tags: vec![],
                     variants: vec![Variant {
@@ -1444,6 +1484,7 @@ mod tests {
             kind: AppKind::Game,
             presentation: CP {
                 icon_reference: None,
+                icon_decodable: false,
             },
             tags: vec!["fictional".into(), format!("group-{id}")],
             variants,
@@ -1540,6 +1581,14 @@ mod tests {
     }
 
     #[test]
+    fn activating_empty_catalog_is_a_no_op() {
+        let mut core = fixture_core(vec![]);
+        assert_eq!(core.focus_count(), 1);
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.route(), Route::Home);
+    }
+
+    #[test]
     fn edition_plate_replaces_missing_or_corrupt_art_stably() {
         let mut catalog_item = item(
             "plate-id",
@@ -1547,12 +1596,49 @@ mod tests {
             vec![variant("native", "paper-comet", Availability::Ready)],
         );
         catalog_item.presentation.icon_reference = Some("art/paper-comet.png".into());
+        catalog_item.presentation.icon_decodable = true;
         let core = fixture_core(vec![catalog_item]);
         assert_eq!(
-            core.art_treatment("plate-id", true),
+            core.art_treatment("plate-id"),
             Some(ArtTreatment::CatalogArt)
         );
-        let corrupt = core.art_treatment("plate-id", false).unwrap();
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open · B Back",
+            )
+            .unwrap();
+        let card = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "item-plate-id")
+            .unwrap();
+        assert!(card.children.iter().any(|node| {
+            node.id.as_str() == "home-card-catalog-art-plate-id"
+                && node.accessible_label.contains("art/paper-comet.png")
+        }));
+        assert!(
+            !card
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-plate-plate-id")
+        );
+
+        let mut corrupt_item = item(
+            "plate-id",
+            "Paper Comet",
+            vec![variant("native", "paper-comet", Availability::Ready)],
+        );
+        corrupt_item.presentation.icon_reference = Some("art/paper-comet.png".into());
+        let corrupt_core = fixture_core(vec![corrupt_item]);
+        let corrupt = corrupt_core.art_treatment("plate-id").unwrap();
         assert!(matches!(
             corrupt,
             ArtTreatment::EditionPlate {
@@ -1560,7 +1646,46 @@ mod tests {
                 motif: 0..=5
             }
         ));
-        assert_eq!(corrupt, core.art_treatment("plate-id", false).unwrap());
+        assert_eq!(corrupt, corrupt_core.art_treatment("plate-id").unwrap());
+    }
+
+    #[test]
+    fn deep_library_focus_is_windowed_inside_surface() {
+        let items = (0..500)
+            .map(|index| {
+                item(
+                    &format!("title-{index:03}"),
+                    &format!("Fictional Title {index:03}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index:03}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        for _ in 0..481 {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "A Open · B Back").unwrap();
+        let focused = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.state.focused && node.id.as_str().starts_with("library-item-"))
+            .unwrap();
+        assert!(focused.bounds.y >= 0.0);
+        assert!(focused.bounds.y + focused.bounds.height <= metrics.logical_height);
+        assert_eq!(focused.id.as_str(), "library-item-title-480");
     }
 
     #[test]

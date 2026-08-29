@@ -92,6 +92,11 @@ impl ShellCore {
     }
 
     pub fn action(&mut self, action: &ShellAction) -> Option<Effect> {
+        // Safe Return is a global, protected action. It must reach the session
+        // authority while the shelf is visible, dimming, or owned by an app.
+        if matches!(action, ShellAction::Custom(name) if name == "SafeReturn") {
+            return Some(Effect::SafeReturn);
+        }
         if self.presentation != Presentation::Home {
             return None;
         }
@@ -112,7 +117,6 @@ impl ShellCore {
                     item_id: id.clone(),
                 }));
             }
-            ShellAction::Custom(name) if name == "SafeReturn" => return Some(Effect::SafeReturn),
             ShellAction::Custom(_) => {}
         }
         None
@@ -154,66 +158,114 @@ impl ShellCore {
     pub fn scene(&self, metrics: SurfaceMetrics, activate_prompt: &str) -> Scene {
         let w = metrics.logical_width;
         let h = metrics.logical_height;
-        let margin = (w * 0.05).max(32.0);
+        let margin = if w >= 1024.0 { 48.0 } else { 32.0 };
         let dimmed = self.presentation != Presentation::Home;
+        let focused_title = self
+            .ready
+            .get(self.focus)
+            .map_or("Nothing ready", |(_, title)| title.as_str());
         let mut children = vec![
             node(
-                "brand",
+                "status-left-spacer",
                 Role::Text,
-                "POCKETFORGE",
-                margin,
-                22.0,
-                180.0,
+                "",
+                0.0,
+                0.0,
+                200.0,
+                64.0,
+                "--color-surface-canvas",
+            ),
+            node(
+                "rooms",
+                Role::Text,
+                "L     Home     Library     Settings     R",
+                w / 2.0 - 220.0,
+                16.0,
+                440.0,
                 32.0,
                 "--state-rest-text",
             ),
             node(
-                "home",
-                Role::Heading,
-                "HOME",
+                "room-underline",
+                Role::Text,
+                "",
+                w / 2.0 - 125.0,
+                50.0,
+                42.0,
+                3.0,
+                "--state-selected-accent",
+            ),
+            node(
+                "system",
+                Role::Text,
+                "Wi-Fi   82%   9:41",
+                w - 248.0,
+                16.0,
+                200.0,
+                32.0,
+                "--color-text-secondary",
+            ),
+            node(
+                "hero-eyebrow",
+                Role::Text,
+                "RECENT · TONIGHT",
                 margin,
-                78.0,
-                w * 0.55,
-                76.0,
+                118.0,
+                240.0,
+                28.0,
+                "--color-text-muted",
+            ),
+            node(
+                "hero-title",
+                Role::Heading,
+                focused_title,
+                margin,
+                154.0,
+                620.0,
+                64.0,
                 "--state-rest-text",
             ),
             node(
-                "status",
+                "hero-status",
                 Role::Text,
                 if dimmed {
-                    "LIGHTS OUT"
+                    "● Starting · Game · Installed"
                 } else {
-                    "YOUR GAMES, READY WHEN YOU ARE"
+                    "● Ready · Game · Installed"
                 },
                 margin,
-                154.0,
-                w * 0.7,
-                38.0,
-                "--color-text-muted",
+                226.0,
+                480.0,
+                32.0,
+                if dimmed {
+                    "--color-text-muted"
+                } else {
+                    "--color-status-ready"
+                },
             ),
             node(
                 "ready-heading",
                 Role::Heading,
-                "READY NOW",
+                &format!("READY NOW · {}", self.ready.len()),
                 margin,
-                h * 0.39,
+                398.0,
                 220.0,
-                36.0,
-                "--state-rest-text",
+                28.0,
+                "--color-text-muted",
             ),
         ];
-        let count = self.ready.len().max(1) as f32;
-        let gap = 18.0;
-        let card_w = ((w - margin * 2.0 - gap * (count - 1.0)) / count).min(290.0);
+        let gap = 24.0;
+        let card_w = 158.0_f32.min((w - margin * 2.0) / self.ready.len().max(1) as f32 - gap);
         for (index, (id, title)) in self.ready.iter().enumerate() {
+            let x = margin + index as f32 * (card_w + gap);
             let mut card = node(
                 &format!("ready-{id}"),
                 Role::Button,
-                title,
-                margin + index as f32 * (card_w + gap),
-                h * 0.47,
+                "",
+                x,
+                430.0,
                 card_w,
-                h * 0.29,
+                210.0,
                 if index == self.focus {
                     "--state-focused-ring"
                 } else {
@@ -223,30 +275,73 @@ impl ShellCore {
             card.action = Some(NodeAction::Activate);
             card.state.focused = index == self.focus;
             card.state.disabled = dimmed;
+            let monogram = title.chars().next().unwrap_or('·').to_string();
+            let motif = match stable_plate(id) % 6 {
+                0 => "╱  ╱  ╱\n  ╱  ╱",
+                1 => "≈ ≈ ≈\n ≈ ≈ ≈",
+                2 => "· · · ·\n · · ·",
+                3 => "○   ◌\n  ◉",
+                4 => "⌁ ⌁ ⌁\n ⌁ ⌁",
+                _ => "\\ | /\n— ◉ —",
+            };
+            card.children = vec![
+                node(
+                    &format!("plate-motif-{id}"),
+                    Role::Text,
+                    motif,
+                    x + 8.0,
+                    438.0,
+                    card_w - 16.0,
+                    60.0,
+                    plate_token(stable_plate(id)),
+                ),
+                node(
+                    &format!("plate-mono-{id}"),
+                    Role::Text,
+                    &monogram,
+                    x + 42.0,
+                    510.0,
+                    card_w - 84.0,
+                    58.0,
+                    plate_token(stable_plate(id)),
+                ),
+                node(
+                    &format!("plate-kind-{id}"),
+                    Role::Text,
+                    "GAME",
+                    x + 12.0,
+                    604.0,
+                    card_w - 24.0,
+                    24.0,
+                    plate_token(stable_plate(id)),
+                ),
+                node(
+                    &format!("label-{id}"),
+                    Role::Text,
+                    title,
+                    x,
+                    648.0,
+                    card_w,
+                    28.0,
+                    if index == self.focus {
+                        "--state-focused-text"
+                    } else {
+                        "--color-text-secondary"
+                    },
+                ),
+            ];
             children.push(card);
         }
-        children.extend([
-            node(
-                "nav",
-                Role::Text,
-                "HOME    QUICK · COMING LATER    LIBRARY · COMING LATER    SETTINGS · COMING LATER",
-                margin,
-                h - 82.0,
-                w - margin * 2.0,
-                28.0,
-                "--state-rest-text",
-            ),
-            node(
-                "prompts",
-                Role::Text,
-                &format!("{activate_prompt}  ACTIVATE     B  BACK"),
-                margin,
-                h - 46.0,
-                w - margin * 2.0,
-                24.0,
-                "--color-text-muted",
-            ),
-        ]);
+        children.extend([node(
+            "prompts",
+            Role::Text,
+            &format!("SELECT  Search       X  Quick       {activate_prompt}  Open"),
+            w - 560.0,
+            h - 48.0,
+            512.0,
+            32.0,
+            "--color-text-secondary",
+        )]);
         let root = Node::new(
             NodeId::new("quiet-console").unwrap(),
             Role::Group,
@@ -261,6 +356,23 @@ impl ShellCore {
             .map_or("quiet-console".to_owned(), |(id, _)| format!("ready-{id}"));
         Scene::new(root, NodeId::new(default).unwrap()).expect("unique deterministic Home scene")
     }
+}
+
+fn stable_plate(id: &str) -> usize {
+    id.bytes().fold(0_usize, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(usize::from(byte))
+    })
+}
+
+fn plate_token(hash: usize) -> &'static str {
+    [
+        "--deco-plate-a-bg",
+        "--deco-plate-b-bg",
+        "--deco-plate-c-bg",
+        "--deco-plate-d-bg",
+        "--deco-plate-e-bg",
+        "--deco-plate-f-bg",
+    ][hash % 6]
 }
 
 fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token: &str) -> Node {
@@ -289,7 +401,7 @@ mod tests {
             observed_at_unix_seconds: 0,
             provider_results: vec![],
             user_projection: UserProjection::default(),
-            items: ["Celeste", "Sonic Mania", "A Short Hike"]
+            items: ["Ridgeline", "Hollow Tides", "Sunwake"]
                 .into_iter()
                 .enumerate()
                 .map(|(i, title)| pf_catalog::CatalogItem {
@@ -363,5 +475,23 @@ mod tests {
     fn reduced_motion_is_structural_stop() {
         let core = ShellCore::boot(&snapshot(), &pf_theme::flagship(), true);
         assert_eq!(core.motion_duration_ms(), 0);
+    }
+
+    #[test]
+    fn safe_return_is_routed_from_every_presentation_state() {
+        let safe_return = ShellAction::Custom("SafeReturn".into());
+        let mut core = ShellCore::boot(&snapshot(), &pf_theme::flagship(), false);
+        assert_eq!(core.action(&safe_return), Some(Effect::SafeReturn));
+
+        let launch = core.action(&ShellAction::Activate).unwrap();
+        assert!(matches!(launch, Effect::Launch(_)));
+        assert_eq!(core.presentation(), Presentation::LaunchDimmed);
+        assert_eq!(core.action(&safe_return), Some(Effect::SafeReturn));
+
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "safe-return-transcript".into(),
+        });
+        assert_eq!(core.presentation(), Presentation::AppRunning);
+        assert_eq!(core.action(&safe_return), Some(Effect::SafeReturn));
     }
 }

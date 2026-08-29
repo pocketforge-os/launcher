@@ -13,6 +13,7 @@ use pf_ports::{
     InputSourceId, ShellAction,
 };
 use pf_scene::AxisMove;
+use pf_shell_core::ControlBinding;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -25,6 +26,8 @@ use std::{
 pub struct EvdevActionSource {
     file: File,
     by_code: BTreeMap<u16, ShellAction>,
+    control_by_code: BTreeMap<u16, String>,
+    capture_next: bool,
     source: InputSourceId,
     announced: bool,
 }
@@ -52,6 +55,10 @@ impl EvdevActionSource {
                     .map(|code| (control.position.clone(), code))
             })
             .collect::<BTreeMap<_, _>>();
+        let control_by_code = controls
+            .iter()
+            .map(|(position, code)| (*code, position.clone()))
+            .collect();
         let effective = EffectiveMap::load(contract, &MemoryStore::default())
             .map_err(|e| AdapterError::Map(format!("{e:?}")))?;
         let mut by_code = BTreeMap::new();
@@ -75,6 +82,8 @@ impl EvdevActionSource {
             Self {
                 file: File::open(path)?,
                 by_code,
+                control_by_code,
+                capture_next: false,
                 source: InputSourceId(effective.device_id().into()),
                 announced: false,
             },
@@ -132,11 +141,44 @@ impl ActionSource for EvdevActionSource {
                 .expect("four bytes"),
         );
         if event_type == 1 && value == 1 {
+            if self.capture_next {
+                self.capture_next = false;
+                if let Some(control) = self.control_by_code.get(&code) {
+                    return Ok(ActionPoll::Event(ActionEvent::Action(ShellAction::Custom(
+                        format!("Capture.{control}"),
+                    ))));
+                }
+            }
             if let Some(action) = self.by_code.get(&code) {
                 return Ok(ActionPoll::Event(ActionEvent::Action(action.clone())));
             }
         }
         Ok(ActionPoll::DeadlineReached)
+    }
+}
+
+impl EvdevActionSource {
+    pub fn capture_next_button(&mut self) {
+        self.capture_next = true;
+    }
+
+    pub fn apply_effective_map(&mut self, map: &EffectiveMap) {
+        self.by_code.clear();
+        for mapping in map.mappings() {
+            if mapping.binding.shape != BindingShape::SinglePress {
+                continue;
+            }
+            let Some(code) = mapping.binding.controls.first().and_then(|control| {
+                self.control_by_code
+                    .iter()
+                    .find_map(|(code, position)| (position == control).then_some(*code))
+            }) else {
+                continue;
+            };
+            if let Some(action) = semantic_action(&mapping.action) {
+                self.by_code.insert(code, action);
+            }
+        }
     }
 }
 
@@ -419,6 +461,13 @@ impl GamepadRemap {
             previewing: false,
         }
     }
+    #[cfg(test)]
+    fn with_failing_store(map: EffectiveMap) -> Self {
+        Self {
+            engine: RemapEngine::new(map, MemoryStore::failing()),
+            previewing: false,
+        }
+    }
     /// Starts a validated candidate preview.
     ///
     /// # Errors
@@ -430,6 +479,18 @@ impl GamepadRemap {
         action: &str,
         binding: Binding,
     ) -> Result<(), MapError> {
+        if let Some(conflict) = self.engine.map().mappings().iter().find(|mapping| {
+            !(mapping.context == context && mapping.action == action)
+                && (mapping.context == context
+                    || mapping.context == "global"
+                    || context == "global")
+                && mapping.binding == binding
+        }) {
+            return Err(MapError::Collision {
+                first: action.into(),
+                second: conflict.action.clone(),
+            });
+        }
         self.engine.begin(context, action, binding)?;
         self.previewing = true;
         Ok(())
@@ -461,6 +522,58 @@ impl GamepadRemap {
     pub fn map(&self) -> &EffectiveMap {
         self.engine.map()
     }
+
+    /// Atomically restores the device contract's shipped map.
+    ///
+    /// # Errors
+    /// Returns a persistence error if the shipped map cannot be saved. The effective map is
+    /// unchanged when persistence fails.
+    pub fn reset_defaults(&mut self) -> Result<(), MapError> {
+        self.engine.reset_to_shipped()?;
+        Ok(())
+    }
+}
+
+#[must_use]
+pub fn control_bindings(map: &EffectiveMap) -> Vec<ControlBinding> {
+    map.mappings()
+        .iter()
+        .filter(|mapping| semantic_action(&mapping.action).is_some())
+        .map(|mapping| ControlBinding {
+            context: mapping.context.clone(),
+            action: mapping.action.clone(),
+            label: mapping.action.strip_prefix("Move.").map_or_else(
+                || mapping.action.clone(),
+                |direction| format!("Move {direction}"),
+            ),
+            binding: display_action(&mapping.action).map_or_else(
+                || mapping.binding.controls.join(" + "),
+                |action| {
+                    let resolved = prompt(map, &action);
+                    if resolved == "?" {
+                        mapping.binding.controls.join(" + ")
+                    } else if resolved.eq_ignore_ascii_case("guide") || resolved == "pf-guide" {
+                        "PF".into()
+                    } else {
+                        resolved
+                    }
+                },
+            ),
+        })
+        .collect()
+}
+
+fn display_action(name: &str) -> Option<ShellAction> {
+    Some(match name {
+        "Activate" => ShellAction::Activate,
+        "Back" => ShellAction::Back,
+        "Move.up" => ShellAction::Move(AxisMove::Up),
+        "Move.down" => ShellAction::Move(AxisMove::Down),
+        "Move.left" => ShellAction::Move(AxisMove::Left),
+        "Move.right" => ShellAction::Move(AxisMove::Right),
+        custom @ ("SafeReturn" | "Quick") => ShellAction::Custom(custom.into()),
+        _ => return None,
+    })
 }
 
 fn semantic_action(name: &str) -> Option<ShellAction> {
@@ -499,6 +612,33 @@ mod tests {
     use std::io::Write;
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
+
+    fn remap_with_bindings(activate: &str, back: &str) -> GamepadRemap {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let mut persisted = contract.effective_map.clone();
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Activate")
+            .unwrap()
+            .binding = Binding::single(activate);
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Back")
+            .unwrap()
+            .binding = Binding::single(back);
+        let map = EffectiveMap::from_persisted(
+            contract,
+            Some(("pocketforge-sim-gamepad".into(), persisted)),
+        )
+        .unwrap();
+        GamepadRemap::new(map)
+    }
+
+    fn assert_shipped_map(map: &EffectiveMap) {
+        assert!(map.mappings().iter().all(|mapping| {
+            map.shipped_binding(&mapping.context, &mapping.action) == Some(&mapping.binding)
+        }));
+    }
 
     struct ConflictOnce {
         snapshot: CatalogSnapshot,
@@ -620,6 +760,82 @@ mod tests {
             ))
         );
         assert_eq!(prompt(remap.map(), &ShellAction::Activate), before);
+    }
+    #[test]
+    fn remap_confirm_updates_the_effective_binding_and_reset_restores_default() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        let mut remap = GamepadRemap::new(map);
+        remap
+            .preview("global", "Activate", Binding::single("north"))
+            .unwrap();
+        assert_eq!(
+            remap.gamepad_action(&ShellAction::Activate).unwrap(),
+            Some(TransactionOutcome::Committed)
+        );
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "Y");
+        remap.reset_defaults().unwrap();
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+    }
+
+    #[test]
+    fn reset_restores_shipped_map_after_a_chained_move() {
+        let mut remap = remap_with_bindings("north", "east");
+
+        remap.reset_defaults().unwrap();
+
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+        assert_eq!(prompt(remap.map(), &ShellAction::Back), "B");
+        assert_shipped_map(remap.map());
+    }
+
+    #[test]
+    fn reset_restores_shipped_map_after_a_pure_swap() {
+        let mut remap = remap_with_bindings("south", "east");
+
+        remap.reset_defaults().unwrap();
+
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+        assert_eq!(prompt(remap.map(), &ShellAction::Back), "B");
+        assert_shipped_map(remap.map());
+    }
+
+    #[test]
+    fn reset_persistence_failure_is_surfaced_without_partial_change() {
+        let remap = remap_with_bindings("north", "east");
+        let map = remap.map().clone();
+        let unchanged = map.mappings().to_vec();
+        let mut remap = GamepadRemap::with_failing_store(map);
+
+        assert!(matches!(
+            remap.reset_defaults(),
+            Err(MapError::Persistence(_))
+        ));
+        assert_eq!(remap.map().mappings(), unchanged);
+    }
+
+    #[test]
+    fn control_rows_are_projected_from_the_effective_map() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        let rows = control_bindings(&map);
+        assert_eq!(rows.len(), map.mappings().len());
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "Activate" && row.binding == "A")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "Move up" && row.binding == "↑")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "Quick" && row.binding == "X")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "SafeReturn" && row.binding == "PF")
+        );
     }
     #[test]
     fn stranding_collision_is_refused_before_preview() {

@@ -33,6 +33,16 @@ use std::time::{Duration, SystemTime};
 
 const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
 
+fn action_label(action: &str) -> String {
+    if action == "SafeReturn" {
+        return "Safe Return".into();
+    }
+    action.strip_prefix("Move.").map_or_else(
+        || action.to_owned(),
+        |direction| format!("Move {direction}"),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Playtime {
     pub duration: Duration,
@@ -124,9 +134,15 @@ pub enum Effect {
     EnterRecovery,
     ChangePreference(PreferenceChange),
     ResetFirstRun,
-    BeginRemap,
+    CaptureRemap,
+    BeginRemap {
+        context: String,
+        action: String,
+        control: String,
+    },
     ConfirmRemap,
     RollbackRemap,
+    ResetRemaps,
     CompleteFirstRun,
     ToggleFavorite {
         item_id: String,
@@ -169,8 +185,16 @@ pub enum LibraryFilter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlsFlow {
     Rows,
+    Capture,
     RemapPreview,
-    SafeReturnPicker,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlBinding {
+    pub context: String,
+    pub action: String,
+    pub label: String,
+    pub binding: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -265,6 +289,8 @@ pub struct ShellCore {
     safe_return_binding: String,
     safe_return_options: Vec<String>,
     controls_flow: ControlsFlow,
+    control_bindings: Vec<ControlBinding>,
+    controls_status: Option<String>,
     power_capabilities: Vec<PowerCapability>,
     applied_idle_policy: IdlePolicy,
     idle_policy_loaded: bool,
@@ -367,6 +393,8 @@ impl ShellCore {
             safe_return_binding: "PF · the button below the d-pad".into(),
             safe_return_options: Vec::new(),
             controls_flow: ControlsFlow::Rows,
+            control_bindings: Vec::new(),
+            controls_status: None,
             power_capabilities: Vec::new(),
             applied_idle_policy: IdlePolicy::default(),
             idle_policy_loaded: false,
@@ -700,6 +728,32 @@ impl ShellCore {
     pub fn set_safe_return_options(&mut self, options: impl IntoIterator<Item = String>) {
         self.bump_revision();
         self.safe_return_options = options.into_iter().collect();
+    }
+
+    pub fn set_control_bindings(&mut self, bindings: Vec<ControlBinding>) {
+        self.bump_revision();
+        self.control_bindings = bindings;
+    }
+
+    pub fn remap_refused(&mut self, conflicting_action: &str) {
+        self.bump_revision();
+        self.controls_flow = ControlsFlow::Rows;
+        self.controls_status = Some(format!(
+            "That button is already bound to {} · choose another button",
+            action_label(conflicting_action)
+        ));
+    }
+
+    pub fn remap_committed(&mut self, bindings: Vec<ControlBinding>) {
+        self.bump_revision();
+        self.control_bindings = bindings;
+        self.controls_status = Some("Binding saved".into());
+    }
+
+    pub fn remaps_reset(&mut self, bindings: Vec<ControlBinding>) {
+        self.bump_revision();
+        self.control_bindings = bindings;
+        self.controls_status = Some("Controls reset to defaults".into());
     }
     fn first_run_preferences(&self) -> Vec<&DisplayPreference> {
         self.display_preferences
@@ -1048,47 +1102,35 @@ impl ShellCore {
         }
         if self.route == Route::Settings && self.settings_room == SettingsRoom::Controls {
             match self.controls_flow {
-                ControlsFlow::RemapPreview => {
+                ControlsFlow::Capture => {
                     return match action {
-                        ShellAction::Activate => {
-                            self.controls_flow = ControlsFlow::Rows;
-                            self.focus = 0;
-                            Some(Effect::ConfirmRemap)
-                        }
                         ShellAction::Back => {
                             self.controls_flow = ControlsFlow::Rows;
-                            self.focus = 0;
-                            Some(Effect::RollbackRemap)
+                            self.controls_status = None;
+                            None
+                        }
+                        ShellAction::Custom(control) if control.starts_with("Capture.") => {
+                            let selected = self.control_bindings.get(self.focus)?;
+                            let effect = Effect::BeginRemap {
+                                context: selected.context.clone(),
+                                action: selected.action.clone(),
+                                control: control.trim_start_matches("Capture.").into(),
+                            };
+                            self.controls_flow = ControlsFlow::RemapPreview;
+                            Some(effect)
                         }
                         _ => None,
                     };
                 }
-                ControlsFlow::SafeReturnPicker => {
+                ControlsFlow::RemapPreview => {
                     return match action {
-                        ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                            self.focus = (self.focus + 1)
-                                .min(self.safe_return_options.len().saturating_sub(1));
-                            None
-                        }
-                        ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
-                            self.focus = self.focus.saturating_sub(1);
-                            None
+                        ShellAction::Activate => {
+                            self.controls_flow = ControlsFlow::Rows;
+                            Some(Effect::ConfirmRemap)
                         }
                         ShellAction::Back => {
                             self.controls_flow = ControlsFlow::Rows;
-                            self.focus = 1;
-                            None
-                        }
-                        ShellAction::Activate => {
-                            let label = self.safe_return_options.get(self.focus)?.clone();
-                            self.safe_return_binding.clone_from(&label);
-                            self.controls_flow = ControlsFlow::Rows;
-                            self.focus = 1;
-                            Some(Effect::ChangePreference(PreferenceChange {
-                                key: PreferenceKey("safeReturnBinding".into()),
-                                value: PreferenceValue::Text(label),
-                                authority: ChangeAuthority("user".into()),
-                            }))
+                            Some(Effect::RollbackRemap)
                         }
                         _ => None,
                     };
@@ -1247,18 +1289,12 @@ impl ShellCore {
             }
             return match self.settings_room {
                 SettingsRoom::Display => self.preference_effect(self.focus),
-                SettingsRoom::Controls if self.focus == 0 => {
-                    self.controls_flow = ControlsFlow::RemapPreview;
-                    self.focus = 0;
-                    Some(Effect::BeginRemap)
+                SettingsRoom::Controls if self.focus < self.control_bindings.len() => {
+                    self.controls_flow = ControlsFlow::Capture;
+                    self.controls_status = None;
+                    Some(Effect::CaptureRemap)
                 }
-                SettingsRoom::Controls
-                    if self.focus == 1 && !self.safe_return_options.is_empty() =>
-                {
-                    self.controls_flow = ControlsFlow::SafeReturnPicker;
-                    self.focus = 0;
-                    None
-                }
+                SettingsRoom::Controls => Some(Effect::ResetRemaps),
                 SettingsRoom::Network => {
                     self.selected_wifi = Some(self.focus);
                     self.network_flow = NetworkFlow::Credential;
@@ -1295,7 +1331,6 @@ impl ShellCore {
                     }
                     SystemRow::Accessibility => Some(Effect::ResetFirstRun),
                 },
-                SettingsRoom::Controls => None,
             };
         }
         if self.route == Route::Settings
@@ -1531,8 +1566,9 @@ impl ShellCore {
                     self.display_preferences.len().max(1) + usize::from(self.recovery_available)
                 }
                 SettingsRoom::Controls => match self.controls_flow {
-                    ControlsFlow::Rows | ControlsFlow::RemapPreview => 2,
-                    ControlsFlow::SafeReturnPicker => self.safe_return_options.len().max(1),
+                    ControlsFlow::Rows | ControlsFlow::Capture | ControlsFlow::RemapPreview => {
+                        self.control_bindings.len() + 1
+                    }
                 },
                 SettingsRoom::Network => match self.network_flow {
                     NetworkFlow::Rows => self.wifi_networks.len().max(1),
@@ -2299,11 +2335,34 @@ impl ShellCore {
         }
         if self.settings_room == SettingsRoom::Controls {
             match self.controls_flow {
+                ControlsFlow::Capture => {
+                    let action = self
+                        .control_bindings
+                        .get(self.focus)
+                        .map_or("control", |binding| binding.label.as_str());
+                    let mut capture = node(
+                        "remap-capture",
+                        Role::Button,
+                        &format!("{action} · Press a button… · Back to cancel"),
+                        48.0,
+                        180.0,
+                        w - 96.0,
+                        72.0,
+                        "--state-focused-ring",
+                    );
+                    capture.state.focused = true;
+                    out.push(capture);
+                    return;
+                }
                 ControlsFlow::RemapPreview => {
+                    let selected = self.control_bindings.get(self.focus);
                     let mut preview = node(
                         "remap-preview",
                         Role::Button,
-                        "Previewing Activate on the north button · Activate to confirm · Back to roll back",
+                        &format!(
+                            "Previewing {} · Activate to confirm · Back to roll back",
+                            selected.map_or("new binding", |binding| binding.label.as_str())
+                        ),
                         48.0,
                         180.0,
                         w - 96.0,
@@ -2313,28 +2372,6 @@ impl ShellCore {
                     preview.state.focused = true;
                     preview.action = Some(NodeAction::Activate);
                     out.push(preview);
-                    return;
-                }
-                ControlsFlow::SafeReturnPicker => {
-                    for (i, label) in self.safe_return_options.iter().enumerate() {
-                        let mut option = node(
-                            &format!("safe-return-option-{i}"),
-                            Role::Button,
-                            label,
-                            48.0,
-                            180.0 + i as f32 * 72.0,
-                            w - 96.0,
-                            58.0,
-                            if i == self.focus {
-                                "--state-focused-ring"
-                            } else {
-                                "--state-rest-surface"
-                            },
-                        );
-                        option.state.focused = i == self.focus;
-                        option.action = Some(NodeAction::Activate);
-                        out.push(option);
-                    }
                     return;
                 }
                 ControlsFlow::Rows => {}
@@ -2366,19 +2403,12 @@ impl ShellCore {
                     )
                 })
                 .collect(),
-            SettingsRoom::Controls => vec![
-                (
-                    "Button remap · preview and gamepad-safe rollback".into(),
-                    true,
-                ),
-                (
-                    format!(
-                        "Safe Return · {} · choose binding",
-                        self.safe_return_binding
-                    ),
-                    true,
-                ),
-            ],
+            SettingsRoom::Controls => self
+                .control_bindings
+                .iter()
+                .map(|binding| (format!("{} · {}", binding.label, binding.binding), true))
+                .chain(std::iter::once(("Reset to defaults".into(), true)))
+                .collect(),
             SettingsRoom::Network => {
                 if self.wifi_networks.is_empty() {
                     vec![(
@@ -2477,6 +2507,12 @@ impl ShellCore {
                 .collect(),
         };
         for (i, (label, interactive)) in labels.into_iter().enumerate() {
+            let (row_start, row_step, row_height) = if self.settings_room == SettingsRoom::Controls
+            {
+                (170.0, 52.0, 44.0)
+            } else {
+                (180.0, 72.0, 58.0)
+            };
             let mut n = node(
                 &format!("settings-row-{i}"),
                 if interactive {
@@ -2486,9 +2522,9 @@ impl ShellCore {
                 },
                 &label,
                 48.0,
-                180.0 + i as f32 * 72.0 * f32::from(self.text_scale) / 100.0,
+                row_start + i as f32 * row_step * f32::from(self.text_scale) / 100.0,
                 w - 96.0,
-                58.0 * f32::from(self.text_scale) / 100.0,
+                row_height * f32::from(self.text_scale) / 100.0,
                 if !interactive {
                     "--state-unavailable-surface"
                 } else if i == self.focus {
@@ -2537,17 +2573,18 @@ impl ShellCore {
             }
         }
         if self.settings_room == SettingsRoom::Controls {
-            let options = self.safe_return_options.join(" · ");
-            out.push(node(
-                "safe-options",
-                Role::Text,
-                &format!("Options · {options}"),
-                48.0,
-                350.0,
-                w - 96.0,
-                100.0,
-                "--color-text-secondary",
-            ));
+            if let Some(status) = &self.controls_status {
+                out.push(node(
+                    "controls-status",
+                    Role::Text,
+                    status,
+                    48.0,
+                    660.0,
+                    w - 96.0,
+                    36.0,
+                    "--color-text-secondary",
+                ));
+            }
         }
         if self.settings_room == SettingsRoom::Network {
             if let Some(status) = &self.network_status {
@@ -3365,36 +3402,38 @@ mod tests {
     }
 
     #[test]
-    fn controls_rows_enter_real_flows_and_picker_uses_only_supplied_options() {
+    fn controls_rows_derive_bindings_and_drive_capture_preview_rollback_and_reset() {
         let mut c = core();
-        c.set_safe_return_options(["Select + Start".into(), "Double-tap PF".into()]);
+        c.set_control_bindings(vec![ControlBinding {
+            context: "global".into(),
+            action: "Activate".into(),
+            label: "Activate".into(),
+            binding: "A".into(),
+        }]);
         c.go(Route::Settings);
         c.settings_room = SettingsRoom::Controls;
-        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::BeginRemap));
+        let debug = format!("{:?}", settings_scene(&c));
+        assert!(debug.contains("Activate · A"));
+        assert!(debug.contains("Reset to defaults"));
+        assert!(debug.contains("settings-row-1"));
+
+        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::CaptureRemap));
+        assert!(format!("{:?}", settings_scene(&c)).contains("Press a button"));
+        assert_eq!(
+            c.action(&ShellAction::Custom("Capture.north".into())),
+            Some(Effect::BeginRemap {
+                context: "global".into(),
+                action: "Activate".into(),
+                control: "north".into(),
+            })
+        );
         assert_eq!(c.action(&ShellAction::Back), Some(Effect::RollbackRemap));
 
         c.action(&ShellAction::Move(AxisMove::Down));
-        assert_eq!(c.action(&ShellAction::Activate), None);
-        c.action(&ShellAction::Move(AxisMove::Down));
-        let Some(Effect::ChangePreference(change)) = c.action(&ShellAction::Activate) else {
-            panic!("picker must submit the shown option");
-        };
-        assert_eq!(change.key, PreferenceKey("safeReturnBinding".into()));
-        assert_eq!(change.value, PreferenceValue::Text("Double-tap PF".into()));
-        let scene = c
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 1280.,
-                    logical_height: 720.,
-                    scale: 1.,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        let debug = format!("{scene:?}");
-        assert!(!debug.contains("L1"));
+        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::ResetRemaps));
+
+        c.remap_refused("Back");
+        assert!(format!("{:?}", settings_scene(&c)).contains("already bound to Back"));
     }
 
     fn device_ports(

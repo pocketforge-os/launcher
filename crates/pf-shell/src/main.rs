@@ -12,6 +12,7 @@ use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::RenderNote;
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
+use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{EvdevActionSource, GamepadRemap, footer_prompt, safe_return_options};
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,11 @@ use std::{
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
+
+const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 
 fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
     match reference {
@@ -55,6 +60,9 @@ fn main() -> Result<(), String> {
     let footer = footer_prompt(&glyphs);
     let mut core = fixture_core(&snapshot, &theme, reduced);
     core.authority_snapshot(false);
+    if args.iter().any(|arg| arg == "--session-unavailable") {
+        core.session_backend_unavailable_at_boot();
+    }
     core.set_safe_return_options(options.iter().map(|(_, label)| label.clone()));
     let fixture_mode = args
         .iter()
@@ -93,7 +101,7 @@ fn main() -> Result<(), String> {
         let (mut actions, _) =
             EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
                 .map_err(|e| format!("input adapter: {e:?}"))?;
-        present(&mut host, &mut core, &footer)?;
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         return run_fbdev(
             &mut host,
             &mut actions,
@@ -101,6 +109,7 @@ fn main() -> Result<(), String> {
             &footer,
             preferences,
             glyphs,
+            Path::new(session_socket),
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -253,9 +262,19 @@ fn run_fbdev(
     activate: &str,
     preferences: &mut dyn PreferencePort,
     map: EffectiveMap,
+    session_socket: &Path,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
-    let mut session = InteractiveSession::default();
+    let mut session = SessionClient::new(
+        "pf-shell",
+        SocketTransport::connect(session_socket.to_path_buf()),
+    );
+    match wait_for_session_authority(&mut session, Duration::from_secs(3)) {
+        Ok(()) => drive_socket_session(core, &mut session)?,
+        Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
+        Err(error) => return Err(format!("session: {error:?}")),
+    }
+    present(host, core, activate)?;
     let mut remap = GamepadRemap::new(map);
     loop {
         let poll = actions
@@ -270,17 +289,18 @@ fn run_fbdev(
         let before = (core.presentation().clone(), core.focus());
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
-                session.safe_return();
-                core.drive_session(&mut session)
-                    .map_err(|e| format!("{e:?}"))?;
+                drive_socket_session(core, &mut session)?;
             }
-            Some(Effect::Launch(request)) => {
-                let result = session.launch(request).map_err(|e| format!("{e:?}"))?;
-                core.launch_result(&result);
-                present(host, core, activate)?;
-                core.drive_session(&mut session)
-                    .map_err(|e| format!("{e:?}"))?;
-            }
+            Some(Effect::Launch(request)) => match session.launch(request) {
+                Ok(result) => {
+                    core.session_backend_reachable();
+                    core.launch_result(&result);
+                    present(host, core, activate)?;
+                    drive_socket_session(core, &mut session)?;
+                }
+                Err(SessionError::BackendUnavailable) => core.session_backend_unavailable(),
+                Err(error) => return Err(format!("session: {error:?}")),
+            },
             Some(Effect::EnterRecovery) => return Ok(()),
             Some(Effect::ChangePreference(change)) => {
                 preferences
@@ -322,6 +342,56 @@ fn run_fbdev(
             present(host, core, activate)?;
         }
     }
+}
+
+fn wait_for_session_authority(
+    session: &mut dyn SessionPort,
+    timeout: Duration,
+) -> Result<(), SessionError> {
+    let until = Instant::now() + timeout;
+    loop {
+        match session.next_event(Deadline(MonotonicTime::ZERO)) {
+            Ok(_) => return Ok(()),
+            Err(SessionError::BackendUnavailable) if Instant::now() < until => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn drive_socket_session(
+    core: &mut ShellCore,
+    session: &mut SessionClient<SocketTransport>,
+) -> Result<(), String> {
+    loop {
+        match session.next_event(Deadline(MonotonicTime::ZERO)) {
+            Ok(SessionPoll::Event(event)) => {
+                core.session_backend_reachable();
+                core.session_event(&event);
+                if session.acknowledge_last().is_err() {
+                    core.session_backend_unavailable();
+                    break;
+                }
+                if matches!(
+                    core.presentation(),
+                    pf_shell_core::Presentation::RecoveryRequired
+                ) {
+                    break;
+                }
+            }
+            Ok(SessionPoll::Idle | SessionPoll::DeadlineReached) => {
+                core.session_backend_reachable();
+                break;
+            }
+            Err(SessionError::BackendUnavailable) => {
+                core.session_backend_unavailable();
+                break;
+            }
+            Err(error) => return Err(format!("session: {error:?}")),
+        }
+    }
+    Ok(())
 }
 
 fn fixture_preferences() -> FakePreferencePort {
@@ -484,50 +554,6 @@ impl PreferencePort for DurablePreferences {
     }
 }
 
-#[derive(Default)]
-struct InteractiveSession {
-    active: Option<String>,
-    pending: VecDeque<SessionEvent>,
-    history: Vec<SessionEvent>,
-}
-
-impl InteractiveSession {
-    fn safe_return(&mut self) {
-        let Some(session_id) = self.active.take() else {
-            return;
-        };
-        self.pending.extend([
-            SessionEvent::Observed(ObservedSessionState::ObservationComplete),
-            SessionEvent::Terminal(TerminalReceipt::Returned { session_id }),
-        ]);
-    }
-}
-
-impl SessionPort for InteractiveSession {
-    fn launch(&mut self, request: pf_ports::LaunchRequest) -> Result<LaunchResult, SessionError> {
-        if self.active.is_some() {
-            return Ok(LaunchResult::RejectedBusy);
-        }
-        let session_id = format!("launcher-{}", request.item_id);
-        self.active = Some(session_id.clone());
-        self.pending
-            .push_back(SessionEvent::Observed(ObservedSessionState::Running));
-        Ok(LaunchResult::Accepted { session_id })
-    }
-
-    fn next_event(&mut self, _deadline: Deadline) -> Result<SessionPoll, SessionError> {
-        let Some(event) = self.pending.pop_front() else {
-            return Ok(SessionPoll::Idle);
-        };
-        self.history.push(event.clone());
-        Ok(SessionPoll::Event(event))
-    }
-
-    fn history(&self) -> &[SessionEvent] {
-        &self.history
-    }
-}
-
 fn emit(
     host: &mut OffscreenHost,
     core: &mut ShellCore,
@@ -615,6 +641,94 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    struct UnavailableSession;
+
+    impl SessionPort for UnavailableSession {
+        fn launch(
+            &mut self,
+            _request: pf_ports::LaunchRequest,
+        ) -> Result<LaunchResult, SessionError> {
+            Err(SessionError::BackendUnavailable)
+        }
+
+        fn next_event(&mut self, _deadline: Deadline) -> Result<SessionPoll, SessionError> {
+            Err(SessionError::BackendUnavailable)
+        }
+
+        fn history(&self) -> &[SessionEvent] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn unavailable_transport_is_boot_degraded_and_activation_is_honest() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut session = UnavailableSession;
+
+        assert_eq!(
+            wait_for_session_authority(&mut session, Duration::ZERO),
+            Err(SessionError::BackendUnavailable)
+        );
+        core.session_backend_unavailable_at_boot();
+        assert!(core.authority_unavailable());
+        assert!(!core.recovery_available());
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let boot_scene = core.scene(metrics, "").unwrap();
+        assert!(boot_scene.root().children.iter().any(|node| {
+            node.id.as_str() == "status-cluster" && node.accessible_label.contains('!')
+        }));
+        assert!(
+            !boot_scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "session-status")
+        );
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        let settings = core.scene(metrics, "").unwrap();
+        assert!(
+            !settings
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "settings-recovery")
+        );
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Left));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Left));
+
+        let Effect::Launch(request) = core.action(&ShellAction::Activate).unwrap() else {
+            panic!("ready fixture must launch");
+        };
+        assert_eq!(
+            session.launch(request),
+            Err(SessionError::BackendUnavailable)
+        );
+        core.session_backend_unavailable();
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        let scene = core.scene(metrics, "").unwrap();
+        let status = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "session-status")
+            .unwrap();
+        assert_eq!(
+            status.accessible_label,
+            "The session service isn't reachable"
+        );
+    }
 
     #[test]
     fn corrupt_fixture_render_note_replaces_image_with_plate_on_redraw() {

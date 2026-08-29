@@ -67,3 +67,26 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("first-run.png").is_file());
 }
+
+#[test]
+fn degraded_authority_status_indicator_frame_hash_is_stable() {
+    let out = tempfile::tempdir().unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
+        .args([
+            "--offscreen",
+            "--session-unavailable",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let transcript = String::from_utf8(run.stdout).unwrap();
+    assert!(
+        transcript.contains("ac77458414a703fc7ac332fc481bc2f3291b3e0cdb69dff2e163569c7e8cfe30  ")
+    );
+}

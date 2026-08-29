@@ -461,6 +461,13 @@ impl GamepadRemap {
             previewing: false,
         }
     }
+    #[cfg(test)]
+    fn with_failing_store(map: EffectiveMap) -> Self {
+        Self {
+            engine: RemapEngine::new(map, MemoryStore::failing()),
+            previewing: false,
+        }
+    }
     /// Starts a validated candidate preview.
     ///
     /// # Errors
@@ -516,35 +523,13 @@ impl GamepadRemap {
         self.engine.map()
     }
 
-    /// Restores every changed binding to the device contract's shipped map using the same
-    /// preview/commit transaction path as an individual edit.
+    /// Atomically restores the device contract's shipped map.
     ///
     /// # Errors
-    /// Returns a map validation or persistence error if a default cannot be committed.
+    /// Returns a persistence error if the shipped map cannot be saved. The effective map is
+    /// unchanged when persistence fails.
     pub fn reset_defaults(&mut self) -> Result<(), MapError> {
-        let changed = self
-            .engine
-            .map()
-            .mappings()
-            .iter()
-            .filter_map(|mapping| {
-                let shipped = self
-                    .engine
-                    .map()
-                    .shipped_binding(&mapping.context, &mapping.action)?;
-                (mapping.binding != *shipped).then(|| {
-                    (
-                        mapping.context.clone(),
-                        mapping.action.clone(),
-                        shipped.clone(),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        for (context, action, binding) in changed {
-            self.engine.begin(&context, &action, binding)?;
-            self.engine.confirm()?;
-        }
+        self.engine.reset_to_shipped()?;
         Ok(())
     }
 }
@@ -627,6 +612,33 @@ mod tests {
     use std::io::Write;
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
+
+    fn remap_with_bindings(activate: &str, back: &str) -> GamepadRemap {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let mut persisted = contract.effective_map.clone();
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Activate")
+            .unwrap()
+            .binding = Binding::single(activate);
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Back")
+            .unwrap()
+            .binding = Binding::single(back);
+        let map = EffectiveMap::from_persisted(
+            contract,
+            Some(("pocketforge-sim-gamepad".into(), persisted)),
+        )
+        .unwrap();
+        GamepadRemap::new(map)
+    }
+
+    fn assert_shipped_map(map: &EffectiveMap) {
+        assert!(map.mappings().iter().all(|mapping| {
+            map.shipped_binding(&mapping.context, &mapping.action) == Some(&mapping.binding)
+        }));
+    }
 
     struct ConflictOnce {
         snapshot: CatalogSnapshot,
@@ -764,6 +776,42 @@ mod tests {
         assert_eq!(prompt(remap.map(), &ShellAction::Activate), "Y");
         remap.reset_defaults().unwrap();
         assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+    }
+
+    #[test]
+    fn reset_restores_shipped_map_after_a_chained_move() {
+        let mut remap = remap_with_bindings("north", "east");
+
+        remap.reset_defaults().unwrap();
+
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+        assert_eq!(prompt(remap.map(), &ShellAction::Back), "B");
+        assert_shipped_map(remap.map());
+    }
+
+    #[test]
+    fn reset_restores_shipped_map_after_a_pure_swap() {
+        let mut remap = remap_with_bindings("south", "east");
+
+        remap.reset_defaults().unwrap();
+
+        assert_eq!(prompt(remap.map(), &ShellAction::Activate), "A");
+        assert_eq!(prompt(remap.map(), &ShellAction::Back), "B");
+        assert_shipped_map(remap.map());
+    }
+
+    #[test]
+    fn reset_persistence_failure_is_surfaced_without_partial_change() {
+        let remap = remap_with_bindings("north", "east");
+        let map = remap.map().clone();
+        let unchanged = map.mappings().to_vec();
+        let mut remap = GamepadRemap::with_failing_store(map);
+
+        assert!(matches!(
+            remap.reset_defaults(),
+            Err(MapError::Persistence(_))
+        ));
+        assert_eq!(remap.map().mappings(), unchanged);
     }
 
     #[test]

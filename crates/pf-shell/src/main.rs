@@ -3,10 +3,11 @@ use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
-    FakePreferencePort, FrameHost, LaunchResult, MonotonicTime, ObservedSessionState,
+    FakePowerPort, FakePreferencePort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime,
+    ObservedSessionState, PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult,
     PreferenceChange, PreferenceChangeResult, PreferenceError, PreferenceKey, PreferencePoll,
     PreferencePort, PreferenceValue, SessionError, SessionEvent, SessionPoll, SessionPort,
-    ShellAction, TerminalReceipt,
+    ShellAction, Support, TerminalReceipt,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -109,6 +110,32 @@ fn main() -> Result<(), String> {
     }
     core.load_preferences(preferences, first_run_complete)
         .map_err(|e| format!("preferences: {e:?}"))?;
+    let mut fake_power;
+    let mut unavailable_power;
+    let power: &mut dyn PowerPort = if fixture_mode {
+        fake_power = FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Unsupported,
+                },
+            ],
+            IdlePolicy::default(),
+        );
+        &mut fake_power
+    } else {
+        unavailable_power = UnavailablePowerPort;
+        &mut unavailable_power
+    };
+    core.load_power(power);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -130,6 +157,7 @@ fn main() -> Result<(), String> {
             &mut core,
             &footer,
             preferences,
+            power,
             glyphs,
             catalog.as_ref().expect("fbdev catalog"),
             Path::new(session_socket),
@@ -182,6 +210,8 @@ fn main() -> Result<(), String> {
     core.drive_session(&mut session)
         .map_err(|e| format!("{e:?}"))?;
     emit(&mut host, &mut core, &footer, out, "returned")?;
+    core.action(&ShellAction::Custom("Quick".into()));
+    emit(&mut host, &mut core, &footer, out, "quick-power")?;
     emit_f10_evidence(&mut host, &snapshot, &theme, &footer, out)?;
     Ok(())
 }
@@ -288,6 +318,7 @@ fn run_fbdev(
     core: &mut ShellCore,
     activate: &str,
     preferences: &mut dyn PreferencePort,
+    power: &mut dyn PowerPort,
     map: EffectiveMap,
     catalog: &dyn FavoriteCatalog,
     session_socket: &Path,
@@ -372,6 +403,14 @@ fn run_fbdev(
                     Err(status) => core.favorite_failed(status),
                 }
             }
+            Some(Effect::RequestPower(action)) => {
+                let result = power.request(action);
+                core.power_request_result(result);
+            }
+            Some(Effect::SetIdlePolicy(policy)) => {
+                let result = power.set_idle_policy(policy);
+                core.idle_policy_result(result);
+            }
             None => {}
         }
         if before != redraw_state(core) {
@@ -379,6 +418,29 @@ fn run_fbdev(
             // scene a no-op at the fbdev boundary.
             present(host, core, activate)?;
         }
+    }
+}
+
+struct UnavailablePowerPort;
+
+impl PowerPort for UnavailablePowerPort {
+    fn capabilities(&self) -> Result<Vec<PowerCapability>, PowerError> {
+        Err(PowerError::BackendUnavailable)
+    }
+
+    fn request(&mut self, _action: PowerAction) -> Result<PowerRequestResult, PowerError> {
+        Err(PowerError::BackendUnavailable)
+    }
+
+    fn idle_policy(&self) -> Result<IdlePolicy, PowerError> {
+        Err(PowerError::BackendUnavailable)
+    }
+
+    fn set_idle_policy(
+        &mut self,
+        _policy: IdlePolicy,
+    ) -> Result<pf_ports::AppliedIdlePolicy, PowerError> {
+        Err(PowerError::BackendUnavailable)
     }
 }
 

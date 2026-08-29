@@ -13,9 +13,10 @@
 
 use pf_catalog::{AppKind, Availability, CatalogSnapshot, Variant};
 use pf_ports::{
-    ChangeAuthority, Deadline, EffectivePreference, LaunchRequest, LaunchResult, MonotonicTime,
-    ObservedSessionState, PreferenceChange, PreferenceKey, PreferencePoll, PreferencePort,
-    PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, TerminalReceipt,
+    AppliedIdlePolicy, ChangeAuthority, Deadline, EffectivePreference, IdlePolicy, LaunchRequest,
+    LaunchResult, MonotonicTime, ObservedSessionState, PowerAction, PowerCapability, PowerError,
+    PowerPort, PowerRequestResult, PreferenceChange, PreferenceKey, PreferencePoll, PreferencePort,
+    PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, Support, TerminalReceipt,
 };
 use pf_scene::{
     AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
@@ -23,6 +24,7 @@ use pf_scene::{
 use pf_theme::Theme;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
@@ -60,6 +62,14 @@ pub enum Effect {
     RollbackRemap,
     CompleteFirstRun,
     ToggleFavorite { item_id: String, favorite: bool },
+    RequestPower(PowerAction),
+    SetIdlePolicy(IdlePolicy),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PowerDialog {
+    Closed,
+    Confirm(PowerAction),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -152,6 +162,11 @@ pub struct ShellCore {
     safe_return_binding: String,
     safe_return_options: Vec<String>,
     controls_flow: ControlsFlow,
+    power_capabilities: Vec<PowerCapability>,
+    applied_idle_policy: IdlePolicy,
+    idle_policy_loaded: bool,
+    power_status: Option<String>,
+    power_dialog: PowerDialog,
 }
 
 impl ShellCore {
@@ -236,6 +251,11 @@ impl ShellCore {
             safe_return_binding: "PF · the button below the d-pad".into(),
             safe_return_options: Vec::new(),
             controls_flow: ControlsFlow::Rows,
+            power_capabilities: Vec::new(),
+            applied_idle_policy: IdlePolicy::default(),
+            idle_policy_loaded: false,
+            power_status: None,
+            power_dialog: PowerDialog::Closed,
         }
     }
 
@@ -315,6 +335,65 @@ impl ShellCore {
             self.preference_changed(&change);
         }
         Ok(())
+    }
+
+    pub fn load_power(&mut self, port: &dyn PowerPort) {
+        self.bump_revision();
+        let capabilities = port.capabilities();
+        let idle_policy = port.idle_policy();
+
+        match &capabilities {
+            Ok(capabilities) => self.power_capabilities.clone_from(capabilities),
+            Err(_) => self.power_capabilities.clear(),
+        }
+        self.idle_policy_loaded = idle_policy.is_ok();
+        if let Ok(policy) = idle_policy {
+            self.applied_idle_policy = policy;
+        }
+        self.power_status = match (capabilities.is_err(), self.idle_policy_loaded) {
+            (false, true) => None,
+            (true, true) => Some("Power actions are unavailable".into()),
+            (false, false) => Some("Auto-sleep is unavailable".into()),
+            (true, false) => Some("Power controls are unavailable".into()),
+        };
+    }
+
+    pub fn power_request_result(&mut self, result: Result<PowerRequestResult, PowerError>) {
+        self.bump_revision();
+        self.power_status = match result {
+            Ok(PowerRequestResult::Accepted) => None,
+            Ok(PowerRequestResult::Unsupported) => Some("That power action is unavailable".into()),
+            Ok(PowerRequestResult::Refused { reason }) => {
+                Some(format!("Power action refused · {reason}"))
+            }
+            Err(_) => Some("Power controls are unavailable".into()),
+        };
+    }
+
+    pub fn idle_policy_result(&mut self, result: Result<AppliedIdlePolicy, PowerError>) {
+        self.bump_revision();
+        match result {
+            Ok(result) => {
+                self.applied_idle_policy = result.applied;
+                self.idle_policy_loaded = true;
+                self.power_status = None;
+            }
+            Err(_) => self.power_status = Some("Auto-sleep could not be changed".into()),
+        }
+    }
+
+    fn supports_power(&self, action: PowerAction) -> bool {
+        self.power_capabilities.iter().any(|capability| {
+            capability.action == action && capability.support == Support::Supported
+        })
+    }
+
+    fn sleep_row(&self) -> Option<usize> {
+        self.supports_power(PowerAction::Sleep).then_some(4)
+    }
+
+    fn idle_row(&self) -> usize {
+        4 + usize::from(self.sleep_row().is_some())
     }
 
     fn apply_effective(&mut self, key: &str, value: &PreferenceValue) {
@@ -598,6 +677,42 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
+        if let PowerDialog::Confirm(power_action) = self.power_dialog {
+            return match action {
+                ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
+                    self.focus = 1;
+                    None
+                }
+                ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
+                    self.focus = 0;
+                    None
+                }
+                ShellAction::Back => {
+                    self.power_dialog = PowerDialog::Closed;
+                    self.focus = match power_action {
+                        PowerAction::PowerOff => 2,
+                        PowerAction::Restart => 3,
+                        PowerAction::Sleep => self.sleep_row().unwrap_or(2),
+                    };
+                    None
+                }
+                ShellAction::Activate if self.focus == 0 => {
+                    self.power_dialog = PowerDialog::Closed;
+                    self.focus = match power_action {
+                        PowerAction::PowerOff => 2,
+                        PowerAction::Restart => 3,
+                        PowerAction::Sleep => self.sleep_row().unwrap_or(2),
+                    };
+                    None
+                }
+                ShellAction::Activate => {
+                    self.power_dialog = PowerDialog::Closed;
+                    self.focus = 0;
+                    Some(Effect::RequestPower(power_action))
+                }
+                ShellAction::Custom(_) => None,
+            };
+        }
         if self.presentation == Presentation::FirstRun {
             let rows = self.first_run_preferences();
             let row_count = rows.len();
@@ -826,6 +941,35 @@ impl ShellCore {
                     self.go(Route::Library);
                     None
                 }
+                2 if self.supports_power(PowerAction::PowerOff) => {
+                    self.power_dialog = PowerDialog::Confirm(PowerAction::PowerOff);
+                    self.focus = 0;
+                    None
+                }
+                3 if self.supports_power(PowerAction::Restart) => {
+                    self.power_dialog = PowerDialog::Confirm(PowerAction::Restart);
+                    self.focus = 0;
+                    None
+                }
+                row if self.sleep_row() == Some(row) => {
+                    Some(Effect::RequestPower(PowerAction::Sleep))
+                }
+                row if self.idle_policy_loaded && row == self.idle_row() => {
+                    let minutes = self
+                        .applied_idle_policy
+                        .sleep_after
+                        .map(|duration| duration.as_secs() / 60);
+                    let next = match minutes {
+                        None => Some(5),
+                        Some(5) => Some(10),
+                        Some(10) => Some(15),
+                        _ => None,
+                    };
+                    Some(Effect::SetIdlePolicy(IdlePolicy {
+                        sleep_after: next.map(|minutes| Duration::from_secs(minutes * 60)),
+                        power_off_after: self.applied_idle_policy.power_off_after,
+                    }))
+                }
                 _ => None,
             };
         }
@@ -992,7 +1136,7 @@ impl ShellCore {
                 },
                 SettingsRoom::System => 2 + usize::from(self.recovery_available),
             },
-            Route::Quick => 2,
+            Route::Quick => self.idle_row() + usize::from(self.idle_policy_loaded),
         }
     }
 
@@ -1897,6 +2041,43 @@ impl ShellCore {
         out.push(continue_node);
     }
     fn quick_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
+        if let PowerDialog::Confirm(action) = self.power_dialog {
+            let verb = match action {
+                PowerAction::PowerOff => "power off",
+                PowerAction::Restart => "restart",
+                PowerAction::Sleep => "sleep",
+            };
+            out.push(node(
+                "power-confirm-title",
+                Role::Heading,
+                &format!("Ready to {verb}?"),
+                w - 460.0,
+                180.0,
+                412.0,
+                52.0,
+                "--state-rest-text",
+            ));
+            for (index, label) in ["Cancel", "Confirm"].iter().enumerate() {
+                let mut button = node(
+                    &format!("power-confirm-{index}"),
+                    Role::Button,
+                    label,
+                    w - 460.0,
+                    258.0 + index as f32 * 64.0,
+                    412.0,
+                    52.0,
+                    if self.focus == index {
+                        "--state-focused-ring"
+                    } else {
+                        "--state-rest-surface"
+                    },
+                );
+                button.state.focused = self.focus == index;
+                button.action = Some(NodeAction::Activate);
+                out.push(button);
+            }
+            return;
+        }
         // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
         for (i, label) in ["Open focused item", "Browse the library"]
             .iter()
@@ -1919,6 +2100,72 @@ impl ShellCore {
             n.state.focused = i == self.focus;
             n.action = Some(NodeAction::Activate);
             out.push(n);
+        }
+        out.push(node(
+            "quick-power-heading",
+            Role::Heading,
+            "Power",
+            w - 400.0,
+            232.0,
+            352.0,
+            34.0,
+            "--state-rest-text",
+        ));
+        let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
+        if let Some(index) = self.sleep_row() {
+            rows.push((index, "sleep", "Sleep"));
+        }
+        let idle_label = self.idle_policy_loaded.then(|| {
+            match self
+                .applied_idle_policy
+                .sleep_after
+                .map(|value| value.as_secs() / 60)
+            {
+                None => "Auto-sleep · Off".to_owned(),
+                Some(minutes) => format!("Auto-sleep · {minutes} min"),
+            }
+        });
+        if let Some(label) = &idle_label {
+            rows.push((self.idle_row(), "idle", label));
+        }
+        for (index, id, label) in rows {
+            let enabled = match index {
+                2 => self.supports_power(PowerAction::PowerOff),
+                3 => self.supports_power(PowerAction::Restart),
+                _ => true,
+            };
+            let mut row = node(
+                &format!("quick-power-{id}"),
+                Role::Button,
+                label,
+                w - 400.0,
+                274.0 + (index - 2) as f32 * 58.0,
+                352.0,
+                48.0,
+                if index == self.focus {
+                    "--state-focused-ring"
+                } else {
+                    "--state-rest-surface"
+                },
+            );
+            row.state.focused = index == self.focus;
+            row.state.disabled = !enabled;
+            if enabled {
+                row.action = Some(NodeAction::Activate);
+            }
+            out.push(row);
+        }
+        if let Some(status) = &self.power_status {
+            out.push(node(
+                "quick-power-status",
+                Role::Text,
+                status,
+                w - 400.0,
+                h - 142.0,
+                352.0,
+                32.0,
+                "--color-status-attention",
+            ));
         }
         out.push(node(
             "quick-truth",
@@ -2228,7 +2475,7 @@ mod tests {
     use pf_catalog::{
         AppKind, AppManifestRef, Presentation as CP, Provenance, UserProjection, Variant,
     };
-    use pf_ports::{FakePreferencePort, PreferenceChangeResult};
+    use pf_ports::{FakePowerPort, FakePreferencePort, PreferenceChangeResult};
     use std::path::PathBuf;
     fn snapshot() -> CatalogSnapshot {
         CatalogSnapshot {
@@ -3093,5 +3340,235 @@ mod tests {
             .find(|node| node.id.as_str() == "detail-availability-reason")
             .unwrap();
         assert!(reason.accessible_label.contains("choose a profile"));
+    }
+
+    fn quick_scene(core: &ShellCore) -> Scene {
+        core.scene(
+            SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            },
+            "A Open · B Back",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn quick_power_anatomy_is_capability_gated() {
+        let mut core = core();
+        let unsupported = FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Unsupported,
+                },
+            ],
+            IdlePolicy::default(),
+        );
+        core.load_power(&unsupported);
+        core.go(Route::Quick);
+        let unsupported_scene = quick_scene(&core);
+        let ids: Vec<_> = unsupported_scene
+            .root()
+            .children
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        for required in [
+            "quick-power-heading",
+            "quick-power-power-off",
+            "quick-power-restart",
+            "quick-power-idle",
+        ] {
+            assert!(
+                ids.contains(&required),
+                "missing semantic anatomy {required}"
+            );
+        }
+        assert!(!ids.contains(&"quick-power-sleep"));
+
+        let supported = FakePowerPort::new(
+            vec![PowerCapability {
+                action: PowerAction::Sleep,
+                support: Support::Supported,
+            }],
+            IdlePolicy::default(),
+        );
+        core.load_power(&supported);
+        assert!(
+            quick_scene(&core)
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "quick-power-sleep")
+        );
+    }
+
+    #[test]
+    fn quick_power_keeps_capabilities_when_idle_policy_load_fails() {
+        let mut core = core();
+        let mut power = FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        );
+        power.idle_policy_result = Err(PowerError::BackendUnavailable);
+
+        core.load_power(&power);
+        core.go(Route::Quick);
+        let scene = quick_scene(&core);
+        for id in ["quick-power-power-off", "quick-power-restart"] {
+            let row = scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(!row.state.disabled, "{id} should retain capability result");
+            assert_eq!(row.action, Some(NodeAction::Activate));
+        }
+        assert!(
+            !scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "quick-power-idle")
+        );
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "quick-power-status"
+                && node.accessible_label == "Auto-sleep is unavailable"
+        }));
+    }
+
+    #[test]
+    fn quick_power_keeps_idle_policy_when_capabilities_load_fails() {
+        let mut core = core();
+        let mut power = FakePowerPort::new(
+            vec![],
+            IdlePolicy {
+                sleep_after: Some(Duration::from_secs(15 * 60)),
+                power_off_after: None,
+            },
+        );
+        power.capabilities_result = Err(PowerError::BackendUnavailable);
+
+        core.load_power(&power);
+        core.go(Route::Quick);
+        let scene = quick_scene(&core);
+        let idle = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "quick-power-idle")
+            .unwrap();
+        assert_eq!(idle.accessible_label, "Auto-sleep · 15 min");
+        assert!(!idle.state.disabled);
+        for id in ["quick-power-power-off", "quick-power-restart"] {
+            let row = scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(
+                row.state.disabled,
+                "{id} should degrade without capabilities"
+            );
+            assert_eq!(row.action, None);
+        }
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "quick-power-status"
+                && node.accessible_label == "Power actions are unavailable"
+        }));
+    }
+
+    #[test]
+    fn destructive_power_defaults_to_cancel_and_cancel_has_no_effect() {
+        let mut core = core();
+        let power = FakePowerPort::new(
+            vec![PowerCapability {
+                action: PowerAction::PowerOff,
+                support: Support::Supported,
+            }],
+            IdlePolicy::default(),
+        );
+        core.load_power(&power);
+        core.go(Route::Quick);
+        core.focus = 2;
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        let scene = quick_scene(&core);
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "power-confirm-0"
+                && node.accessible_label == "Cancel"
+                && node.state.focused
+        }));
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.power_dialog, PowerDialog::Closed);
+
+        core.action(&ShellAction::Activate);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::RequestPower(PowerAction::PowerOff))
+        );
+    }
+
+    #[test]
+    fn idle_selector_displays_applied_not_requested_policy() {
+        let mut core = core();
+        let mut power = FakePowerPort::new(
+            vec![],
+            IdlePolicy {
+                sleep_after: Some(Duration::from_secs(5 * 60)),
+                power_off_after: None,
+            },
+        );
+        power.script_policy_write(Ok(AppliedIdlePolicy {
+            requested: IdlePolicy {
+                sleep_after: Some(Duration::from_secs(10 * 60)),
+                power_off_after: None,
+            },
+            applied: IdlePolicy {
+                sleep_after: Some(Duration::from_secs(15 * 60)),
+                power_off_after: None,
+            },
+        }));
+        core.load_power(&power);
+        core.go(Route::Quick);
+        core.focus = core.idle_row();
+        let Effect::SetIdlePolicy(requested) = core.action(&ShellAction::Activate).unwrap() else {
+            panic!("idle row must write through the power port");
+        };
+        assert_eq!(requested.sleep_after, Some(Duration::from_secs(10 * 60)));
+        let applied = power.set_idle_policy(requested).unwrap();
+        core.idle_policy_result(Ok(applied));
+        let applied_scene = quick_scene(&core);
+        let row = applied_scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "quick-power-idle")
+            .unwrap();
+        assert_eq!(row.accessible_label, "Auto-sleep · 15 min");
+        assert!(!row.accessible_label.contains("10 min"));
     }
 }

@@ -17,8 +17,12 @@ use pf_ports::{
     ObservedSessionState, PreferenceChange, PreferenceKey, PreferencePoll, PreferencePort,
     PreferenceValue, SessionEvent, SessionPoll, SessionPort, ShellAction, TerminalReceipt,
 };
-use pf_scene::{AxisMove, Bounds, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics};
+use pf_scene::{
+    AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
+};
 use pf_theme::Theme;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
@@ -85,9 +89,15 @@ struct Item {
     title: String,
     kind: AppKind,
     tags: Vec<String>,
-    icon_reference: Option<String>,
-    icon_decodable: bool,
+    art: Option<ImageSource>,
+    art_failed: bool,
     variants: Vec<Variant>,
+}
+
+impl Item {
+    fn has_real_art(&self) -> bool {
+        self.art.is_some() && !self.art_failed
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,17 +142,42 @@ pub struct ShellCore {
 impl ShellCore {
     #[must_use]
     pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
+        Self::boot_with_art(snapshot, theme, reduced_motion, |_| None)
+    }
+
+    #[must_use]
+    pub fn boot_with_art<F>(
+        snapshot: &CatalogSnapshot,
+        theme: &Theme,
+        reduced_motion: bool,
+        mut resolve_art: F,
+    ) -> Self
+    where
+        F: FnMut(&str) -> Option<Arc<[u8]>>,
+    {
         let items = snapshot
             .items
             .iter()
-            .map(|item| Item {
-                id: item.id.clone(),
-                title: item.title.clone(),
-                kind: item.kind.clone(),
-                tags: item.tags.clone(),
-                icon_reference: item.presentation.icon_reference.clone(),
-                icon_decodable: item.presentation.icon_decodable,
-                variants: item.variants.clone(),
+            .map(|item| {
+                let art = item
+                    .presentation
+                    .icon_reference
+                    .as_deref()
+                    .filter(|_| item.presentation.icon_decodable)
+                    .and_then(&mut resolve_art)
+                    .map(|bytes| {
+                        let digest = Sha256::digest(&bytes);
+                        ImageSource::new(format!("sha256:{digest:x}"), bytes)
+                    });
+                Item {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    kind: item.kind.clone(),
+                    tags: item.tags.clone(),
+                    art,
+                    art_failed: false,
+                    variants: item.variants.clone(),
+                }
             })
             .collect();
         Self {
@@ -354,7 +389,7 @@ impl ShellCore {
     #[must_use]
     pub fn art_treatment(&self, item_id: &str) -> Option<ArtTreatment> {
         let item = self.items.iter().find(|item| item.id == item_id)?;
-        if item.icon_reference.is_some() && item.icon_decodable {
+        if item.art.is_some() && !item.art_failed {
             return Some(ArtTreatment::CatalogArt);
         }
         let hash = item
@@ -367,6 +402,28 @@ impl ShellCore {
             palette: (hash % 6) as u8,
             motif: ((hash / 6) % 6) as u8,
         })
+    }
+
+    /// Marks image sources rejected by the rasterizer so the next scene uses its plate fallback.
+    /// Returns whether the visible model changed and therefore needs another presentation.
+    pub fn reject_art_sources<'a>(
+        &mut self,
+        source_ids: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        let source_ids = source_ids.into_iter().collect::<Vec<_>>();
+        let mut changed = false;
+        for item in &mut self.items {
+            if !item.art_failed
+                && item
+                    .art
+                    .as_ref()
+                    .is_some_and(|art| source_ids.contains(&art.id.as_str()))
+            {
+                item.art_failed = true;
+                changed = true;
+            }
+        }
+        changed
     }
     #[must_use]
     pub const fn motion_duration_ms(&self) -> u32 {
@@ -980,10 +1037,15 @@ impl ShellCore {
                 let availability = best_availability(item);
                 let status = availability_text(availability, &self.presentation);
                 let x = 48.0 + i as f32 * (card_width + gap);
+                let card_label = if item.has_real_art() {
+                    String::new()
+                } else {
+                    format!("{} — {status}", item.title)
+                };
                 let mut n = node(
                     &format!("item-{}", item.id),
                     Role::Button,
-                    &format!("{} — {status}", item.title),
+                    &card_label,
                     x,
                     430.0,
                     card_width,
@@ -1049,14 +1111,19 @@ impl ShellCore {
                 let availability = best_availability(item);
                 let column = i % columns;
                 let row = i / columns;
-                let mut card = node(
-                    &format!("library-item-{}", item.id),
-                    Role::Button,
-                    &format!(
+                let card_label = if item.has_real_art() {
+                    String::new()
+                } else {
+                    format!(
                         "{} · {}",
                         item.title,
                         availability_text(availability, &self.presentation)
-                    ),
+                    )
+                };
+                let mut card = node(
+                    &format!("library-item-{}", item.id),
+                    Role::Button,
+                    &card_label,
                     48.0 + column as f32 * (card_width + 16.0),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
@@ -1656,15 +1723,15 @@ fn procedural_art_nodes(
     let label_y = if home { y + 210.0 } else { y + 176.0 };
     let label_mask = node(
         // Card labels remain available to assistive consumers, but the current renderer
-        // also paints them. Mask the full first text line before painting the inset art so
-        // neither glyph pixels nor the mask's former 1-2 px transition remain exposed.
+        // also paints them. Mask the full art region before painting the inset art so a
+        // wrapped second line cannot remain visible in the art's eight-pixel gutters.
         &format!("{context}-label-mask-{id}"),
         Role::Group,
         "",
         x,
         y - 8.0,
         width,
-        24.0,
+        if home { 166.0 } else { 144.0 },
         token,
     );
     let mut nodes = vec![
@@ -1730,23 +1797,49 @@ fn procedural_art_nodes(
 }
 
 fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
-    if item
-        .icon_reference
-        .as_deref()
-        .is_some_and(|_| item.icon_decodable)
-    {
-        // Interim until the render stack rasterizes catalog images: keep the procedural
-        // art well. The edition label is card content and remains identical in every state.
-        return procedural_art_nodes(
-            &item.id,
-            &item.title,
-            Some(kind_text(&item.kind)),
-            context,
-            x,
+    if let Some(art) = item.art.as_ref().filter(|_| !item.art_failed) {
+        let home = context == "home-card";
+        let art_height = if home { 158.0 } else { 136.0 };
+        let kind_y = if home { y + 166.0 } else { y + 142.0 };
+        let label_y = if home { y + 210.0 } else { y + 176.0 };
+        let mut image = node(
+            &format!("{context}-art-{}", item.id),
+            Role::Group,
+            &format!("{} cover art", item.title),
+            x + 8.0,
             y,
-            width,
-            focused,
+            width - 16.0,
+            art_height,
+            "--state-rest-surface",
         );
+        image = image.with_image(art.clone(), ImageFit::Cover);
+        return vec![
+            image,
+            node(
+                &format!("{context}-plate-{}", item.id),
+                Role::Text,
+                kind_text(&item.kind),
+                x + 12.0,
+                kind_y,
+                width - 24.0,
+                24.0,
+                "--state-rest-surface",
+            ),
+            node(
+                &format!("{context}-title-{}", item.id),
+                Role::Text,
+                &item.title,
+                x,
+                label_y,
+                width,
+                28.0,
+                if focused {
+                    "--state-focused-text"
+                } else {
+                    "--color-text-secondary"
+                },
+            ),
+        ];
     }
     procedural_art_nodes(
         &item.id,
@@ -2352,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn real_art_uses_an_unframed_procedural_well_and_fallback_uses_a_plate() {
+    fn real_art_uses_an_image_node_and_missing_bytes_use_a_plate() {
         let mut catalog_item = item(
             "plate-id",
             "Paper Comet",
@@ -2360,7 +2453,18 @@ mod tests {
         );
         catalog_item.presentation.icon_reference = Some("art/paper-comet.png".into());
         catalog_item.presentation.icon_decodable = true;
-        let core = fixture_core(vec![catalog_item]);
+        let snapshot = CatalogSnapshot {
+            revision: 10,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![catalog_item],
+            user_projection: UserProjection::default(),
+        };
+        let mut core =
+            ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |reference| {
+                (reference == "art/paper-comet.png").then(|| Arc::from(&b"png"[..]))
+            });
+        core.authority_snapshot(false);
         assert_eq!(
             core.art_treatment("plate-id"),
             Some(ArtTreatment::CatalogArt)
@@ -2383,24 +2487,28 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "item-plate-id")
             .unwrap();
-        assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-art-plate-id" && node.accessible_label.is_empty()
+        let art = card
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-art-plate-id")
+            .unwrap();
+        assert_eq!(art.accessible_label, "Paper Comet cover art");
+        assert!(matches!(
+            art.content,
+            pf_scene::NodeContent::Image {
+                fit: ImageFit::Cover,
+                ..
+            }
+        ));
+        assert!(!card.children.iter().any(|node| {
+            matches!(
+                node.id.as_str(),
+                "home-card-label-mask-plate-id"
+                    | "home-card-motif-plate-id"
+                    | "home-card-initial-plate-id"
+            )
         }));
-        assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-label-mask-plate-id"
-                && node.accessible_label.is_empty()
-                && (node.bounds.height - 24.0).abs() < f32::EPSILON
-        }));
-        assert!(
-            card.children
-                .iter()
-                .any(|node| node.id.as_str() == "home-card-motif-plate-id")
-        );
-        assert!(
-            card.children
-                .iter()
-                .any(|node| node.id.as_str() == "home-card-initial-plate-id")
-        );
+        assert!(card.accessible_label.is_empty());
         assert!(card.children.iter().any(|node| {
             node.id.as_str() == "home-card-plate-plate-id" && node.accessible_label == "GAME"
         }));

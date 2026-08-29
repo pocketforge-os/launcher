@@ -10,6 +10,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
+use pf_render::RenderNote;
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_shell::{EvdevActionSource, GamepadRemap, footer_prompt, safe_return_options};
 use pf_shell_core::{Effect, ShellCore};
@@ -20,7 +21,24 @@ use std::{
     env, fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
+    match reference {
+        "art/ridgeline.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/ridgeline.png")[..],
+        )),
+        "art/corrupt.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/corrupt.png")[..],
+        )),
+        _ => None,
+    }
+}
+
+fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
+    ShellCore::boot_with_art(snapshot, theme, reduced, fixture_art)
+}
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
@@ -35,7 +53,7 @@ fn main() -> Result<(), String> {
     let glyphs =
         EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
     let footer = footer_prompt(&glyphs);
-    let mut core = ShellCore::boot(&snapshot, &theme, reduced);
+    let mut core = fixture_core(&snapshot, &theme, reduced);
     core.authority_snapshot(false);
     core.set_safe_return_options(options.iter().map(|(_, label)| label.clone()));
     let fixture_mode = args
@@ -66,7 +84,7 @@ fn main() -> Result<(), String> {
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
             str::to_owned,
         );
-        return emit_sim_frame(&core, &footer, Path::new(&path));
+        return emit_sim_frame(&mut core, &footer, Path::new(&path));
     }
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
@@ -75,12 +93,7 @@ fn main() -> Result<(), String> {
         let (mut actions, _) =
             EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
                 .map_err(|e| format!("input adapter: {e:?}"))?;
-        host.present(
-            core.scene(host.metrics(), &footer)
-                .as_ref()
-                .ok_or("shell has no frame")?,
-        )
-        .map_err(|e| e.to_string())?;
+        present(&mut host, &mut core, &footer)?;
         return run_fbdev(
             &mut host,
             &mut actions,
@@ -103,18 +116,18 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--settings-evidence") {
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-        emit(&mut host, &core, &footer, out, "settings")?;
+        emit(&mut host, &mut core, &footer, out, "settings")?;
         core.reset_first_run();
-        emit(&mut host, &core, &footer, out, "first-run")?;
+        emit(&mut host, &mut core, &footer, out, "first-run")?;
         return Ok(());
     }
-    emit(&mut host, &core, &footer, out, "boot-home")?;
+    emit(&mut host, &mut core, &footer, out, "boot-home")?;
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-    emit(&mut host, &core, &footer, out, "focus-moved")?;
+    emit(&mut host, &mut core, &footer, out, "focus-moved")?;
     let effect = core
         .action(&ShellAction::Activate)
         .ok_or("fixture must launch")?;
-    emit(&mut host, &core, &footer, out, "launch-dimmed")?;
+    emit(&mut host, &mut core, &footer, out, "launch-dimmed")?;
     let mut session = pf_ports::FakeSession::new(
         Ok(LaunchResult::Accepted {
             session_id: "fake-session".into(),
@@ -136,7 +149,7 @@ fn main() -> Result<(), String> {
     core.launch_result(&session.launch(request).map_err(|e| format!("{e:?}"))?);
     core.drive_session(&mut session)
         .map_err(|e| format!("{e:?}"))?;
-    emit(&mut host, &core, &footer, out, "returned")?;
+    emit(&mut host, &mut core, &footer, out, "returned")?;
     emit_f10_evidence(&mut host, &snapshot, &theme, &footer, out)?;
     Ok(())
 }
@@ -148,15 +161,15 @@ fn emit_f10_evidence(
     footer: &str,
     out: &Path,
 ) -> Result<(), String> {
-    let mut core = ShellCore::boot(snapshot, theme, false);
+    let mut core = fixture_core(snapshot, theme, false);
     core.authority_snapshot(false);
     core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-    emit(host, &core, footer, out, "library")?;
+    emit(host, &mut core, footer, out, "library")?;
     core.action(&ShellAction::Custom("Search".into()));
-    core.set_search_query("hollow");
-    emit(host, &core, footer, out, "search")?;
+    core.set_search_query("ridgeline");
+    emit(host, &mut core, footer, out, "search")?;
     core.action(&ShellAction::Activate);
-    emit(host, &core, footer, out, "details")?;
+    emit(host, &mut core, footer, out, "details")?;
 
     let mut chooser_snapshot = snapshot.clone();
     let item = chooser_snapshot
@@ -175,17 +188,17 @@ fn emit_f10_evidence(
     second.provenance.provider_id = "fixture-c".into();
     second.launch_target.app_id = "glass-harbor-handheld".into();
     item.variants.push(second);
-    let mut chooser = ShellCore::boot(&chooser_snapshot, theme, false);
+    let mut chooser = fixture_core(&chooser_snapshot, theme, false);
     chooser.authority_snapshot(false);
     for _ in 0..3 {
         chooser.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     }
     chooser.action(&ShellAction::Activate);
-    emit(host, &chooser, footer, out, "variant-chooser")?;
+    emit(host, &mut chooser, footer, out, "variant-chooser")?;
     Ok(())
 }
 
-fn emit_sim_frame(core: &ShellCore, prompt: &str, path: &Path) -> Result<(), String> {
+fn emit_sim_frame(core: &mut ShellCore, prompt: &str, path: &Path) -> Result<(), String> {
     let width = env_dimension("PF_FB_WIDTH", 1280)?;
     let height = env_dimension("PF_FB_HEIGHT", 720)?;
     let stride = env_dimension("PF_FB_STRIDE", width * 4)?;
@@ -210,12 +223,7 @@ fn emit_sim_frame(core: &ShellCore, prompt: &str, path: &Path) -> Result<(), Str
         },
     };
     let mut host = OffscreenHost::new(metrics);
-    host.present(
-        core.scene(metrics, prompt)
-            .as_ref()
-            .ok_or("shell has no frame")?,
-    )
-    .map_err(|e| e.to_string())?;
+    present(&mut host, core, prompt)?;
     let frame = host.frame().ok_or("sim frame missing")?;
     let mut out = fs::OpenOptions::new()
         .write(true)
@@ -269,12 +277,7 @@ fn run_fbdev(
             Some(Effect::Launch(request)) => {
                 let result = session.launch(request).map_err(|e| format!("{e:?}"))?;
                 core.launch_result(&result);
-                host.present(
-                    core.scene(host.metrics(), activate)
-                        .as_ref()
-                        .ok_or("shell has no frame")?,
-                )
-                .map_err(|e| e.to_string())?;
+                present(host, core, activate)?;
                 core.drive_session(&mut session)
                     .map_err(|e| format!("{e:?}"))?;
             }
@@ -316,9 +319,7 @@ fn run_fbdev(
         if before != (core.presentation().clone(), core.focus()) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            if let Some(scene) = core.scene(host.metrics(), activate) {
-                host.present(&scene).map_err(|e| e.to_string())?;
-            }
+            present(host, core, activate)?;
         }
     }
 }
@@ -529,17 +530,12 @@ impl SessionPort for InteractiveSession {
 
 fn emit(
     host: &mut OffscreenHost,
-    core: &ShellCore,
+    core: &mut ShellCore,
     prompt: &str,
     out: &Path,
     name: &str,
 ) -> Result<(), String> {
-    host.present(
-        core.scene(host.metrics(), prompt)
-            .as_ref()
-            .ok_or("shell has no frame")?,
-    )
-    .map_err(|e| e.to_string())?;
+    present(host, core, prompt)?;
     let frame = host.frame().ok_or("frame missing")?;
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;
@@ -552,6 +548,57 @@ fn emit(
         .write_image_data(&frame.rgba)
         .map_err(|e| e.to_string())?;
     println!("{}  {}", hex(&Sha256::digest(&frame.rgba)), path.display());
+    Ok(())
+}
+
+fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
+    notes
+        .iter()
+        .map(|note| match note {
+            RenderNote::ImageDecodeFailed { source_id }
+            | RenderNote::ImageTooLarge { source_id, .. } => source_id.as_str(),
+        })
+        .collect()
+}
+
+trait RenderedFrameHost: FrameHost {
+    fn render_notes(&self) -> Option<&[RenderNote]>;
+}
+
+impl RenderedFrameHost for OffscreenHost {
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        self.frame().map(|frame| frame.notes.as_slice())
+    }
+}
+
+impl RenderedFrameHost for FbdevHost {
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        self.frame().map(|frame| frame.notes.as_slice())
+    }
+}
+
+fn present(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+) -> Result<(), String> {
+    host.present(
+        core.scene(host.metrics(), prompt)
+            .as_ref()
+            .ok_or("shell has no frame")?,
+    )
+    .map_err(|e| e.to_string())?;
+    let rejected = host
+        .render_notes()
+        .is_some_and(|notes| core.reject_art_sources(failed_source_ids(notes)));
+    if rejected {
+        host.present(
+            core.scene(host.metrics(), prompt)
+                .as_ref()
+                .ok_or("shell has no fallback frame")?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -568,6 +615,37 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn corrupt_fixture_render_note_replaces_image_with_plate_on_redraw() {
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items[0].presentation.icon_reference = Some("art/corrupt.png".into());
+        let theme = pf_theme::flagship();
+        let mut core = fixture_core(&snapshot, &theme, false);
+        core.authority_snapshot(false);
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let mut host = OffscreenHost::new(metrics);
+        // Exercise the same presentation entry point used after an interactive action,
+        // rather than relying on the launcher's initial-frame call.
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        present(&mut host, &mut core, "A Open").unwrap();
+        assert!(matches!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
+        ));
+        assert!(host.frame().unwrap().notes.is_empty());
+    }
 
     #[test]
     fn first_run_completion_survives_two_boots_in_one_state_dir() {

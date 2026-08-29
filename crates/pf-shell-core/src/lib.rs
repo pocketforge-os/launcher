@@ -132,6 +132,10 @@ pub enum Effect {
         item_id: String,
         favorite: bool,
     },
+    SetPinnedVariant {
+        item_id: String,
+        variant_id: Option<String>,
+    },
     CaptureScreenshot,
     RequestPower(PowerAction),
     SetIdlePolicy(IdlePolicy),
@@ -210,6 +214,7 @@ struct Item {
     art_failed: bool,
     variants: Vec<Variant>,
     favorite: bool,
+    pinned_variant_id: Option<String>,
 }
 
 impl Item {
@@ -295,6 +300,7 @@ impl ShellCore {
         F: FnMut(&str) -> Option<Arc<[u8]>>,
     {
         let favorites = &snapshot.user_projection.favorite_item_ids;
+        let pins = &snapshot.user_projection.pinned_variant_ids;
         let items: Vec<_> = snapshot
             .items
             .iter()
@@ -318,6 +324,7 @@ impl ShellCore {
                     art_failed: false,
                     variants: item.variants.clone(),
                     favorite: favorites.binary_search(&item.id).is_ok(),
+                    pinned_variant_id: pins.get(&item.id).cloned(),
                 }
             })
             .collect();
@@ -804,6 +811,19 @@ impl ShellCore {
         self.session_status = Some(status.into());
     }
 
+    pub fn pinned_variant_committed(&mut self, item_id: &str, variant_id: Option<String>) {
+        self.bump_revision();
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+            item.pinned_variant_id = variant_id;
+        }
+        self.session_status = None;
+    }
+
+    pub fn pinned_variant_failed(&mut self, status: impl Into<String>) {
+        self.bump_revision();
+        self.session_status = Some(status.into());
+    }
+
     pub fn screenshot_result(&mut self, result: Result<&str, ()>) {
         self.bump_revision();
         self.session_status = Some(match result {
@@ -1128,6 +1148,18 @@ impl ShellCore {
         }
         match action {
             ShellAction::Custom(name) if name == "Favorite" => {
+                if self.route == Route::VariantChooser {
+                    let item = self.selected_item?;
+                    let ready = self.ready_variants(item);
+                    let variant = self.items[item].variants.get(*ready.get(self.focus)?)?;
+                    let variant_id = (self.items[item].pinned_variant_id.as_deref()
+                        != Some(variant.id.as_str()))
+                    .then(|| variant.id.clone());
+                    return Some(Effect::SetPinnedVariant {
+                        item_id: self.items[item].id.clone(),
+                        variant_id,
+                    });
+                }
                 if let Some(item) = self.focused_item_index() {
                     return Some(Effect::ToggleFavorite {
                         item_id: self.items[item].id.clone(),
@@ -1347,7 +1379,15 @@ impl ShellCore {
         }
         if self.route == Route::Details {
             let item = self.selected_item?;
+            if let Some(variant) = self.pinned_ready_variant(item) {
+                return self.launch_variant(item, variant);
+            }
             let ready = self.ready_variants(item);
+            if self.items[item].pinned_variant_id.is_some() {
+                self.go(Route::VariantChooser);
+                self.focus = 0;
+                return None;
+            }
             return match ready.len() {
                 0 => None,
                 1 => self.launch_variant(item, ready[0]),
@@ -1371,7 +1411,18 @@ impl ShellCore {
             return None;
         }
         let item = self.focused_item_index()?;
+        if let Some(variant) = self.pinned_ready_variant(item) {
+            return self.launch_variant(item, variant);
+        }
         let ready = self.ready_variants(item);
+        if self.items[item].pinned_variant_id.is_some() {
+            self.selected_item = Some(item);
+            self.caller_route = Route::Home;
+            self.caller_focus = self.focus;
+            self.go(Route::VariantChooser);
+            self.focus = 0;
+            return None;
+        }
         match ready.len() {
             0 => None,
             1 => self.launch_variant(item, ready[0]),
@@ -1394,6 +1445,13 @@ impl ShellCore {
             .filter(|(_, variant)| matches!(variant.availability, Availability::Ready))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn pinned_ready_variant(&self, item: usize) -> Option<usize> {
+        let pinned = self.items[item].pinned_variant_id.as_deref()?;
+        self.items[item].variants.iter().position(|variant| {
+            variant.id == pinned && matches!(variant.availability, Availability::Ready)
+        })
     }
 
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
@@ -1605,14 +1663,26 @@ impl ShellCore {
             self.focused_item_index().map_or_else(
                 || base.to_owned(),
                 |item| {
-                    format!(
-                        "{base}     {glyph}  {}",
-                        if self.items[item].favorite {
-                            "Unfavorite"
-                        } else {
-                            "Favorite"
-                        }
-                    )
+                    let label = if self.route == Route::VariantChooser {
+                        let ready = self.ready_variants(item);
+                        ready
+                            .get(self.focus)
+                            .and_then(|index| self.items[item].variants.get(*index))
+                            .map_or("Set as default", |variant| {
+                                if self.items[item].pinned_variant_id.as_deref()
+                                    == Some(variant.id.as_str())
+                                {
+                                    "Remove default"
+                                } else {
+                                    "Set as default"
+                                }
+                            })
+                    } else if self.items[item].favorite {
+                        "Unfavorite"
+                    } else {
+                        "Favorite"
+                    };
+                    format!("{base}     {glyph}  {label}")
                 },
             )
         } else {
@@ -2021,6 +2091,18 @@ impl ShellCore {
                 ));
             }
             out.extend(art_nodes(item, "detail-art", 48.0, 165.0, 304.0, false));
+            if let Some(pinned) = &item.pinned_variant_id {
+                out.push(node(
+                    "detail-pinned-variant",
+                    Role::Text,
+                    &format!("Default version · {pinned}"),
+                    400.0,
+                    350.0 + detail_offset,
+                    w - 448.0,
+                    34.0,
+                    "--state-rest-surface",
+                ));
+            }
             if let Some(variant) = item.variants.first() {
                 let availability = availability_text(&variant.availability, &self.presentation);
                 let state = availability.split(" — ").next().unwrap_or(&availability);
@@ -2065,7 +2147,7 @@ impl ShellCore {
                         availability_text(&variant.availability, &self.presentation)
                     ),
                     400.0,
-                    370.0 + detail_offset + variant_index as f32 * 55.0,
+                    390.0 + detail_offset + variant_index as f32 * 55.0,
                     w - 448.0,
                     48.0,
                     state_token(&variant.availability, false),
@@ -2073,10 +2155,16 @@ impl ShellCore {
             }
             let ready = self.ready_variants(item_index);
             if self.route == Route::VariantChooser {
+                let pin_unavailable = item.pinned_variant_id.is_some()
+                    && self.pinned_ready_variant(item_index).is_none();
                 out.push(node(
                     "chooser-note",
                     Role::Text,
-                    "Ready right now. Back leaves without opening anything.",
+                    if pin_unavailable {
+                        "Default unavailable — choose a version"
+                    } else {
+                        "Ready right now. Back leaves without opening anything."
+                    },
                     360.0,
                     235.0,
                     w - 720.0,
@@ -2089,8 +2177,14 @@ impl ShellCore {
                         &format!("chooser-{}", variant.id),
                         Role::Button,
                         &format!(
-                            "{} · Provider {}",
-                            variant.id, variant.provenance.provider_id
+                            "{} · Provider {}{}",
+                            variant.id,
+                            variant.provenance.provider_id,
+                            if item.pinned_variant_id.as_deref() == Some(&variant.id) {
+                                " · Default"
+                            } else {
+                                ""
+                            }
                         ),
                         360.0,
                         300.0 + choice as f32 * 64.0,
@@ -3789,6 +3883,110 @@ mod tests {
     }
 
     #[test]
+    fn ready_pin_launches_directly_and_unavailable_pin_falls_back_honestly() {
+        let variants = vec![
+            variant("native", "many-native", Availability::Ready),
+            variant("stream", "many-stream", Availability::Ready),
+        ];
+        let mut snapshot = CatalogSnapshot {
+            revision: 10,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![item("many", "Many Moons", variants.clone())],
+            user_projection: UserProjection::default(),
+        };
+        snapshot
+            .user_projection
+            .pinned_variant_ids
+            .insert("many".into(), "stream".into());
+        let mut pinned = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        pinned.authority_snapshot(false);
+        pinned.selected_item = Some(0);
+        pinned.go(Route::Details);
+        let details = pinned
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(details.root().children.iter().any(|node| {
+            node.id.as_str() == "detail-pinned-variant"
+                && node.accessible_label == "Default version · stream"
+        }));
+        pinned.go(Route::Home);
+        assert_eq!(
+            pinned.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "many-stream".into()
+            }))
+        );
+
+        snapshot.items[0].variants[1].availability = Availability::NeedsNetwork {
+            reason: "offline".into(),
+        };
+        let mut fallback = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        fallback.authority_snapshot(false);
+        assert_eq!(fallback.action(&ShellAction::Activate), None);
+        assert_eq!(fallback.route(), Route::VariantChooser);
+        let scene = fallback
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let note = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "chooser-note")
+            .unwrap();
+        assert_eq!(
+            note.accessible_label,
+            "Default unavailable — choose a version"
+        );
+    }
+
+    #[test]
+    fn chooser_default_affordance_pins_and_unpins_the_focused_ready_variant() {
+        let mut core = fixture_core(vec![item(
+            "many",
+            "Many Moons",
+            vec![
+                variant("native", "many-native", Availability::Ready),
+                variant("stream", "many-stream", Availability::Ready),
+            ],
+        )]);
+        core.action(&ShellAction::Activate);
+        assert_eq!(
+            core.action(&ShellAction::Custom("Favorite".into())),
+            Some(Effect::SetPinnedVariant {
+                item_id: "many".into(),
+                variant_id: Some("native".into()),
+            })
+        );
+        core.pinned_variant_committed("many", Some("native".into()));
+        assert_eq!(
+            core.action(&ShellAction::Custom("Favorite".into())),
+            Some(Effect::SetPinnedVariant {
+                item_id: "many".into(),
+                variant_id: None,
+            })
+        );
+    }
+
+    #[test]
     fn activating_empty_catalog_is_a_no_op() {
         let mut core = fixture_core(vec![]);
         assert_eq!(core.focus_count(), 1);
@@ -4055,6 +4253,7 @@ mod tests {
             ],
             user_projection: UserProjection {
                 favorite_item_ids: vec!["ridge".into()],
+                ..UserProjection::default()
             },
         };
         let metrics = SurfaceMetrics {

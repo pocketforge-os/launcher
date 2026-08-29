@@ -18,8 +18,8 @@ use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
-    EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, favorite_footer_prompt,
-    footer_prompt, safe_return_options,
+    EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, commit_pinned_variant,
+    favorite_footer_prompt, footer_prompt, safe_return_options,
 };
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
@@ -484,6 +484,13 @@ fn run_fbdev(
                     Err(status) => core.favorite_failed(status),
                 }
             }
+            Some(Effect::SetPinnedVariant {
+                item_id,
+                variant_id,
+            }) => match commit_pinned_variant(catalog, &item_id, variant_id.as_deref()) {
+                Ok(_) => core.pinned_variant_committed(&item_id, variant_id),
+                Err(status) => core.pinned_variant_failed(status),
+            },
             Some(Effect::CaptureScreenshot) => {
                 let result = host
                     .frame()
@@ -1021,6 +1028,17 @@ mod durable_tests {
                 current: self.snapshot.revision,
             })
         }
+
+        fn set_pinned_variant(
+            &self,
+            _item_id: &str,
+            _variant_id: Option<&str>,
+            _expected: pf_catalog::CatalogRevision,
+        ) -> Result<pf_catalog::VariantPinCommitResult, String> {
+            Ok(pf_catalog::VariantPinCommitResult::RevisionConflict {
+                current: self.snapshot.revision,
+            })
+        }
     }
 
     impl SessionPort for UnavailableSession {
@@ -1084,6 +1102,51 @@ mod durable_tests {
         assert_eq!(
             core.session_status(),
             Some("Favorites changed elsewhere; try again")
+        );
+    }
+
+    #[test]
+    fn variant_pin_cas_failure_changes_redraw_key_for_toast() {
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let item = snapshot
+            .items
+            .iter_mut()
+            .find(|item| item.id == "glass-harbor")
+            .unwrap();
+        let mut second = item
+            .variants
+            .iter()
+            .find(|variant| matches!(variant.availability, pf_catalog::Availability::Ready))
+            .unwrap()
+            .clone();
+        second.id = "handheld".into();
+        item.variants.push(second);
+        let catalog = AlwaysConflictingFavorites {
+            snapshot: snapshot.clone(),
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        core.action(&ShellAction::Activate);
+        let Effect::SetPinnedVariant {
+            item_id,
+            variant_id,
+        } = core
+            .action(&ShellAction::Custom("Favorite".into()))
+            .expect("chooser exposes the mapped default affordance")
+        else {
+            panic!("chooser action must emit a pin effect");
+        };
+        let before_failure = redraw_state(&core);
+        let status = commit_pinned_variant(&catalog, &item_id, variant_id.as_deref()).unwrap_err();
+        core.pinned_variant_failed(status);
+        assert_ne!(before_failure, redraw_state(&core));
+        assert_eq!(
+            core.session_status(),
+            Some("Default version changed elsewhere; try again")
         );
     }
 

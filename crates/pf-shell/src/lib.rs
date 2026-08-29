@@ -87,6 +87,29 @@ impl ActionSource for EvdevActionSource {
                 self.source.clone(),
             ))));
         }
+        let mut descriptors = [rustix::event::PollFd::new(
+            &self.file,
+            rustix::event::PollFlags::IN,
+        )];
+        // Keep the framebuffer loop responsive to session-authority receipts even
+        // while the player is not touching an input device.
+        let ready = rustix::event::poll(
+            &mut descriptors,
+            Some(&rustix::event::Timespec {
+                tv_sec: 0,
+                tv_nsec: 16_000_000,
+            }),
+        )
+        .map_err(|_| ActionSourceError::Unavailable)?;
+        if ready == 0 {
+            return Ok(ActionPoll::DeadlineReached);
+        }
+        if !descriptors[0]
+            .revents()
+            .contains(rustix::event::PollFlags::IN)
+        {
+            return Err(ActionSourceError::Unavailable);
+        }
         let word = std::mem::size_of::<libc::c_long>();
         let mut record = vec![0_u8; word * 2 + 8];
         self.file.read_exact(&mut record).map_err(|e| {

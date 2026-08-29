@@ -124,6 +124,8 @@ pub struct ShellCore {
     crash_receipt_id: String,
     crash_exit_detail: String,
     recovery_available: bool,
+    authority_unavailable: bool,
+    session_status: Option<String>,
     pending_ack: bool,
     just_returned: bool,
     motion_ms: u32,
@@ -198,6 +200,8 @@ impl ShellCore {
             crash_receipt_id: String::new(),
             crash_exit_detail: String::new(),
             recovery_available: false,
+            authority_unavailable: false,
+            session_status: None,
             pending_ack: false,
             just_returned: false,
             motion_ms: theme
@@ -436,6 +440,28 @@ impl ShellCore {
     #[must_use]
     pub const fn recovery_available(&self) -> bool {
         self.recovery_available
+    }
+    #[must_use]
+    pub const fn authority_unavailable(&self) -> bool {
+        self.authority_unavailable
+    }
+    #[must_use]
+    pub fn session_status(&self) -> Option<&str> {
+        self.session_status.as_deref()
+    }
+    pub fn session_backend_unavailable_at_boot(&mut self) {
+        self.authority_unavailable = true;
+        self.session_status = None;
+        self.presentation = Presentation::Ready;
+    }
+    pub fn session_backend_unavailable(&mut self) {
+        self.authority_unavailable = true;
+        self.session_status = Some("The session service isn't reachable".into());
+        self.presentation = Presentation::Ready;
+    }
+    pub fn session_backend_reachable(&mut self) {
+        self.authority_unavailable = false;
+        self.session_status = None;
     }
     #[must_use]
     pub const fn needs_presentation_ack(&self) -> bool {
@@ -907,7 +933,11 @@ impl ShellCore {
             node(
                 "status-cluster",
                 Role::Text,
-                "Wi-Fi   82%   9:41",
+                if self.authority_unavailable {
+                    "Wi-Fi   82%   !   9:41"
+                } else {
+                    "Wi-Fi   82%   9:41"
+                },
                 w - 248.0,
                 16.0,
                 200.0,
@@ -915,6 +945,18 @@ impl ShellCore {
                 "--color-text-secondary",
             ),
         ];
+        if let Some(status) = &self.session_status {
+            children.push(node(
+                "session-status",
+                Role::Text,
+                status,
+                48.0,
+                266.0,
+                520.0,
+                32.0,
+                "--color-text-secondary",
+            ));
+        }
         match self.presentation {
             Presentation::FirstRun => self.first_run_nodes(&mut children, w),
             Presentation::Crash => self.crash_nodes(&mut children, w, h),

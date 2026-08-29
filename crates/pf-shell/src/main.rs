@@ -382,12 +382,21 @@ fn run_fbdev(
     }
 }
 
-fn redraw_state(core: &ShellCore) -> (pf_shell_core::Presentation, usize, bool, Option<String>) {
+fn redraw_state(
+    core: &ShellCore,
+) -> (
+    pf_shell_core::Presentation,
+    usize,
+    bool,
+    Option<String>,
+    u64,
+) {
     (
         core.presentation().clone(),
         core.focus(),
         core.authority_unavailable(),
         core.session_status().map(str::to_owned),
+        core.revision(),
     )
 }
 
@@ -691,6 +700,27 @@ mod durable_tests {
 
     struct UnavailableSession;
 
+    struct AlwaysConflictingFavorites {
+        snapshot: CatalogSnapshot,
+    }
+
+    impl FavoriteCatalog for AlwaysConflictingFavorites {
+        fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+
+        fn set_favorite(
+            &self,
+            _id: &str,
+            _value: bool,
+            _expected: pf_catalog::CatalogRevision,
+        ) -> Result<pf_catalog::FavoriteCommitResult, String> {
+            Ok(pf_catalog::FavoriteCommitResult::RevisionConflict {
+                current: self.snapshot.revision,
+            })
+        }
+    }
+
     impl SessionPort for UnavailableSession {
         fn launch(
             &mut self,
@@ -706,6 +736,53 @@ mod durable_tests {
         fn history(&self) -> &[SessionEvent] {
             &[]
         }
+    }
+
+    #[test]
+    fn favorite_toggle_success_changes_home_redraw_key() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::ToggleFavorite { item_id, favorite } = core
+            .action(&ShellAction::Custom("Favorite".into()))
+            .expect("home title supports favorite toggle")
+        else {
+            panic!("favorite action must emit a toggle effect");
+        };
+        let before_commit = redraw_state(&core);
+
+        core.favorite_committed(&item_id, favorite);
+
+        assert_ne!(before_commit, redraw_state(&core));
+        assert_eq!(core.is_favorite(&item_id), favorite);
+    }
+
+    #[test]
+    fn favorite_toggle_cas_failure_changes_redraw_key_for_toast() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let catalog = AlwaysConflictingFavorites {
+            snapshot: snapshot.clone(),
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::ToggleFavorite { item_id, favorite } = core
+            .action(&ShellAction::Custom("Favorite".into()))
+            .expect("home title supports favorite toggle")
+        else {
+            panic!("favorite action must emit a toggle effect");
+        };
+        let before_failure = redraw_state(&core);
+
+        let status = commit_favorite(&catalog, &item_id, favorite).unwrap_err();
+        core.favorite_failed(status);
+
+        assert_ne!(before_failure, redraw_state(&core));
+        assert_eq!(
+            core.session_status(),
+            Some("Favorites changed elsewhere; try again")
+        );
     }
 
     #[test]

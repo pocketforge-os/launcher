@@ -117,6 +117,7 @@ pub enum ArtTreatment {
 }
 
 pub struct ShellCore {
+    revision: u64,
     route: Route,
     previous_route: Route,
     presentation: Presentation,
@@ -197,6 +198,7 @@ impl ShellCore {
             })
             .collect();
         Self {
+            revision: 0,
             route: Route::Home,
             previous_route: Route::Home,
             presentation: Presentation::Booting,
@@ -244,6 +246,7 @@ impl ShellCore {
         port: &dyn PreferencePort,
         first_run_complete: bool,
     ) -> Result<(), pf_ports::PreferenceError> {
+        self.bump_revision();
         self.display_preferences.clear();
         for (key, label, default) in [
             (
@@ -290,6 +293,7 @@ impl ShellCore {
         if !change.applied {
             return;
         }
+        self.bump_revision();
         self.apply_effective(&change.key.0, &change.effective);
         if let Some(row) = self
             .display_preferences
@@ -329,9 +333,11 @@ impl ShellCore {
     }
 
     pub fn set_safe_return_binding(&mut self, label: impl Into<String>) {
+        self.bump_revision();
         self.safe_return_binding = label.into();
     }
     pub fn set_safe_return_options(&mut self, options: impl IntoIterator<Item = String>) {
+        self.bump_revision();
         self.safe_return_options = options.into_iter().collect();
     }
     fn first_run_preferences(&self) -> Vec<&DisplayPreference> {
@@ -341,6 +347,7 @@ impl ShellCore {
             .collect()
     }
     pub fn reset_first_run(&mut self) {
+        self.bump_revision();
         self.first_run_complete = false;
         self.presentation = Presentation::FirstRun;
         self.focus = 0;
@@ -359,6 +366,7 @@ impl ShellCore {
     }
 
     pub fn authority_snapshot(&mut self, recovery_available: bool) {
+        self.bump_revision();
         self.recovery_available = recovery_available;
         if self.presentation == Presentation::Booting {
             self.presentation = Presentation::Ready;
@@ -377,6 +385,10 @@ impl ShellCore {
         self.focus
     }
     #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+    #[must_use]
     pub fn search_query(&self) -> &str {
         &self.search_query
     }
@@ -388,6 +400,7 @@ impl ShellCore {
             .collect()
     }
     pub fn set_search_query(&mut self, query: impl Into<String>) {
+        self.bump_revision();
         self.search_query = query.into();
         let words = self
             .search_query
@@ -423,6 +436,7 @@ impl ShellCore {
     }
 
     pub fn favorite_committed(&mut self, item_id: &str, favorite: bool) {
+        self.bump_revision();
         if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
             item.favorite = favorite;
         }
@@ -432,6 +446,7 @@ impl ShellCore {
     }
 
     pub fn favorite_failed(&mut self, status: impl Into<String>) {
+        self.bump_revision();
         self.session_status = Some(status.into());
     }
 
@@ -515,6 +530,9 @@ impl ShellCore {
                 changed = true;
             }
         }
+        if changed {
+            self.bump_revision();
+        }
         changed
     }
     #[must_use]
@@ -538,16 +556,21 @@ impl ShellCore {
         self.session_status.as_deref()
     }
     pub fn session_backend_unavailable_at_boot(&mut self) {
+        self.bump_revision();
         self.authority_unavailable = true;
         self.session_status = None;
         self.presentation = Presentation::Ready;
     }
     pub fn session_backend_unavailable(&mut self) {
+        self.bump_revision();
         self.authority_unavailable = true;
         self.session_status = Some("The session service isn't reachable".into());
         self.presentation = Presentation::Ready;
     }
     pub fn session_backend_reachable(&mut self) {
+        if self.authority_unavailable || self.session_status.is_some() {
+            self.bump_revision();
+        }
         self.authority_unavailable = false;
         self.session_status = None;
     }
@@ -568,6 +591,7 @@ impl ShellCore {
     }
 
     pub fn action(&mut self, action: &ShellAction) -> Option<Effect> {
+        self.bump_revision();
         if matches!(action, ShellAction::Custom(name) if name == "SafeReturn") {
             return Some(Effect::SafeReturn);
         }
@@ -973,12 +997,14 @@ impl ShellCore {
     }
 
     pub fn launch_result(&mut self, result: &LaunchResult) {
+        self.bump_revision();
         match result {
             LaunchResult::Accepted { .. } => self.presentation = Presentation::Starting,
             _ => self.presentation = Presentation::Ready,
         }
     }
     pub fn session_event(&mut self, event: &SessionEvent) {
+        self.bump_revision();
         match event {
             SessionEvent::Observed(ObservedSessionState::Starting) => {
                 self.presentation = Presentation::Starting
@@ -1029,6 +1055,10 @@ impl ShellCore {
             }
         }
         Ok(())
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1);
     }
 
     #[must_use]

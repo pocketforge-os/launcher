@@ -15,6 +15,7 @@ use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::RenderNote;
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
+use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, favorite_footer_prompt,
@@ -289,6 +290,17 @@ fn emit_f10_evidence(
 ) -> Result<(), String> {
     let mut core = fixture_core(snapshot, theme, false);
     core.authority_snapshot(false);
+    let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+    core.load_history(&[HistoryEntry {
+        session_id: "fictional-ridgeline-session".into(),
+        item_id: "ridgeline".into(),
+        receipt: None,
+        started_at: Some(start),
+        ended_at: Some(EndStamp {
+            at: start + Duration::from_secs(3 * 60 * 60 + 20 * 60),
+            precision: EndPrecision::Approximate,
+        }),
+    }]);
     core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
@@ -560,6 +572,7 @@ fn drive_socket_session(
     core: &mut ShellCore,
     session: &mut SessionClient<SocketTransport>,
 ) -> Result<(), String> {
+    refresh_history(core, session);
     loop {
         match session.next_event(Deadline(MonotonicTime::ZERO)) {
             Ok(SessionPoll::Event(event)) => {
@@ -578,6 +591,7 @@ fn drive_socket_session(
             }
             Ok(SessionPoll::Idle | SessionPoll::DeadlineReached) => {
                 core.session_backend_reachable();
+                refresh_history(core, session);
                 break;
             }
             Err(SessionError::BackendUnavailable) => {
@@ -588,6 +602,12 @@ fn drive_socket_session(
         }
     }
     Ok(())
+}
+
+fn refresh_history(core: &mut ShellCore, session: &mut SessionClient<SocketTransport>) {
+    if let Ok(entries) = session.transport_mut().history_entries() {
+        core.load_history(&entries);
+    }
 }
 
 fn fixture_preferences() -> FakePreferencePort {

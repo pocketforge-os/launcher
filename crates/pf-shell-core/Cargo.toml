@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 pf-catalog = { path = "../pf-catalog" }
 pf-ports.workspace = true
+pf-session-authority.workspace = true
 pf-scene.workspace = true
 pf-theme.workspace = true
 sha2 = "0.10.9"

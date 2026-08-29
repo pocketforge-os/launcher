@@ -19,8 +19,7 @@ use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, commit_pinned_variant,
-    control_bindings,
-    favorite_footer_prompt, footer_prompt, safe_return_options,
+    control_bindings, favorite_footer_prompt, footer_prompt, safe_return_options,
 };
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};

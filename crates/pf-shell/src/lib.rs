@@ -131,6 +131,21 @@ pub fn prompt(resolver: &dyn GlyphResolver, action: &ShellAction) -> String {
     }
 }
 
+/// Builds the footer from implemented actions that are present in the effective map.
+pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
+    match resolver.resolve(&ShellAction::Activate) {
+        Ok(GlyphResult::Resolved(binding)) => {
+            let glyph = if binding.printed_label.is_empty() {
+                binding.source_fallback
+            } else {
+                binding.printed_label
+            };
+            format!("{glyph}  Open")
+        }
+        _ => String::new(),
+    }
+}
+
 fn semantic_action(name: &str) -> Option<ShellAction> {
     Some(match name {
         "Activate" => ShellAction::Activate,
@@ -166,6 +181,20 @@ mod tests {
     use std::io::Write;
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
+
+    #[test]
+    fn footer_only_advertises_implemented_effective_map_actions() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let effective = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        let footer = footer_prompt(&effective);
+        assert_eq!(footer, "A  Open");
+        assert!(!footer.contains("Search"));
+        assert!(!footer.contains("Quick"));
+        assert_eq!(
+            effective.resolve(&ShellAction::Custom("Quick".into())),
+            Ok(GlyphResult::UnsupportedAction)
+        );
+    }
     #[test]
     fn evdev_effective_map_drives_focus_and_protected_guide() {
         let dir = tempfile::tempdir().unwrap();

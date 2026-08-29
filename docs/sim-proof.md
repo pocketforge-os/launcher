@@ -22,4 +22,4 @@ Manrope/Fraunces font assets and theme-owned style keys. The persistent 64 px st
 room strip, hero mirror, 158×210 deterministic Edition Plates, single focused card, and 60 px prompt
 rail follow SPEC §2 and §4.1. The exact command above reproduces the committed simulator shot
 at `evidence/sim/skin-window.ppm` (1480×640 Netpbm; SHA-256
-`75d40411b6d0e1efc2b731dc14ce5c0af1a00c2d27e947b4dc813e12c7c198bf`).
+`79f950cffdbda414fdf5e2805fe04f0b90fd7583c3b301e247e06da7664f9538`).

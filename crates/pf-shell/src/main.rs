@@ -7,7 +7,7 @@ use pf_ports::{
     TerminalReceipt,
 };
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
-use pf_shell::{EvdevActionSource, prompt};
+use pf_shell::{EvdevActionSource, footer_prompt};
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -28,14 +28,14 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("{e:?}"))?;
     let glyphs =
         EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
-    let activate = prompt(&glyphs, &ShellAction::Activate);
+    let footer = footer_prompt(&glyphs);
     let mut core = ShellCore::boot(&snapshot, &theme, reduced);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
             str::to_owned,
         );
-        return emit_sim_frame(&core, &activate, Path::new(&path));
+        return emit_sim_frame(&core, &footer, Path::new(&path));
     }
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
@@ -44,9 +44,9 @@ fn main() -> Result<(), String> {
         let (mut actions, _) =
             EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
                 .map_err(|e| format!("input adapter: {e:?}"))?;
-        host.present(&core.scene(host.metrics(), &activate))
+        host.present(&core.scene(host.metrics(), &footer))
             .map_err(|e| e.to_string())?;
-        return run_fbdev(&mut host, &mut actions, &mut core, &activate);
+        return run_fbdev(&mut host, &mut actions, &mut core, &footer);
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
@@ -58,13 +58,13 @@ fn main() -> Result<(), String> {
         orientation: Orientation::Landscape,
     };
     let mut host = OffscreenHost::new(metrics);
-    emit(&mut host, &core, &activate, out, "boot-home")?;
+    emit(&mut host, &core, &footer, out, "boot-home")?;
     core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-    emit(&mut host, &core, &activate, out, "focus-moved")?;
+    emit(&mut host, &core, &footer, out, "focus-moved")?;
     let effect = core
         .action(&ShellAction::Activate)
         .ok_or("fixture must launch")?;
-    emit(&mut host, &core, &activate, out, "launch-dimmed")?;
+    emit(&mut host, &core, &footer, out, "launch-dimmed")?;
     let mut session = pf_ports::FakeSession::new(
         Ok(LaunchResult::Accepted {
             session_id: "fake-session".into(),
@@ -86,7 +86,7 @@ fn main() -> Result<(), String> {
     core.launch_result(&session.launch(request).map_err(|e| format!("{e:?}"))?);
     core.drive_session(&mut session)
         .map_err(|e| format!("{e:?}"))?;
-    emit(&mut host, &core, &activate, out, "returned")?;
+    emit(&mut host, &core, &footer, out, "returned")?;
     Ok(())
 }
 

@@ -49,11 +49,12 @@ impl ShellCore {
         let ready = snapshot
             .items
             .iter()
-            .filter(|item| {
-                item.variants.len() == 1
-                    && matches!(item.variants[0].availability, Availability::Ready)
+            .filter_map(|item| {
+                item.variants
+                    .iter()
+                    .find(|variant| matches!(variant.availability, Availability::Ready))
+                    .map(|variant| (variant.launch_target.app_id.clone(), item.title.clone()))
             })
-            .map(|item| (item.id.clone(), item.title.clone()))
             .collect::<Vec<_>>();
         let motion_ms = theme
             .resolve_motion("launch", reduced_motion)
@@ -155,7 +156,7 @@ impl ShellCore {
     }
 
     #[must_use]
-    pub fn scene(&self, metrics: SurfaceMetrics, activate_prompt: &str) -> Scene {
+    pub fn scene(&self, metrics: SurfaceMetrics, footer_prompt: &str) -> Scene {
         let w = metrics.logical_width;
         let h = metrics.logical_height;
         let margin = if w >= 1024.0 { 48.0 } else { 32.0 };
@@ -335,7 +336,7 @@ impl ShellCore {
         children.extend([node(
             "prompts",
             Role::Text,
-            &format!("SELECT  Search       X  Quick       {activate_prompt}  Open"),
+            footer_prompt,
             w - 560.0,
             h - 48.0,
             512.0,
@@ -434,6 +435,32 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn ready_now_selects_and_launches_first_ready_variant() {
+        let mut snapshot = snapshot();
+        let mut item = snapshot.items[0].clone();
+        item.id = "app-multi".into();
+        item.title = "Glass Harbor".into();
+        item.variants[0].id = "setup-first".into();
+        item.variants[0].availability = Availability::NeedsSetup {
+            reason: "fixture".into(),
+        };
+        let mut ready = item.variants[0].clone();
+        ready.id = "ready-second".into();
+        ready.availability = Availability::Ready;
+        ready.launch_target.app_id = "glass-harbor-ready".into();
+        item.variants.push(ready);
+        snapshot.items = vec![item];
+
+        let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "glass-harbor-ready".into(),
+            }))
+        );
     }
 
     #[test]

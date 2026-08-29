@@ -14,15 +14,15 @@ fn vertical_slice_frame_hashes_are_stable() {
     );
     let lines = String::from_utf8(run.stdout).unwrap();
     for expected in [
-        "f7050f463f8ccf7cfb94ba7d7ae2cd34fe71f2a02489879912aa6af0a673451d  ",
-        "7e270fe3fc68360edd0f779b05a96a6ac4bb2d28a7e6bf607b25764c63ce7640  ",
-        "0ef9bae3ddfd085b765b75027cd1b5369d719cf8b5a4c71a48e24d619c8657fe  ",
+        "53ea31646acb0395ad7a5acfca5c49ca9c686c678411a5626329487ac3451fbf  ",
+        "8d7e15b513cf12dfe3a799a452377de4282ca474eb10c15100e97055a58ce472  ",
+        "13745e6a2297a1f40945db9ff8a0a33e4197baf9c291ee6cd562b1a31ab63eff  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("7e270fe3"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("8d7e15b"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("7e270fe3"),
+        lines.lines().nth(3).unwrap().starts_with("8d7e15b"),
         "Returned must restore the focused Home frame"
     );
 }

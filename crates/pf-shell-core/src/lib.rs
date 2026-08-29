@@ -132,6 +132,7 @@ pub enum Effect {
         item_id: String,
         favorite: bool,
     },
+    CaptureScreenshot,
     RequestPower(PowerAction),
     SetIdlePolicy(IdlePolicy),
     ConnectWifi {
@@ -666,6 +667,10 @@ impl ShellCore {
         4 + usize::from(self.sleep_row().is_some())
     }
 
+    fn screenshot_row(&self) -> usize {
+        self.idle_row() + usize::from(self.idle_policy_loaded)
+    }
+
     fn apply_effective(&mut self, key: &str, value: &PreferenceValue) {
         match (key, value) {
             ("textScale", PreferenceValue::Text(value)) => {
@@ -797,6 +802,14 @@ impl ShellCore {
     pub fn favorite_failed(&mut self, status: impl Into<String>) {
         self.bump_revision();
         self.session_status = Some(status.into());
+    }
+
+    pub fn screenshot_result(&mut self, result: Result<&str, ()>) {
+        self.bump_revision();
+        self.session_status = Some(match result {
+            Ok(file_name) => format!("Screenshot saved · {file_name}"),
+            Err(()) => "Screenshot could not be saved".into(),
+        });
     }
 
     fn refresh_library_items(&mut self) {
@@ -1298,6 +1311,7 @@ impl ShellCore {
                         power_off_after: self.applied_idle_policy.power_off_after,
                     }))
                 }
+                row if row == self.screenshot_row() => Some(Effect::CaptureScreenshot),
                 _ => None,
             };
         }
@@ -1468,7 +1482,7 @@ impl ShellCore {
                 },
                 SettingsRoom::System => self.system_rows().len().max(1),
             },
-            Route::Quick => self.idle_row() + usize::from(self.idle_policy_loaded),
+            Route::Quick => self.screenshot_row() + 1,
         }
     }
 
@@ -2671,6 +2685,24 @@ impl ShellCore {
             }
             out.push(row);
         }
+        let screenshot_index = self.screenshot_row();
+        let mut screenshot = node(
+            "quick-capture-screenshot",
+            Role::Button,
+            "Capture screenshot",
+            w - 400.0,
+            274.0 + (screenshot_index - 2) as f32 * 58.0,
+            352.0,
+            48.0,
+            if screenshot_index == self.focus {
+                "--state-focused-ring"
+            } else {
+                "--state-rest-surface"
+            },
+        );
+        screenshot.state.focused = screenshot_index == self.focus;
+        screenshot.action = Some(NodeAction::Activate);
+        out.push(screenshot);
         if let Some(status) = &self.power_status {
             out.push(node(
                 "quick-power-status",
@@ -4200,6 +4232,34 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "quick-power-sleep")
         );
+    }
+
+    #[test]
+    fn quick_capture_row_emits_capture_and_reports_honest_results() {
+        let mut core = core();
+        core.go(Route::Quick);
+        let scene = quick_scene(&core);
+        let row = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "quick-capture-screenshot")
+            .expect("Quick must expose screenshot capture");
+        assert_eq!(row.accessible_label, "Capture screenshot");
+        assert_eq!(row.action, Some(NodeAction::Activate));
+
+        core.focus = core.screenshot_row();
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::CaptureScreenshot)
+        );
+        core.screenshot_result(Ok("screenshot-42.png"));
+        assert_eq!(
+            core.session_status(),
+            Some("Screenshot saved · screenshot-42.png")
+        );
+        core.screenshot_result(Err(()));
+        assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
     }
 
     #[test]

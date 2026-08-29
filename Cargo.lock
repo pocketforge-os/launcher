@@ -473,6 +473,7 @@ dependencies = [
  "pf-catalog",
  "pf-ports",
  "pf-scene",
+ "pf-session-authority",
  "pf-theme",
  "sha2",
 ]

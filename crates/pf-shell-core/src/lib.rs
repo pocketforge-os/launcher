@@ -24,12 +24,56 @@ use pf_ports::{
 use pf_scene::{
     AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
 };
+use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::Theme;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Playtime {
+    pub duration: Duration,
+    pub approximate: bool,
+}
+
+/// Derives authority-owned playtime totals. Entries without both wall-clock stamps do not
+/// contribute; backwards clocks contribute a known zero rather than a negative duration.
+#[must_use]
+pub fn derive_playtime(entries: &[HistoryEntry]) -> HashMap<String, Playtime> {
+    let mut totals = HashMap::<String, Playtime>::new();
+    for entry in entries {
+        let (Some(started_at), Some(ended_at)) = (entry.started_at, entry.ended_at) else {
+            continue;
+        };
+        let total = totals.entry(entry.item_id.clone()).or_insert(Playtime {
+            duration: Duration::ZERO,
+            approximate: false,
+        });
+        total.duration = total
+            .duration
+            .saturating_add(ended_at.at.duration_since(started_at).unwrap_or_default());
+        total.approximate |= ended_at.precision == EndPrecision::Approximate;
+    }
+    totals
+}
+
+#[must_use]
+pub fn format_playtime(playtime: Playtime) -> String {
+    let prefix = if playtime.approximate { "~" } else { "" };
+    let minutes = playtime.duration.as_secs() / 60;
+    if minutes == 0 {
+        return format!("Played {prefix}<1m");
+    }
+    let hours = minutes / 60;
+    if hours == 0 {
+        format!("Played {prefix}{minutes}m")
+    } else {
+        format!("Played {prefix}{hours}h {}m", minutes % 60)
+    }
+}
 
 fn applied_bool_status(
     label: &str,
@@ -230,6 +274,7 @@ pub struct ShellCore {
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
+    playtime: HashMap<String, Playtime>,
 }
 
 impl ShellCore {
@@ -329,6 +374,15 @@ impl ShellCore {
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
+            playtime: HashMap::new(),
+        }
+    }
+
+    pub fn load_history(&mut self, entries: &[HistoryEntry]) {
+        let playtime = derive_playtime(entries);
+        if self.playtime != playtime {
+            self.playtime = playtime;
+            self.bump_revision();
         }
     }
 
@@ -1904,6 +1958,8 @@ impl ShellCore {
                 return;
             };
             let item = &self.items[item_index];
+            let has_playtime = self.playtime.contains_key(&item.id);
+            let detail_offset = if has_playtime { 16.0 } else { 0.0 };
             let provider = item.variants.first().map_or("No provider", |variant| {
                 variant.provenance.provider_id.as_str()
             });
@@ -1938,6 +1994,18 @@ impl ShellCore {
                 58.0,
                 "--state-rest-text",
             ));
+            if let Some(playtime) = self.playtime.get(&item.id).copied() {
+                out.push(node(
+                    "detail-playtime",
+                    Role::Text,
+                    &format_playtime(playtime),
+                    400.0,
+                    258.0,
+                    w - 448.0,
+                    30.0,
+                    "--color-text-secondary",
+                ));
+            }
             out.extend(art_nodes(item, "detail-art", 48.0, 165.0, 304.0, false));
             if let Some(variant) = item.variants.first() {
                 let availability = availability_text(&variant.availability, &self.presentation);
@@ -1955,7 +2023,7 @@ impl ShellCore {
                         Role::Text,
                         &label,
                         400.0 + index as f32 * 190.0,
-                        278.0,
+                        278.0 + detail_offset,
                         174.0,
                         36.0,
                         state_token(&variant.availability, false),
@@ -1966,7 +2034,7 @@ impl ShellCore {
                     Role::Text,
                     &availability,
                     400.0,
-                    320.0,
+                    320.0 + detail_offset,
                     w - 448.0,
                     38.0,
                     "--color-text-secondary",
@@ -1983,7 +2051,7 @@ impl ShellCore {
                         availability_text(&variant.availability, &self.presentation)
                     ),
                     400.0,
-                    370.0 + variant_index as f32 * 55.0,
+                    370.0 + detail_offset + variant_index as f32 * 55.0,
                     w - 448.0,
                     48.0,
                     state_token(&variant.availability, false),
@@ -2920,6 +2988,83 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pf_session_authority::{EndStamp, Receipt};
+
+    fn history_entry(
+        item_id: &str,
+        started_at: Option<SystemTime>,
+        ended_at: Option<(SystemTime, EndPrecision)>,
+    ) -> HistoryEntry {
+        HistoryEntry {
+            session_id: format!("session-{item_id}"),
+            item_id: item_id.into(),
+            receipt: Some(Receipt::Returned),
+            started_at,
+            ended_at: ended_at.map(|(at, precision)| EndStamp { at, precision }),
+        }
+    }
+
+    #[test]
+    fn playtime_requires_both_stamps_and_unknown_is_absent() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let totals = derive_playtime(&[
+            history_entry("no-start", None, Some((now, EndPrecision::Observed))),
+            history_entry("no-end", Some(now), None),
+        ]);
+
+        assert!(totals.is_empty());
+    }
+
+    #[test]
+    fn playtime_sums_clamps_and_propagates_approximate_precision() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let totals = derive_playtime(&[
+            history_entry(
+                "ridgeline-rally",
+                Some(now),
+                Some((now + Duration::from_secs(3_600), EndPrecision::Observed)),
+            ),
+            history_entry(
+                "ridgeline-rally",
+                Some(now),
+                Some((now + Duration::from_secs(600), EndPrecision::Approximate)),
+            ),
+            history_entry(
+                "clock-went-back",
+                Some(now),
+                Some((now - Duration::from_secs(5), EndPrecision::Observed)),
+            ),
+        ]);
+
+        assert_eq!(
+            totals["ridgeline-rally"],
+            Playtime {
+                duration: Duration::from_secs(4_200),
+                approximate: true,
+            }
+        );
+        assert_eq!(totals["clock-went-back"].duration, Duration::ZERO);
+        assert_eq!(format_playtime(totals["ridgeline-rally"]), "Played ~1h 10m");
+        assert_eq!(format_playtime(totals["clock-went-back"]), "Played <1m");
+    }
+
+    #[test]
+    fn playtime_format_omits_seconds_and_handles_sub_minute() {
+        assert_eq!(
+            format_playtime(Playtime {
+                duration: Duration::from_secs(59),
+                approximate: false,
+            }),
+            "Played <1m"
+        );
+        assert_eq!(
+            format_playtime(Playtime {
+                duration: Duration::from_secs(3 * 3_600 + 20 * 60 + 59),
+                approximate: false,
+            }),
+            "Played 3h 20m"
+        );
+    }
     use pf_catalog::{
         AppKind, AppManifestRef, Presentation as CP, Provenance, UserProjection, Variant,
     };
@@ -3934,7 +4079,32 @@ mod tests {
 
         core.selected_item = Some(1);
         core.go(Route::Details);
+        let unknown_details = core.scene(metrics, "").unwrap();
+        assert!(
+            !unknown_details
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "detail-playtime"),
+            "unknown playtime must not render as zero"
+        );
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        core.load_history(&[history_entry(
+            "tides",
+            Some(start),
+            Some((
+                start + Duration::from_secs(3 * 3_600 + 20 * 60),
+                EndPrecision::Approximate,
+            )),
+        )]);
         let details = core.scene(metrics, "").unwrap();
+        let played = details
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "detail-playtime")
+            .expect("known playtime anatomy");
+        assert_eq!(played.accessible_label, "Played ~3h 20m");
         for id in [
             "detail-badge-0",
             "detail-badge-1",

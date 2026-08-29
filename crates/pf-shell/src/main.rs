@@ -538,15 +538,21 @@ struct FsScreenshotWriter;
 impl ScreenshotWriter for FsScreenshotWriter {
     fn write_png(&self, path: &Path, frame: &RasterFrame) -> Result<(), String> {
         let file = fs::File::create(path).map_err(|error| error.to_string())?;
-        let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&frame.rgba)
-            .map_err(|error| error.to_string())?;
-        writer.finish().map_err(|error| error.to_string())
+        write_png(file, frame)
     }
+}
+
+fn write_png(sink: impl Write, frame: &RasterFrame) -> Result<(), String> {
+    let mut buf = BufWriter::new(sink);
+    let mut encoder = png::Encoder::new(&mut buf, frame.width, frame.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+    writer
+        .write_image_data(&frame.rgba)
+        .map_err(|error| error.to_string())?;
+    writer.finish().map_err(|error| error.to_string())?;
+    buf.flush().map_err(|error| error.to_string())
 }
 
 fn capture_screenshot(
@@ -919,6 +925,18 @@ mod durable_tests {
         }
     }
 
+    struct FlushFailingWriter;
+
+    impl Write for FlushFailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected flush failure"))
+        }
+    }
+
     struct UnavailableSession;
 
     struct AlwaysConflictingFavorites {
@@ -960,6 +978,28 @@ mod durable_tests {
         );
 
         let result = capture_screenshot(&frame, state.path(), &FailingScreenshotWriter);
+        core.screenshot_result(result.as_ref().map(|_| "unused").map_err(|_| ()));
+
+        assert!(result.is_err());
+        assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
+    }
+
+    #[test]
+    fn screenshot_flush_failure_drives_failure_toast() {
+        let frame = RasterFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            damage: None,
+            notes: Vec::new(),
+        };
+        let mut core = fixture_core(
+            &serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap(),
+            &pf_theme::flagship(),
+            false,
+        );
+
+        let result = write_png(FlushFailingWriter, &frame);
         core.screenshot_result(result.as_ref().map(|_| "unused").map_err(|_| ()));
 
         assert!(result.is_err());

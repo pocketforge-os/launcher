@@ -1654,19 +1654,21 @@ fn procedural_art_nodes(
     let home = context == "home-card";
     let kind_y = if home { y + 166.0 } else { y + 142.0 };
     let label_y = if home { y + 210.0 } else { y + 176.0 };
-    let mut nodes = vec![
+    let label_mask = node(
         // Card labels remain available to assistive consumers, but the current renderer
-        // also paints them. Cover the inset above the art well so no glyph fragments leak.
-        node(
-            &format!("{context}-label-clip-{id}"),
-            Role::Group,
-            "",
-            x,
-            y - 8.0,
-            width,
-            12.0,
-            token,
-        ),
+        // also paints them. Mask the full first text line before painting the inset art so
+        // neither glyph pixels nor the mask's former 1-2 px transition remain exposed.
+        &format!("{context}-label-mask-{id}"),
+        Role::Group,
+        "",
+        x,
+        y - 8.0,
+        width,
+        24.0,
+        token,
+    );
+    let mut nodes = vec![
+        label_mask,
         node(
             &format!("{context}-art-{id}"),
             Role::Group,
@@ -1734,8 +1736,17 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
         .is_some_and(|_| item.icon_decodable)
     {
         // Interim until the render stack rasterizes catalog images: keep the procedural
-        // art well, but omit the edition plate so real art remains visually distinct.
-        return procedural_art_nodes(&item.id, &item.title, None, context, x, y, width, focused);
+        // art well. The edition label is card content and remains identical in every state.
+        return procedural_art_nodes(
+            &item.id,
+            &item.title,
+            Some(kind_text(&item.kind)),
+            context,
+            x,
+            y,
+            width,
+            focused,
+        );
     }
     procedural_art_nodes(
         &item.id,
@@ -2376,7 +2387,9 @@ mod tests {
             node.id.as_str() == "home-card-art-plate-id" && node.accessible_label.is_empty()
         }));
         assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-label-clip-plate-id" && node.accessible_label.is_empty()
+            node.id.as_str() == "home-card-label-mask-plate-id"
+                && node.accessible_label.is_empty()
+                && (node.bounds.height - 24.0).abs() < f32::EPSILON
         }));
         assert!(
             card.children
@@ -2388,12 +2401,9 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "home-card-initial-plate-id")
         );
-        assert!(
-            !card
-                .children
-                .iter()
-                .any(|node| node.id.as_str() == "home-card-plate-plate-id")
-        );
+        assert!(card.children.iter().any(|node| {
+            node.id.as_str() == "home-card-plate-plate-id" && node.accessible_label == "GAME"
+        }));
         assert!(card.children.iter().all(|node| {
             !node.accessible_label.contains("art/paper-comet.png")
                 && !node.accessible_label.contains("Catalog art")

@@ -1974,8 +1974,8 @@ fn assert_raster_text_legible(
             }
             let occluded = if ink_pixels == 0 {
                 // A node that paints in isolation but has no per-node diff in the route
-                // is covered by later content, not an inkless glyph. Keep it out of the
-                // visible-text guard; a genuinely inkless node also has no isolated diff.
+                // is covered by later content, not an inkless glyph. A genuinely
+                // inkless node also has no isolated diff.
                 let isolated_scene = pf_scene::Scene::new(node.clone(), node.id.clone())
                     .map_err(|error| error.to_string())?;
                 let isolated = render(&isolated_scene)?;
@@ -1996,7 +1996,14 @@ fn assert_raster_text_legible(
             // from the rendered and text-suppressed rasters, never tokens.
             // Disabled text has no available action and is exempt from the text
             // contrast floor, but it must still produce visible raster ink.
-            if !occluded && fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
+            if occluded {
+                failures.push(format!(
+                    "{} ({:?}, {:?}): occluded-by-later-paint, ink_pixels=0",
+                    node.id.as_str(),
+                    node.accessible_label,
+                    node.bounds,
+                ));
+            } else if fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
                 failures.push(format!(
                     "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}, required={floor:.1}",
                     node.id.as_str(),
@@ -2291,6 +2298,50 @@ mod durable_tests {
             assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
         assert!(
             failure.contains("inkless-overlap-label") && failure.contains("ink_pixels=0"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_text_fully_occluded_by_later_fill() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root_id = pf_scene::NodeId::new("occlusion-probe").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("occluded-label").unwrap(),
+                Role::Text,
+                "Fully covered",
+                bounds,
+                "--color-surface-canvas",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("later-fill").unwrap(),
+                Role::Group,
+                "",
+                bounds,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("occluded-label") && failure.contains("occluded-by-later-paint"),
             "unexpected guard verdict: {failure}"
         );
     }

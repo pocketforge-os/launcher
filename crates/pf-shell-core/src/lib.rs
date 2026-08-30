@@ -2754,7 +2754,10 @@ impl ShellCore {
             },
             Route::Quick => unreachable!(),
         };
-        if !matches!(self.route, Route::Settings | Route::Library) {
+        if !matches!(
+            self.route,
+            Route::Settings | Route::Library | Route::Details
+        ) {
             out.push(
                 node(
                     "route-heading",
@@ -3128,7 +3131,7 @@ impl ShellCore {
                         Role::Text,
                         &item.title,
                         card.bounds.x,
-                        card.bounds.y + 154.0,
+                        card.bounds.y + 178.0,
                         geometry.card_width,
                         34.0,
                         "--color-surface-canvas",

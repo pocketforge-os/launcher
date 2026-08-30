@@ -16,7 +16,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{Palette, RasterFrame, RenderNote};
+use pf_render::{RasterFrame, RenderNote, ThemeBase};
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -50,7 +50,7 @@ const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -93,6 +93,8 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         (Key::Down, _) => "Move.down",
         (Key::Left, _) => "Move.left",
         (Key::Right, _) => "Move.right",
+        (Key::Char('['), _) | (_, 0xff55) => "Room.previous",
+        (Key::Char(']'), _) | (_, 0xff56) => "Room.next",
         (Key::Enter, _) => "Activate",
         (_, 0x20) => "Start",
         (Key::Escape, _) | (_, 0xff08) => "Back",
@@ -100,21 +102,24 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         (Key::Char('s' | 'S'), _) => "SafeReturn",
         _ => return None,
     };
-    map.mappings()
-        .iter()
-        .any(|mapping| mapping.action == action)
-        .then(|| match action {
-            "Move.up" => ShellAction::Move(pf_scene::AxisMove::Up),
-            "Move.down" => ShellAction::Move(pf_scene::AxisMove::Down),
-            "Move.left" => ShellAction::Move(pf_scene::AxisMove::Left),
-            "Move.right" => ShellAction::Move(pf_scene::AxisMove::Right),
-            "Activate" => ShellAction::Activate,
-            "Start" => ShellAction::Custom("Start".into()),
-            "Back" => ShellAction::Back,
-            "Quick" => ShellAction::Custom("Favorite".into()),
-            "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
-            _ => unreachable!("keyboard action table is exhaustive"),
-        })
+    (action.starts_with("Room.")
+        || map
+            .mappings()
+            .iter()
+            .any(|mapping| mapping.action == action))
+    .then(|| match action {
+        "Move.up" => ShellAction::Move(pf_scene::AxisMove::Up),
+        "Move.down" => ShellAction::Move(pf_scene::AxisMove::Down),
+        "Move.left" => ShellAction::Move(pf_scene::AxisMove::Left),
+        "Move.right" => ShellAction::Move(pf_scene::AxisMove::Right),
+        "Room.previous" | "Room.next" => ShellAction::Custom(action.into()),
+        "Activate" => ShellAction::Activate,
+        "Start" => ShellAction::Custom("Start".into()),
+        "Back" => ShellAction::Back,
+        "Quick" => ShellAction::Custom("Favorite".into()),
+        "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
+        _ => unreachable!("keyboard action table is exhaustive"),
+    })
 }
 
 #[derive(Default)]
@@ -515,8 +520,8 @@ fn main() -> Result<(), String> {
         return run_desktop_sim_supervisor(Path::new(session_socket), Path::new(authority_state));
     }
     if args.iter().any(|a| a == "--settings-evidence") {
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
         emit(&mut host, &mut core, &footer, out, "settings")?;
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         emit(&mut host, &mut core, &footer, out, "controls")?;
@@ -583,7 +588,7 @@ fn emit_f10_evidence(
             precision: EndPrecision::Approximate,
         }),
     }]);
-    core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+    core.action(&ShellAction::Custom("Room.next".into()));
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     core.action(&ShellAction::Activate);
@@ -1863,10 +1868,10 @@ fn present_scene(
     prompt: &str,
     scene: &pf_scene::Scene,
 ) -> Result<(), String> {
-    host.set_palette(if core.high_contrast() {
-        Palette::high_contrast()
+    host.set_theme_base(if core.high_contrast() {
+        ThemeBase::HighContrast
     } else {
-        Palette::standard()
+        ThemeBase::Dusk
     });
     host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
@@ -2805,8 +2810,8 @@ exec="./launch"
         core.load_network(&mut network);
         core.load_system(&time, &transfer);
         core.authority_snapshot(false);
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         let metrics = SurfaceMetrics {
@@ -3260,7 +3265,15 @@ exec="./launch"
         core.drive_session(&mut session).unwrap();
         assert!(core.revision() > in_session_revision);
         assert!(present_interactive(&mut host, &mut core, "A Open").unwrap());
-        assert_ne!(host.frame().unwrap().rgba, last_frame);
+        assert!(
+            core.scene(host.metrics(), "A Open")
+                .unwrap()
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "route-heading"
+                    && node.accessible_label == "RECENT · JUST NOW")
+        );
     }
 
     #[test]
@@ -3322,7 +3335,7 @@ exec="./launch"
         present(&mut host, &mut core, "A Open").unwrap();
         host.present(&palette_probe()).unwrap();
         let standard = host.frame().unwrap();
-        assert_eq!(&standard.rgba[..3], &[13, 17, 23]);
+        assert_eq!(&standard.rgba[..3], &[23, 21, 18]);
 
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("highContrast".into()),

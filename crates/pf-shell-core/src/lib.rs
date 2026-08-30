@@ -32,7 +32,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
-const PROMPTS_AREA_HEIGHT: f32 = 48.0;
+const STATUS_BAR_HEIGHT: f32 = 64.0;
+const PROMPTS_AREA_HEIGHT: f32 = 60.0;
+const HOME_SHELF_LIMIT: usize = 8;
 
 fn action_label(action: &str) -> String {
     if action == "SafeReturn" {
@@ -431,6 +433,7 @@ pub struct ShellCore {
     saved_focus: [usize; 7],
     caller_route: Route,
     caller_focus: usize,
+    caller_focus_id: Option<String>,
     selected_item: Option<usize>,
     search_query: String,
     search_results: Vec<usize>,
@@ -554,6 +557,7 @@ impl ShellCore {
             saved_focus: [0; 7],
             caller_route: Route::Home,
             caller_focus: 0,
+            caller_focus_id: None,
             selected_item: None,
             search_query: String::new(),
             search_results: (0..snapshot.items.len()).collect(),
@@ -1003,7 +1007,7 @@ impl ShellCore {
         if self.high_contrast {
             Base::HighContrast
         } else {
-            Base::Dark
+            Base::Dusk
         }
     }
     #[must_use]
@@ -1159,6 +1163,49 @@ impl ShellCore {
             }
             _ => None,
         }
+    }
+
+    fn focus_object_id(&self) -> String {
+        self.focused_item_index().map_or_else(
+            || format!("route-{:?}-{}", self.route, self.focus),
+            |index| format!("item-{}", self.items[index].id),
+        )
+    }
+
+    fn remember_caller(&mut self) {
+        self.caller_route = self.route;
+        self.caller_focus = self.focus;
+        self.caller_focus_id = Some(self.focus_object_id());
+    }
+
+    fn restore_caller_focus(&mut self) {
+        self.route = self.caller_route;
+        if let Some(id) = self.caller_focus_id.as_deref()
+            && let Some(item_id) = id.strip_prefix("item-")
+            && let Some(index) = self.items.iter().position(|item| item.id == item_id)
+            && let Some(focus) = match self.caller_route {
+                Route::Home => (index < self.focus_count()).then_some(index),
+                Route::Library => self
+                    .library_items
+                    .iter()
+                    .position(|&item| item == index)
+                    .map(|position| position + 4),
+                Route::Search => self.search_results.iter().position(|&item| item == index),
+                _ => None,
+            }
+        {
+            self.focus = focus;
+            return;
+        }
+        self.focus = match self.caller_route {
+            Route::Library if !self.library_items.is_empty() => {
+                self.caller_focus.clamp(4, self.library_items.len() + 3)
+            }
+            Route::Search if !self.search_results.is_empty() => self
+                .caller_focus
+                .min(self.search_results.len().saturating_sub(1)),
+            _ => self.caller_focus.min(self.focus_count().saturating_sub(1)),
+        };
     }
     #[must_use]
     pub fn art_treatment(&self, item_id: &str) -> Option<ArtTreatment> {
@@ -1501,10 +1548,11 @@ impl ShellCore {
                 }
             }
             ShellAction::Custom(name) if name == "Search" => {
-                self.caller_route = self.route;
-                self.caller_focus = self.focus;
+                self.remember_caller();
                 self.go(Route::Search);
             }
+            ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
+            ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
             ShellAction::Custom(name) if name == "Quick" => {
                 self.go(Route::Quick);
             }
@@ -1513,13 +1561,12 @@ impl ShellCore {
                 self.go(route);
             }
             ShellAction::Back if matches!(self.route, Route::Details | Route::Search) => {
-                self.route = self.caller_route;
-                self.focus = self.caller_focus.min(self.focus_count().saturating_sub(1));
+                self.restore_caller_focus();
             }
             ShellAction::Back if self.route == Route::VariantChooser => self.go(Route::Details),
             ShellAction::Back if self.route != Route::Home => self.go(Route::Home),
             ShellAction::Move(AxisMove::Right) if self.route == Route::Home => {
-                self.go(Route::Library)
+                self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1));
             }
             ShellAction::Move(AxisMove::Right)
                 if self.route == Route::Library && (1..=3).contains(&self.focus) =>
@@ -1556,7 +1603,7 @@ impl ShellCore {
                 self.focus -= 1;
             }
             ShellAction::Move(AxisMove::Left) if self.route == Route::Library => {
-                self.go(Route::Home)
+                self.focus = self.focus.saturating_sub(1);
             }
             ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                 self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1))
@@ -1675,8 +1722,7 @@ impl ShellCore {
         }
         if self.route == Route::Library {
             if self.focus == 0 {
-                self.caller_route = Route::Library;
-                self.caller_focus = 0;
+                self.remember_caller();
                 self.go(Route::Search);
                 return None;
             }
@@ -1690,16 +1736,14 @@ impl ShellCore {
                 return None;
             }
             self.selected_item = self.library_items.get(self.focus - 4).copied();
-            self.caller_route = Route::Library;
-            self.caller_focus = self.focus;
+            self.remember_caller();
             self.go(Route::Details);
             return None;
         }
         if self.route == Route::Search {
             let &item = self.search_results.get(self.focus)?;
             self.selected_item = Some(item);
-            self.caller_route = Route::Search;
-            self.caller_focus = self.focus;
+            self.remember_caller();
             self.go(Route::Details);
             return None;
         }
@@ -1743,8 +1787,7 @@ impl ShellCore {
         let ready = self.ready_variants(item);
         if self.items[item].pinned_variant_id.is_some() {
             self.selected_item = Some(item);
-            self.caller_route = Route::Home;
-            self.caller_focus = self.focus;
+            self.remember_caller();
             self.go(Route::VariantChooser);
             self.focus = 0;
             return None;
@@ -1754,8 +1797,7 @@ impl ShellCore {
             1 => self.launch_variant(item, ready[0]),
             _ => {
                 self.selected_item = Some(item);
-                self.caller_route = Route::Home;
-                self.caller_focus = self.focus;
+                self.remember_caller();
                 self.go(Route::VariantChooser);
                 self.focus = 0;
                 None
@@ -1829,6 +1871,20 @@ impl ShellCore {
         self.route = route;
         self.focus = self.saved_focus[self.route_index()].min(self.focus_count().saturating_sub(1));
     }
+    fn next_room(&mut self) {
+        match self.route {
+            Route::Home => self.go(Route::Library),
+            Route::Library => self.go(Route::Settings),
+            _ => {}
+        }
+    }
+    fn previous_room(&mut self) {
+        match self.route {
+            Route::Settings => self.go(Route::Library),
+            Route::Library => self.go(Route::Home),
+            _ => {}
+        }
+    }
     fn route_index(&self) -> usize {
         match self.route {
             Route::Home => 0,
@@ -1842,9 +1898,7 @@ impl ShellCore {
     }
     fn focus_count(&self) -> usize {
         match self.route {
-            Route::Home => {
-                (self.items.len() + self.items.iter().filter(|item| item.favorite).count()).max(1)
-            }
+            Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
             Route::Library => self.library_items.len() + 4,
             Route::Search => self.search_results.len().max(1),
             Route::Details => 1,
@@ -1947,6 +2001,26 @@ impl ShellCore {
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         let mut children = vec![
             node(
+                "status-bar",
+                Role::Group,
+                "",
+                0.0,
+                0.0,
+                w,
+                STATUS_BAR_HEIGHT,
+                "--color-surface-raised",
+            ),
+            node(
+                "status-left-spacer",
+                Role::Group,
+                "",
+                0.0,
+                0.0,
+                200.0,
+                STATUS_BAR_HEIGHT,
+                "--color-surface-raised",
+            ),
+            node(
                 "rooms",
                 Role::Text,
                 "L     Home     Library     Settings     R",
@@ -2019,6 +2093,16 @@ impl ShellCore {
             footer.to_owned()
         };
         children.push(node(
+            "prompt-bar",
+            Role::Group,
+            "",
+            0.0,
+            h - PROMPTS_AREA_HEIGHT,
+            w,
+            PROMPTS_AREA_HEIGHT,
+            "--color-surface-raised",
+        ));
+        children.push(node(
             "prompts",
             Role::Text,
             &footer,
@@ -2030,7 +2114,7 @@ impl ShellCore {
         ));
         let focus_id = children
             .iter()
-            .find(|n| n.state.focused)
+            .find_map(focused_node_id)
             .map_or("quiet-console", |n| n.id.as_str())
             .to_owned();
         let root = Node::new(
@@ -2079,33 +2163,20 @@ impl ShellCore {
             "--state-rest-text",
         ));
         if self.route == Route::Home {
-            // Home is composed as whole rows.  The footer is fixed, so scroll the
-            // row stack when focus enters a row below it and never emit a row that
-            // would only be partially visible.
-            let content_top = 64.0;
-            let content_bottom = h - PROMPTS_AREA_HEIGHT;
-            let route_heading = [out.pop().expect("Home route heading was just added")];
+            let heading = out.pop().expect("Home route heading was just added");
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
-            let ready_count = self
-                .items
-                .iter()
-                .filter(|item| {
-                    item.variants
-                        .iter()
-                        .any(|variant| matches!(variant.availability, Availability::Ready))
-                })
-                .count();
-            let recent_row = [
+            let mut content = vec![
+                heading,
                 node(
                     "hero-title",
                     Role::Heading,
                     focused.map_or("Nothing ready", |item| item.title.as_str()),
                     48.0,
-                    154.0,
-                    620.0,
-                    64.0,
+                    144.0,
+                    w - 96.0,
+                    72.0,
                     "--state-rest-text",
                 ),
                 node(
@@ -2117,7 +2188,7 @@ impl ShellCore {
                         "● Ready · Game · Installed"
                     },
                     48.0,
-                    226.0,
+                    224.0,
                     480.0,
                     32.0,
                     if matches!(self.presentation, Presentation::Starting) {
@@ -2127,19 +2198,34 @@ impl ShellCore {
                     },
                 ),
             ];
-            let mut ready_row = vec![node(
-                "ready-now-label",
+            if self.presentation == Presentation::ForcedClose {
+                content.push(node(
+                    "attention",
+                    Role::Text,
+                    &format!("● Attention · {} didn't close cleanly", self.active_title),
+                    w - 480.0,
+                    96.0,
+                    432.0,
+                    36.0,
+                    "--color-status-attention",
+                ));
+            }
+            content.push(node(
+                "home-shelf-label",
                 Role::Heading,
-                &format!("READY NOW · {ready_count}"),
+                "RECENT",
                 48.0,
-                398.0,
+                344.0,
                 220.0,
                 28.0,
                 "--color-text-muted",
-            )];
-            let gap = 24.0;
-            let card_width = 158.0_f32.min((w - 96.0) / self.items.len().max(1) as f32 - gap);
-            for (i, item) in self.items.iter().enumerate() {
+            ));
+            let count = self.items.len().min(HOME_SHELF_LIMIT);
+            let gap = 16.0;
+            let card_width = ((w - 96.0 - gap * count.saturating_sub(1) as f32)
+                / count.max(1) as f32)
+                .min(136.0);
+            for (i, item) in self.items.iter().take(HOME_SHELF_LIMIT).enumerate() {
                 let availability = best_availability(item);
                 let status = availability_text(availability, &self.presentation);
                 let x = 48.0 + i as f32 * (card_width + gap);
@@ -2153,9 +2239,9 @@ impl ShellCore {
                     Role::Button,
                     &card_label,
                     x,
-                    430.0,
+                    382.0,
                     card_width,
-                    210.0,
+                    220.0,
                     state_token(availability, i == self.focus),
                 );
                 n.action = Some(NodeAction::Activate);
@@ -2164,73 +2250,34 @@ impl ShellCore {
                     .variants
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
-                n.children = art_nodes(item, "home-card", x, 438.0, card_width, i == self.focus);
-                ready_row.push(n);
-            }
-            let favorite_items: Vec<_> = self
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.favorite)
-                .collect();
-            let favorites_row = if favorite_items.is_empty() {
-                None
-            } else {
-                let mut favorites_row = vec![node(
-                    "favorites-label",
-                    Role::Heading,
-                    &format!("FAVORITES · {}", favorite_items.len()),
-                    48.0,
-                    688.0,
-                    220.0,
-                    28.0,
-                    "--color-text-muted",
-                )];
-                for (shelf_index, (item_index, item)) in favorite_items.into_iter().enumerate() {
-                    let x = 286.0 + shelf_index as f32 * 174.0;
-                    let focused = self.focus == self.items.len() + shelf_index;
-                    let mut card = node(
-                        &format!("favorite-item-{}", item.id),
-                        Role::Button,
-                        if item.has_real_art() { "" } else { &item.title },
-                        x,
-                        680.0,
-                        158.0,
-                        72.0,
-                        state_token(best_availability(item), focused),
-                    );
-                    card.state.focused = focused;
-                    card.action = Some(NodeAction::Activate);
-                    card.children = art_nodes(item, "favorite-card", x, 682.0, 158.0, focused);
-                    let _ = item_index;
-                    favorites_row.push(card);
+                n.children = art_nodes(item, "home-card", x, 390.0, card_width, i == self.focus);
+                if item.favorite {
+                    n.children.push(node(
+                        &format!("favorite-pin-{}", item.id),
+                        Role::Text,
+                        "★ Favorite",
+                        x + 8.0,
+                        574.0,
+                        card_width - 16.0,
+                        20.0,
+                        "--state-selected-accent",
+                    ));
                 }
-                Some(favorites_row)
-            };
-            let focused_row_bottom = [&recent_row[..], &ready_row[..]]
-                .into_iter()
-                .chain(favorites_row.as_deref())
-                .find(|row| row.iter().any(|node| node.state.focused))
-                .map_or(content_bottom, |row| home_row_vertical_extent(row).1);
-            let scroll_y = (focused_row_bottom - content_bottom).max(0.0);
-            for row in [&route_heading[..], &recent_row[..], &ready_row[..]] {
-                push_visible_home_row(out, row.to_vec(), scroll_y, content_top, content_bottom);
+                content.push(n);
             }
-            if let Some(row) = favorites_row {
-                push_visible_home_row(out, row, scroll_y, content_top, content_bottom);
-            }
-            if self.presentation == Presentation::ForcedClose {
-                out.push(node(
-                    "attention",
-                    Role::Text,
-                    &format!("Attention · {} didn't close cleanly", self.active_title),
-                    48.0,
-                    500.0,
-                    w - 96.0,
-                    42.0,
-                    "--color-status-attention",
-                ));
-            }
+            out.push(Node::new(
+                NodeId::new("home-scroll-region").unwrap(),
+                Role::Group,
+                "Home content scroll region",
+                Bounds::new(
+                    0.0,
+                    STATUS_BAR_HEIGHT,
+                    w,
+                    h - STATUS_BAR_HEIGHT - PROMPTS_AREA_HEIGHT,
+                ),
+                "--color-surface-canvas",
+            ));
+            out.extend(content);
         } else if self.route == Route::Library {
             let mut search = node(
                 "library-search",
@@ -3499,29 +3546,7 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
     )
 }
 
-fn push_visible_home_row(
-    out: &mut Vec<Node>,
-    mut row: Vec<Node>,
-    scroll_y: f32,
-    content_top: f32,
-    content_bottom: f32,
-) {
-    fn translate(node: &mut Node, y: f32) {
-        node.bounds.y -= y;
-        for child in &mut node.children {
-            translate(child, y);
-        }
-    }
-
-    for node in &mut row {
-        translate(node, scroll_y);
-    }
-    let (top, bottom) = home_row_vertical_extent(&row);
-    if top >= content_top && bottom <= content_bottom {
-        out.extend(row);
-    }
-}
-
+#[cfg(test)]
 fn home_row_vertical_extent(row: &[Node]) -> (f32, f32) {
     fn node_vertical_extent(node: &Node) -> (f32, f32) {
         node.children.iter().fold(
@@ -3591,7 +3616,7 @@ fn state_token(a: &Availability, focused: bool) -> &'static str {
         match a {
             Availability::Ready => "--state-rest-surface",
             Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => {
-                "--state-attention-surface"
+                "--color-status-attention"
             }
             Availability::UnsupportedCapability { .. }
             | Availability::IncompatibleRuntime { .. } => "--state-unavailable-surface",
@@ -3606,6 +3631,13 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+fn focused_node_id(node: &Node) -> Option<&Node> {
+    node.state
+        .focused
+        .then_some(node)
+        .or_else(|| node.children.iter().find_map(focused_node_id))
 }
 
 #[cfg(test)]
@@ -4255,7 +4287,7 @@ mod tests {
     fn high_contrast_selects_theme_base() {
         let mut core = core();
         core.load_preferences(&preferences(true), true).unwrap();
-        assert_eq!(core.theme_base(), Base::Dark);
+        assert_eq!(core.theme_base(), Base::Dusk);
 
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("highContrast".into()),
@@ -4266,7 +4298,7 @@ mod tests {
         assert_eq!(core.theme_base(), Base::HighContrast);
         assert_ne!(
             pf_theme::flagship()
-                .resolve(Base::Dark, "--color-surface-canvas")
+                .resolve(Base::Dusk, "--color-surface-canvas")
                 .unwrap(),
             pf_theme::flagship()
                 .resolve(Base::HighContrast, "--color-surface-canvas")
@@ -4320,6 +4352,51 @@ mod tests {
             usize::from(n.state.focused) + n.children.iter().map(count).sum::<usize>()
         }
         assert_eq!(count(s.root()), 1);
+    }
+
+    #[test]
+    fn details_back_restores_library_items_in_route_local_space() {
+        for (focus, expected_item) in [(4, 0), (5, 1)] {
+            let mut c = core();
+            c.go(Route::Library);
+            c.focus = focus;
+            c.action(&ShellAction::Activate);
+            assert_eq!(
+                (c.route(), c.selected_item),
+                (Route::Details, Some(expected_item))
+            );
+
+            c.action(&ShellAction::Back);
+            assert_eq!((c.route(), c.focus()), (Route::Library, focus));
+        }
+    }
+
+    #[test]
+    fn details_back_restores_item_in_current_search_results() {
+        let mut c = core();
+        c.go(Route::Search);
+        c.search_results = vec![1, 0];
+        c.focus = 0;
+        c.action(&ShellAction::Activate);
+        assert_eq!((c.route(), c.selected_item), (Route::Details, Some(1)));
+
+        c.action(&ShellAction::Back);
+        assert_eq!((c.route(), c.focus()), (Route::Search, 0));
+        assert_eq!(c.focused_item_index(), Some(1));
+    }
+
+    #[test]
+    fn details_back_clamps_to_search_item_when_result_vanished() {
+        let mut c = core();
+        c.go(Route::Search);
+        c.focus = 1;
+        c.action(&ShellAction::Activate);
+        assert_eq!((c.route(), c.selected_item), (Route::Details, Some(1)));
+        c.search_results = vec![0];
+
+        c.action(&ShellAction::Back);
+        assert_eq!((c.route(), c.focus()), (Route::Search, 0));
+        assert_eq!(c.focused_item_index(), Some(0));
     }
     #[test]
     fn all_presentations_route_safe_return() {
@@ -4905,7 +4982,7 @@ mod tests {
         for (id, role) in [
             ("hero-title", Role::Heading),
             ("hero-status", Role::Text),
-            ("ready-now-label", Role::Heading),
+            ("home-shelf-label", Role::Heading),
             ("status-cluster", Role::Text),
         ] {
             assert_eq!(find(scene.root(), id).map(|node| node.role), Some(role));
@@ -5009,40 +5086,37 @@ mod tests {
         };
         let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
-        core.focus = core.items.len();
+        core.focus = 0;
         let home = core.scene(metrics, "").unwrap();
-        let ids: Vec<_> = home
-            .root()
-            .children
-            .iter()
-            .map(|node| node.id.as_str())
-            .collect();
-        assert!(ids.contains(&"favorites-label"));
         let favorite = home
             .root()
             .children
             .iter()
-            .find(|node| node.id.as_str() == "favorite-item-ridge")
+            .find(|node| node.id.as_str() == "item-ridge")
             .unwrap();
+        assert!(
+            favorite
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "favorite-pin-ridge")
+        );
         for part in ["art", "initial", "plate", "title"] {
             assert!(
                 favorite
                     .children
                     .iter()
-                    .any(|node| node.id.as_str() == format!("favorite-card-{part}-ridge"))
+                    .any(|node| node.id.as_str() == format!("home-card-{part}-ridge"))
             );
         }
         snapshot.user_projection.favorite_item_ids.clear();
         let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
             .scene(metrics, "")
             .unwrap();
-        assert!(
-            !empty
-                .root()
-                .children
+        assert!(!empty.root().children.iter().any(|node| {
+            node.children
                 .iter()
-                .any(|node| node.id.as_str() == "favorites-label")
-        );
+                .any(|child| child.id.as_str() == "favorite-pin-ridge")
+        }));
 
         core.go(Route::Library);
         core.focus = 2;
@@ -5107,16 +5181,6 @@ mod tests {
 
     #[test]
     fn home_rows_scroll_and_clip_without_shelf_overlap() {
-        fn vertical_extent(node: &Node) -> (f32, f32) {
-            node.children.iter().fold(
-                (node.bounds.y, node.bounds.y + node.bounds.height),
-                |(top, bottom), child| {
-                    let (child_top, child_bottom) = vertical_extent(child);
-                    (top.min(child_top), bottom.max(child_bottom))
-                },
-            )
-        }
-
         fn intersects(a: Bounds, b: Bounds) -> bool {
             a.x < b.x + b.width
                 && a.x + a.width > b.x
@@ -5194,33 +5258,23 @@ mod tests {
                         .iter()
                         .find(|node| node.id.as_str() == "prompts")
                         .unwrap();
-                    for node in scene
-                        .root()
-                        .children
-                        .iter()
-                        .filter(|node| node.id.as_str() != "prompts")
-                    {
+                    for node in scene.root().children.iter().filter(|node| {
+                        matches!(
+                            node.id.as_str(),
+                            "route-heading" | "hero-title" | "hero-status" | "home-shelf-label"
+                        ) || node.id.as_str().starts_with("item-")
+                    }) {
                         assert_tree_misses(node, footer.bounds);
                     }
 
-                    let focused = scene
-                        .root()
-                        .children
-                        .iter()
-                        .find(|node| node.state.focused)
-                        .expect("focused Home row must be emitted");
-                    let favorite_focused = focused.id.as_str().starts_with("favorite-item-");
+                    assert!(scene.root().children.iter().any(|node| node.state.focused));
                     let row: Vec<_> = scene
                         .root()
                         .children
                         .iter()
                         .filter(|node| {
                             let id = node.id.as_str();
-                            if favorite_focused {
-                                id == "favorites-label" || id.starts_with("favorite-item-")
-                            } else {
-                                id == "ready-now-label" || id.starts_with("item-")
-                            }
+                            id == "home-shelf-label" || id.starts_with("item-")
                         })
                         .cloned()
                         .collect();
@@ -5228,21 +5282,15 @@ mod tests {
                     assert!(row_top >= 64.0);
                     assert!(row_bottom <= footer.bounds.y);
 
-                    let ready_bottom = scene
-                        .root()
-                        .children
-                        .iter()
-                        .filter(|node| node.id.as_str().starts_with("item-"))
-                        .map(|node| vertical_extent(node).1)
-                        .fold(f32::NEG_INFINITY, f32::max);
-                    let favorites_top = scene
-                        .root()
-                        .children
-                        .iter()
-                        .filter(|node| node.id.as_str().starts_with("favorite-item-"))
-                        .map(|node| vertical_extent(node).0)
-                        .fold(f32::INFINITY, f32::min);
-                    assert!(ready_bottom <= favorites_top);
+                    assert_eq!(
+                        scene
+                            .root()
+                            .children
+                            .iter()
+                            .filter(|node| node.id.as_str() == "home-scroll-region")
+                            .count(),
+                        1
+                    );
                 }
             }
         }

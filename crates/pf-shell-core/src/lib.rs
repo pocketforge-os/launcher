@@ -2288,20 +2288,34 @@ impl ShellCore {
             footer.to_owned()
         };
         let footer = match self.route {
-            Route::Library => "SELECT Search · Y Filter · A Details".to_owned(),
+            Route::Library => (self.focus >= 5)
+                .then(|| self.binding_prompt("Activate", "Details"))
+                .flatten()
+                .unwrap_or_default(),
             Route::Details => {
                 let ready = self
                     .selected_item
                     .is_some_and(|index| !self.ready_variants(index).is_empty());
-                let pin = self
-                    .selected_item
-                    .and_then(|index| self.items.get(index))
-                    .map_or("Pin", |item| if item.favorite { "Unpin" } else { "Pin" });
-                if ready {
-                    format!("B Back · X {pin} · A Play")
-                } else {
-                    format!("B Back · X {pin}")
+                let mut prompts = Vec::new();
+                if let Some(prompt) = self.binding_prompt("Back", "Back") {
+                    prompts.push(prompt);
                 }
+                if let Some(item) = self.selected_item.and_then(|index| self.items.get(index))
+                    && let Some(prompt) = self.binding_prompt(
+                        "Quick",
+                        if item.favorite {
+                            "Unfavorite"
+                        } else {
+                            "Favorite"
+                        },
+                    )
+                {
+                    prompts.push(prompt);
+                }
+                if ready && let Some(prompt) = self.binding_prompt("Activate", "Play") {
+                    prompts.push(prompt);
+                }
+                prompts.join(" · ")
             }
             _ => supplied_footer,
         };
@@ -2345,6 +2359,13 @@ impl ShellCore {
             Scene::new(root, NodeId::new(focus_id).unwrap())
                 .expect("one deterministic focus owner"),
         )
+    }
+
+    fn binding_prompt(&self, action: &str, label: &str) -> Option<String> {
+        self.control_bindings
+            .iter()
+            .find(|binding| binding.action == action)
+            .map(|binding| format!("{} {label}", binding.binding))
     }
 
     fn route_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
@@ -6811,7 +6832,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_console_mockup_cues_and_honest_detail_footers_are_emitted() {
+    fn quiet_console_mockup_cues_and_binding_derived_footers_are_emitted() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
                 .then_some(node)
@@ -6832,6 +6853,29 @@ mod tests {
                 vec![variant("stream", "setup", unavailable)],
             ),
         ]);
+        let desktop_bindings = || {
+            vec![
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Activate".into(),
+                    label: "Activate".into(),
+                    binding: "A".into(),
+                },
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Back".into(),
+                    label: "Back".into(),
+                    binding: "B".into(),
+                },
+                ControlBinding {
+                    context: "shell".into(),
+                    action: "Quick".into(),
+                    label: "Quick".into(),
+                    binding: "X".into(),
+                },
+            ]
+        };
+        core.set_control_bindings(desktop_bindings());
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -6841,14 +6885,21 @@ mod tests {
         };
 
         core.go(Route::Library);
+        core.focus = 5;
         let library = core.scene(metrics, "wrong caller footer").unwrap();
         assert!(find(library.root(), "library-selected-underline-0").is_some());
         assert!(find(library.root(), "room-library-underline").is_some());
         assert!(find(library.root(), "room-keycap-left-border").is_some());
         assert_eq!(
             find(library.root(), "prompts").map(|node| node.accessible_label.as_str()),
-            Some("SELECT Search · Y Filter · A Details")
+            Some("A Details")
         );
+        let library_prompts = find(library.root(), "prompts")
+            .unwrap()
+            .accessible_label
+            .as_str();
+        assert!(!library_prompts.contains("SELECT"));
+        assert!(!library_prompts.contains('Y'));
 
         core.selected_item = Some(0);
         core.go(Route::Details);
@@ -6863,7 +6914,34 @@ mod tests {
         );
         assert!(
             find(ready.root(), "prompts")
-                .is_some_and(|node| node.accessible_label.contains("A Play"))
+                .is_some_and(|node| node.accessible_label == "B Back · X Favorite · A Play")
+        );
+
+        let mut remapped = desktop_bindings();
+        remapped
+            .iter_mut()
+            .find(|binding| binding.action == "Quick")
+            .unwrap()
+            .binding = "START".into();
+        core.set_control_bindings(remapped);
+        let remapped = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(
+            find(remapped.root(), "prompts")
+                .is_some_and(|node| node.accessible_label.contains("START Favorite"))
+        );
+
+        core.set_control_bindings(
+            desktop_bindings()
+                .into_iter()
+                .filter(|binding| binding.action != "Quick")
+                .collect(),
+        );
+        let favorite_unbound = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(
+            find(favorite_unbound.root(), "prompts").is_some_and(|node| {
+                !node.accessible_label.contains("Favorite")
+                    && !node.accessible_label.contains("Unfavorite")
+            })
         );
 
         core.selected_item = Some(1);

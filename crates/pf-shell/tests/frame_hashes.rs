@@ -135,7 +135,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("52fc1e56adbbc629d4c958d9f46449768a059ae5cefb5500ae2f181d99da0135  ")
+        transcript.contains("21143d6b3c7d3b41e4a547d9eca4fe61c30f5a787b7067157ab918e978b457d6  ")
     );
     assert!(
         transcript.contains("656f8a2983bddbe1b26b60e60b220159e2d31c19478cca0c39db9d36161944bd  ")

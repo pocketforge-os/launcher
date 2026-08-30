@@ -3803,9 +3803,12 @@ impl ShellCore {
                 ));
             }
             if row.id == "accessibility-textScale" {
-                let selected_value = lines.last().copied().unwrap_or("100%");
+                let selected_value = lines
+                    .last()
+                    .and_then(|line| line.rsplit_once(" · "))
+                    .map_or("100%", |(_, effective)| effective);
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
-                    let selected = selected_value.contains(value);
+                    let selected = selected_value == value;
                     let x = content_left + content_width - 240.0 + segment as f32 * 72.0;
                     scene_row.children.push(node(
                         &format!("settings-text-scale-segment-{value}"),
@@ -5674,6 +5677,49 @@ mod tests {
         assert!(scene.contains("Reduce motion"));
         assert!(scene.contains("Reduce flashing"));
         assert!(scene.contains("settings-text-scale-value-100%"));
+    }
+
+    #[test]
+    fn text_scale_control_selects_exactly_one_effective_segment() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        for effective in ["100%", "150%", "200%"] {
+            let mut core = core();
+            core.load_preferences(&preferences(true), true).unwrap();
+            core.go(Route::Settings);
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(effective.into()),
+                stored: PreferenceValue::Text(effective.into()),
+                applied: true,
+            });
+
+            let scene = settings_scene(&core);
+            let selected_segments = ["100%", "150%", "200%"]
+                .into_iter()
+                .filter(|value| {
+                    find(
+                        scene.root(),
+                        &format!("settings-text-scale-segment-{value}"),
+                    )
+                    .is_some_and(|node| node.style_token == "--state-selected-accent")
+                })
+                .collect::<Vec<_>>();
+            let inverse_labels = ["100%", "150%", "200%"]
+                .into_iter()
+                .filter(|value| {
+                    find(scene.root(), &format!("settings-text-scale-value-{value}"))
+                        .is_some_and(|node| node.style_token == "--color-text-inverse")
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(selected_segments, [effective]);
+            assert_eq!(inverse_labels, [effective]);
+        }
     }
 
     #[test]

@@ -30,7 +30,10 @@ use std::{
     env, fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -189,6 +192,7 @@ fn load_durable_map_or_shipped(
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    validate_args(&args)?;
     let fixture_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
@@ -677,10 +681,33 @@ trait ScreenshotWriter {
 
 struct FsScreenshotWriter;
 
+static SCREENSHOT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl ScreenshotWriter for FsScreenshotWriter {
     fn write_png(&self, path: &Path, frame: &RasterFrame) -> Result<(), String> {
-        let file = fs::File::create(path).map_err(|error| error.to_string())?;
-        write_png(file, frame)
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid screenshot path: {}", path.display()))?;
+        let sequence = SCREENSHOT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = path.with_file_name(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        let result = (|| {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|error| error.to_string())?;
+            write_png(file, frame)?;
+            fs::rename(&temp_path, path).map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
 }
 
@@ -1119,6 +1146,15 @@ fn present(
 fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str())
 }
+
+fn validate_args(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| arg == "--fbdev")
+        && args.iter().any(|arg| arg == "--settings-evidence")
+    {
+        return Err("usage error: --fbdev conflicts with --settings-evidence".into());
+    }
+    Ok(())
+}
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut out, byte| {
         write!(out, "{byte:02x}").expect("writing to a String cannot fail");
@@ -1327,6 +1363,42 @@ exec="./launch"
 
         assert!(result.is_err());
         assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
+    }
+
+    #[test]
+    fn screenshot_rename_failure_drives_failure_toast() {
+        let state = tempfile::tempdir().unwrap();
+        let final_path = state.path().join("already-a-directory.png");
+        fs::create_dir(&final_path).unwrap();
+        let frame = RasterFrame {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            damage: None,
+            notes: Vec::new(),
+        };
+        let mut core = fixture_core(
+            &serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap(),
+            &pf_theme::flagship(),
+            false,
+        );
+
+        let result = FsScreenshotWriter.write_png(&final_path, &frame);
+        core.screenshot_result(result.as_ref().map(|()| "unused").map_err(|_| ()));
+
+        assert!(result.is_err());
+        assert_eq!(core.session_status(), Some("Screenshot could not be saved"));
+        assert_eq!(fs::read_dir(state.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fbdev_and_settings_evidence_are_rejected_as_conflicting() {
+        let args = vec!["--fbdev".into(), "--settings-evidence".into()];
+
+        let error = validate_args(&args).unwrap_err();
+
+        assert!(error.contains("--fbdev"));
+        assert!(error.contains("--settings-evidence"));
     }
 
     impl FavoriteCatalog for AlwaysConflictingFavorites {

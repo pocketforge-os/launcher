@@ -2167,17 +2167,6 @@ impl ShellCore {
                 "--color-surface-raised",
             ),
             node(
-                "rooms",
-                Role::Text,
-                "L     Home     Library     Settings     R",
-                w / 2.0 - 220.0,
-                16.0,
-                440.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Label),
-            node(
                 "status-cluster",
                 Role::Text,
                 if self.authority_unavailable() {
@@ -2193,6 +2182,78 @@ impl ShellCore {
             )
             .with_type_role(TypeRole::Caption),
         ];
+        let room_left = w / 2.0 - 220.0;
+        children.push(
+            node(
+                "rooms",
+                Role::Group,
+                "",
+                room_left,
+                12.0,
+                424.0,
+                40.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+        for (id, label, x, width) in [
+            ("room-keycap-left", "L", room_left + 8.0, 32.0),
+            ("room-home", "Home", room_left + 56.0, 72.0),
+            ("room-library", "Library", room_left + 152.0, 88.0),
+            ("room-settings", "Settings", room_left + 264.0, 92.0),
+            ("room-keycap-right", "R", room_left + 384.0, 32.0),
+        ] {
+            let keycap = id.contains("keycap");
+            let selected = matches!(
+                (id, self.route),
+                ("room-home", Route::Home)
+                    | (
+                        "room-library",
+                        Route::Library | Route::Search | Route::Details | Route::VariantChooser
+                    )
+                    | ("room-settings", Route::Settings)
+            );
+            children.push(
+                node(
+                    id,
+                    Role::Text,
+                    label,
+                    x,
+                    16.0,
+                    width,
+                    32.0,
+                    "--color-surface-raised",
+                )
+                .with_type_role(if keycap {
+                    TypeRole::Caption
+                } else {
+                    TypeRole::Label
+                }),
+            );
+            if keycap {
+                children.push(node(
+                    &format!("{id}-border"),
+                    Role::Group,
+                    "",
+                    x - 4.0,
+                    12.0,
+                    width + 8.0,
+                    34.0,
+                    "--color-border-strong",
+                ));
+            } else if selected {
+                children.push(node(
+                    &format!("{id}-underline"),
+                    Role::Group,
+                    "",
+                    x,
+                    49.0,
+                    width,
+                    3.0,
+                    "--state-selected-accent",
+                ));
+            }
+        }
         if let Some(status) = self.session_status() {
             children.push(node(
                 "session-status",
@@ -2211,7 +2272,7 @@ impl ShellCore {
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
         }
-        let footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
+        let supplied_footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
             self.focused_item_index().map_or_else(
                 || base.to_owned(),
                 |item| {
@@ -2225,6 +2286,24 @@ impl ShellCore {
             )
         } else {
             footer.to_owned()
+        };
+        let footer = match self.route {
+            Route::Library => "SELECT Search · Y Filter · A Details".to_owned(),
+            Route::Details => {
+                let ready = self
+                    .selected_item
+                    .is_some_and(|index| !self.ready_variants(index).is_empty());
+                let pin = self
+                    .selected_item
+                    .and_then(|index| self.items.get(index))
+                    .map_or("Pin", |item| if item.favorite { "Unpin" } else { "Pin" });
+                if ready {
+                    format!("B Back · X {pin} · A Play")
+                } else {
+                    format!("B Back · X {pin}")
+                }
+            }
+            _ => supplied_footer,
         };
         children.push(node(
             "prompt-bar",
@@ -2398,6 +2477,15 @@ impl ShellCore {
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
                 n.children = art_nodes(item, "home-card", x, 390.0, card_width, i == self.focus);
+                add_unavailable_card_cues(
+                    &mut n.children,
+                    item,
+                    availability,
+                    "home-card",
+                    x,
+                    390.0,
+                    card_width,
+                );
                 if item.favorite {
                     n.children.push(
                         node(
@@ -2441,7 +2529,7 @@ impl ShellCore {
             let mut search = node(
                 "library-search",
                 Role::Button,
-                &format!("Search {} titles", self.items.len()),
+                &format!("⌕  Search {} titles", self.items.len()),
                 48.0,
                 112.0,
                 search_width,
@@ -2486,7 +2574,7 @@ impl ShellCore {
                     chip_width,
                     52.0,
                     if focused {
-                        "--state-focused-ring"
+                        "--color-text-inverse"
                     } else {
                         "--state-rest-surface"
                     },
@@ -2495,6 +2583,18 @@ impl ShellCore {
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
                 out.push(chip);
+                if active {
+                    out.push(node(
+                        &format!("library-selected-underline-{index}"),
+                        Role::Group,
+                        "",
+                        toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap) + 12.0,
+                        toolbar_top + chip_row as f32 * 68.0 + 46.0,
+                        chip_width - 24.0,
+                        3.0,
+                        "--state-selected-accent",
+                    ));
+                }
             }
             let row_height = 292.0;
             let card_top = geometry.card_top;
@@ -2554,6 +2654,15 @@ impl ShellCore {
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
                     self.focus == i + 5,
+                );
+                add_unavailable_card_cues(
+                    &mut card.children,
+                    item,
+                    availability,
+                    "library-card",
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
+                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    geometry.card_width,
                 );
                 out.push(card);
             }
@@ -2631,8 +2740,6 @@ impl ShellCore {
                 return;
             };
             let item = &self.items[item_index];
-            let has_playtime = self.playtime.contains_key(&item.id);
-            let detail_offset = if has_playtime { 16.0 } else { 0.0 };
             let first_variant = item.variants.first();
             let provenance = first_variant.map_or_else(
                 || kind_text(&item.kind).to_owned(),
@@ -2650,9 +2757,9 @@ impl ShellCore {
                 Role::Text,
                 &provenance,
                 400.0,
-                165.0,
+                112.0,
                 w - 448.0,
-                42.0,
+                30.0,
                 "--color-text-secondary",
             ));
             out.push(node(
@@ -2660,70 +2767,92 @@ impl ShellCore {
                 Role::Heading,
                 &item.title,
                 400.0,
-                212.0,
+                148.0,
                 w - 448.0,
-                58.0,
-                "--state-rest-text",
+                64.0,
+                "--color-surface-canvas",
             ));
-            if let Some(playtime) = self.playtime.get(&item.id).copied() {
-                out.push(node(
-                    "detail-playtime",
-                    Role::Text,
-                    &format_playtime(playtime),
-                    400.0,
-                    258.0,
-                    w - 448.0,
-                    30.0,
-                    "--color-text-secondary",
-                ));
-            }
             let mut cover = node(
                 "detail-cover",
                 Role::Group,
                 &format!("Cover for {}", item.title),
                 48.0,
-                96.0,
+                112.0,
                 320.0,
                 428.0,
                 "--color-surface-raised",
             )
             .with_elevation(Elevation::Elev2);
-            cover.children = art_nodes(item, "detail-art", 48.0, 96.0, 320.0, false);
+            cover.children = art_nodes(item, "detail-art", 48.0, 112.0, 320.0, false);
             out.push(cover);
             let detail_availability = best_availability(item);
-            let availability = availability_text(detail_availability, &self.presentation);
+            let availability = if matches!(detail_availability, Availability::Ready) {
+                "● Ready".to_owned()
+            } else {
+                format!(
+                    "⊘ {}",
+                    availability_text(detail_availability, &self.presentation)
+                )
+            };
             let mut availability_node = node(
                 "detail-availability-reason",
                 Role::Text,
                 &availability,
                 400.0,
-                294.0 + detail_offset,
+                218.0,
                 w - 448.0,
                 38.0,
-                state_token(detail_availability, false),
+                if matches!(detail_availability, Availability::Ready) {
+                    "--color-text-primary"
+                } else {
+                    "--state-unavailable-text"
+                },
             );
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
-            if item.variants.len() >= 2 {
+            out.push(
+                node(
+                    "detail-ways-heading",
+                    Role::Heading,
+                    "WAYS TO PLAY",
+                    400.0,
+                    270.0,
+                    w - 448.0,
+                    28.0,
+                    "--color-text-muted",
+                )
+                .with_type_role(TypeRole::Eyebrow),
+            );
+            let ready = self.ready_variants(item_index);
+            if let Some(playtime) = self.playtime.get(&item.id).copied() {
                 out.push(
                     node(
-                        "detail-ways-heading",
+                        "detail-time-played-heading",
                         Role::Heading,
-                        "Ways to play",
+                        "TIME PLAYED",
                         400.0,
-                        342.0 + detail_offset,
-                        w - 448.0,
-                        28.0,
+                        540.0,
+                        180.0,
+                        22.0,
                         "--color-text-muted",
                     )
                     .with_type_role(TypeRole::Eyebrow),
                 );
+                out.push(node(
+                    "detail-playtime",
+                    Role::Text,
+                    &format_playtime(playtime),
+                    400.0,
+                    566.0,
+                    220.0,
+                    28.0,
+                    "--color-text-primary",
+                ));
             }
-            let ready = self.ready_variants(item_index);
-            let variant_row_height = 48.0;
+            let variant_row_height = 54.0;
             let variant_row_gap = 7.0;
-            let variant_rows_top = 378.0 + detail_offset;
+            let variant_rows_top = 302.0;
             let detail_variant_capacity = 2;
             let visible_detail_variants = item.variants.len().min(detail_variant_capacity);
             if self.route == Route::Details {
@@ -2733,19 +2862,19 @@ impl ShellCore {
                     .take(visible_detail_variants)
                     .enumerate()
                 {
-                    if item.variants.len() < 2 {
-                        break;
-                    }
                     let variant_label = if matches!(variant.availability, Availability::Ready) {
-                        format!("{} · Ready", humanize_identifier(&variant.id))
-                    } else if variant_index == 0 && ready.is_empty() {
                         format!(
-                            "{} · See availability above",
-                            humanize_identifier(&variant.id)
+                            "✓ {}\n{}",
+                            humanize_identifier(&variant.id),
+                            variant
+                                .provenance
+                                .app_version
+                                .as_deref()
+                                .map_or("Installed on this device", |version| version)
                         )
                     } else {
                         format!(
-                            "{} · {}",
+                            "⊘ {}\n{}",
                             humanize_identifier(&variant.id),
                             availability_text(&variant.availability, &self.presentation)
                         )
@@ -2759,7 +2888,7 @@ impl ShellCore {
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
                         w - 448.0,
                         variant_row_height,
-                        state_token(&variant.availability, false),
+                        "--state-rest-surface",
                     );
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
@@ -2849,34 +2978,45 @@ impl ShellCore {
                     out.push(row);
                 }
             } else if !ready.is_empty() {
-                let variants_bottom = if item.variants.len() < 2 {
-                    variant_rows_top
-                } else {
-                    variant_rows_top
-                        + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
-                        + if item.variants.len() > visible_detail_variants {
-                            28.0 + variant_row_gap
-                        } else {
-                            0.0
-                        }
-                };
+                let variants_bottom = variant_rows_top
+                    + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
+                    + if item.variants.len() > visible_detail_variants {
+                        35.0
+                    } else {
+                        0.0
+                    };
                 let mut open = node(
                     "detail-open",
                     Role::Button,
                     if ready.len() == 1 {
-                        "Open"
+                        "▶ Play"
                     } else {
                         "Choose how to play"
                     },
                     400.0,
-                    variants_bottom.max(510.0),
-                    360.0,
+                    variants_bottom.max(430.0),
+                    180.0,
                     54.0,
-                    "--state-focused-ring",
+                    "--color-focus-ring",
                 );
                 open.state.focused = true;
                 open.action = Some(NodeAction::Activate);
                 out.push(open);
+                let pin_label = if item.favorite {
+                    "★ Unpin"
+                } else {
+                    "★ Pin to favorites"
+                };
+                out.push(node(
+                    "detail-pin",
+                    Role::Button,
+                    pin_label,
+                    596.0,
+                    variants_bottom.max(430.0),
+                    220.0,
+                    54.0,
+                    "--state-rest-surface",
+                ));
             } else {
                 let mut unavailable = node(
                     "detail-unavailable",
@@ -3748,19 +3888,15 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
     if let Some(art) = item.art.as_ref().filter(|_| !item.art_failed) {
         let home = context == "home-card";
         let favorite = context == "favorite-card";
-        let art_height = if home {
+        let detail = context == "detail-art";
+        let art_height = if detail {
+            428.0
+        } else if home {
             158.0
         } else if favorite {
             64.0
         } else {
             136.0
-        };
-        let kind_y = if home {
-            y + 166.0
-        } else if favorite {
-            y + 8.0
-        } else {
-            y + 142.0
         };
         let label_y = if home {
             y + 210.0
@@ -3780,19 +3916,11 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
             "--state-rest-surface",
         );
         image = image.with_image(art.clone(), ImageFit::Cover);
+        if detail {
+            return vec![image];
+        }
         return vec![
             image,
-            node(
-                &format!("{context}-plate-{}", item.id),
-                Role::Text,
-                kind_text(&item.kind),
-                if favorite { x + 68.0 } else { x + 12.0 },
-                kind_y,
-                if favorite { width - 72.0 } else { width - 24.0 },
-                if favorite { 20.0 } else { 24.0 },
-                "--color-surface-scrim",
-            )
-            .with_type_role(TypeRole::Eyebrow),
             node(
                 &format!("{context}-title-{}", item.id),
                 Role::Text,
@@ -3801,13 +3929,7 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 label_y,
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                if context == "home-card" {
-                    "--color-surface-canvas"
-                } else if focused {
-                    "--state-focused-text"
-                } else {
-                    "--color-text-secondary"
-                },
+                "--color-text-primary",
             )
             .with_type_role(TypeRole::Label),
         ];
@@ -3822,6 +3944,68 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
         width,
         focused,
     )
+}
+
+fn add_unavailable_card_cues(
+    nodes: &mut Vec<Node>,
+    item: &Item,
+    availability: &Availability,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    if matches!(availability, Availability::Ready) {
+        return;
+    }
+    let home = context == "home-card";
+    let art_height = if home { 158.0 } else { 136.0 };
+    let badge = match availability {
+        Availability::NeedsNetwork { .. } => "Network",
+        Availability::NeedsSetup { .. } => "Setup",
+        Availability::IncompatibleRuntime { .. } => "Update",
+        Availability::UnsupportedCapability { .. } => "Unavailable",
+        Availability::Ready => return,
+    };
+    nodes.push(node(
+        &format!("{context}-veil-{}", item.id),
+        Role::Group,
+        "",
+        x + 8.0,
+        y,
+        width - 16.0,
+        art_height,
+        "--state-unavailable-veil",
+    ));
+    nodes.push(
+        node(
+            &format!("{context}-badge-{}", item.id),
+            Role::Text,
+            &format!("⊘ {badge}"),
+            x + width - 98.0,
+            y + 10.0,
+            84.0,
+            28.0,
+            "--color-surface-scrim",
+        )
+        .with_type_role(TypeRole::Caption),
+    );
+    nodes.push(
+        node(
+            &format!("{context}-reason-{}", item.id),
+            Role::Text,
+            &format!(
+                "⊘ {}",
+                availability_text(availability, &Presentation::Ready)
+            ),
+            x,
+            if home { y + 238.0 } else { y + 204.0 },
+            width,
+            28.0,
+            "--color-text-muted",
+        )
+        .with_type_role(TypeRole::Caption),
+    );
 }
 
 #[cfg(test)]
@@ -5508,7 +5692,7 @@ mod tests {
         let joined = labels.join("\n");
         assert!(!joined.contains("provider.debug/raw-id"));
         assert!(!joined.contains("/srv/apps/private"));
-        assert_eq!(joined.matches(reason).count(), 1);
+        assert_eq!(joined.matches(reason).count(), 2);
         let availability = scene
             .root()
             .children
@@ -5808,9 +5992,12 @@ mod tests {
             )
         }));
         assert!(card.accessible_label.is_empty());
-        assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-plate-plate-id" && node.accessible_label == "GAME"
-        }));
+        assert!(
+            !card
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-plate-plate-id")
+        );
         assert!(card.children.iter().all(|node| {
             !node.accessible_label.contains("art/paper-comet.png")
                 && !node.accessible_label.contains("Catalog art")
@@ -6149,12 +6336,7 @@ mod tests {
                 .contains("Home content scroll region")
         );
         for id in ["ridge", "tides"] {
-            for (part, role) in [
-                ("art", Role::Group),
-                ("initial", Role::Text),
-                ("plate", Role::Text),
-                ("title", Role::Text),
-            ] {
+            for (part, role) in [("art", Role::Group), ("title", Role::Text)] {
                 let node_id = format!("home-card-{part}-{id}");
                 assert_eq!(
                     find(scene.root(), &node_id).map(|node| node.role),
@@ -6165,10 +6347,6 @@ mod tests {
             assert_eq!(
                 find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
                 Some(TypeRole::Eyebrow)
-            );
-            assert_eq!(
-                find(scene.root(), &format!("home-card-initial-{id}")).map(|node| node.type_role),
-                Some(TypeRole::Plate)
             );
             assert_eq!(
                 find(scene.root(), &format!("home-card-title-{id}"))
@@ -6629,6 +6807,130 @@ mod tests {
                     "chooser focus {focus} of {variant_count} must remain visible"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn quiet_console_mockup_cues_and_honest_detail_footers_are_emitted() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+        let unavailable = Availability::NeedsSetup {
+            reason: "choose a profile".into(),
+        };
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("installed", "ready", Availability::Ready)],
+            ),
+            item(
+                "setup",
+                "Setup Game",
+                vec![variant("stream", "setup", unavailable)],
+            ),
+        ]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        core.go(Route::Library);
+        let library = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(find(library.root(), "library-selected-underline-0").is_some());
+        assert!(find(library.root(), "room-library-underline").is_some());
+        assert!(find(library.root(), "room-keycap-left-border").is_some());
+        assert_eq!(
+            find(library.root(), "prompts").map(|node| node.accessible_label.as_str()),
+            Some("SELECT Search · Y Filter · A Details")
+        );
+
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let ready = core.scene(metrics, "wrong caller footer").unwrap();
+        assert_eq!(
+            find(ready.root(), "detail-title").map(|node| node.style_token.as_str()),
+            Some("--color-surface-canvas")
+        );
+        assert!(find(ready.root(), "detail-ways-heading").is_some());
+        assert!(
+            find(ready.root(), "detail-open").is_some_and(|node| node.accessible_label == "▶ Play")
+        );
+        assert!(
+            find(ready.root(), "prompts")
+                .is_some_and(|node| node.accessible_label.contains("A Play"))
+        );
+
+        core.selected_item = Some(1);
+        let unavailable = core.scene(metrics, "wrong caller footer").unwrap();
+        let labels = format!("{unavailable:?}");
+        assert!(labels.contains("⊘ Stream"));
+        assert!(labels.contains("choose a profile"));
+        assert!(find(unavailable.root(), "detail-open").is_none());
+        assert!(find(unavailable.root(), "prompts").is_some_and(|node| {
+            !node.accessible_label.contains("Play") && !node.accessible_label.contains("Open")
+        }));
+    }
+
+    #[test]
+    fn emitted_text_on_light_surfaces_has_a_declared_paired_on_color() {
+        const PAIRS: [(&str, &str); 8] = [
+            ("--color-surface-canvas", "--color-text-primary"),
+            ("--color-surface-raised", "--state-rest-text"),
+            ("--color-surface-overlay", "--color-text-primary"),
+            ("--color-surface-sunken", "--color-text-primary"),
+            ("--state-rest-surface", "--state-rest-text"),
+            ("--color-focus-ring", "--color-text-inverse"),
+            ("--state-selected-accent", "--color-text-inverse"),
+            ("--color-surface-scrim", "--color-text-primary"),
+        ];
+        fn visit(node: &Node, theme: &Theme) {
+            if !node.accessible_label.is_empty()
+                && let Some((_, on_color)) = PAIRS
+                    .iter()
+                    .find(|(surface, _)| *surface == node.style_token)
+            {
+                assert!(
+                    theme.resolve(Base::Dusk, on_color).is_ok(),
+                    "{} has surface {} without resolvable paired {}",
+                    node.id.as_str(),
+                    node.style_token,
+                    on_color
+                );
+            }
+            for child in &node.children {
+                visit(child, theme);
+            }
+        }
+
+        let theme = pf_theme::flagship();
+        let mut core = fixture_core(vec![item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "stream",
+                "setup",
+                Availability::NeedsNetwork {
+                    reason: "connect to Wi-Fi".into(),
+                },
+            )],
+        )]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [Route::Home, Route::Library, Route::Search, Route::Details] {
+            core.selected_item = Some(0);
+            core.go(route);
+            visit(core.scene(metrics, "").unwrap().root(), &theme);
         }
     }
 

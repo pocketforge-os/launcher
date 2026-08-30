@@ -1116,13 +1116,24 @@ fn desktop_sim_marker(authority_state: &Path) -> Result<Option<PathBuf>, String>
     Ok(None)
 }
 
-fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(), String> {
-    let marker = desktop_sim_marker(authority_state)?;
-    let phase = observable_authority_phase(socket)?;
-    println!(
-        "SUPERVISOR watching state_dir={} phase={phase:?}",
-        authority_state.display(),
-    );
+fn reconcile_desktop_sim_startup(
+    socket: &Path,
+    phase: ObservableAuthorityPhase,
+    mut sample_marker: impl FnMut() -> Result<Option<PathBuf>, String>,
+) -> Result<Option<PathBuf>, String> {
+    let mut marker = sample_marker()?;
+    if marker.is_none()
+        && matches!(
+            phase,
+            ObservableAuthorityPhase::Starting
+                | ObservableAuthorityPhase::Running
+                | ObservableAuthorityPhase::Returning
+        )
+    {
+        // A launch may publish its marker after the phase sample. Revalidate at the
+        // last possible moment before treating the authority session as interrupted.
+        marker = sample_marker()?;
+    }
     match (&marker, phase) {
         (Some(path), ObservableAuthorityPhase::Starting) => {
             observe_desktop_sim_running(socket)?;
@@ -1142,6 +1153,17 @@ fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(
         }
         _ => {}
     }
+    Ok(marker)
+}
+
+fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(), String> {
+    let phase = observable_authority_phase(socket)?;
+    println!(
+        "SUPERVISOR watching state_dir={} phase={phase:?}",
+        authority_state.display(),
+    );
+    let marker =
+        reconcile_desktop_sim_startup(socket, phase, || desktop_sim_marker(authority_state))?;
     let mut active_marker = marker;
     loop {
         let marker = desktop_sim_marker(authority_state)?;
@@ -1815,6 +1837,72 @@ mod durable_tests {
         assert_eq!(
             observable_phase_from_history(&history),
             ObservableAuthorityPhase::Returning
+        );
+    }
+
+    fn assert_supervisor_adopts_marker_appearing_during_reconcile(phase: ObservableAuthorityPhase) {
+        use std::os::unix::net::UnixListener;
+        use std::sync::{Arc, Mutex};
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server_requests = Arc::clone(&requests);
+        let startup_observations = usize::from(phase == ObservableAuthorityPhase::Starting);
+        let server = thread::spawn(move || {
+            for _ in 0..startup_observations + 5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let body = pf_wire::read_frame(&mut stream).unwrap();
+                server_requests.lock().unwrap().push(
+                    serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap(),
+                );
+                let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+                pf_wire::write_frame(&mut stream, &body).unwrap();
+            }
+        });
+
+        let marker = state.path().join("sessions/session-1.running");
+        let mut samples = [None, Some(marker.clone())].into_iter();
+        let adopted = reconcile_desktop_sim_startup(&socket, phase, || {
+            Ok(samples
+                .next()
+                .expect("startup sampled marker too many times"))
+        })
+        .unwrap();
+        assert_eq!(adopted, Some(marker));
+        {
+            let startup_requests = requests.lock().unwrap();
+            assert_eq!(startup_requests.len(), startup_observations);
+            if phase == ObservableAuthorityPhase::Starting {
+                assert!(matches!(
+                    startup_requests[0],
+                    pf_session_authority::RpcRequest::Observe {
+                        observation: pf_session_authority::RpcObservation::SessionRunning
+                    }
+                ));
+            }
+        }
+
+        // A normally observed stop must still complete after the startup adoption.
+        observe_desktop_sim_return(&socket, true).unwrap();
+        server.join().unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), startup_observations + 5);
+    }
+
+    #[test]
+    fn supervisor_adopts_marker_appearing_after_starting_sample() {
+        assert_supervisor_adopts_marker_appearing_during_reconcile(
+            ObservableAuthorityPhase::Starting,
+        );
+    }
+
+    #[test]
+    fn supervisor_adopts_marker_appearing_after_running_sample() {
+        assert_supervisor_adopts_marker_appearing_during_reconcile(
+            ObservableAuthorityPhase::Running,
         );
     }
 

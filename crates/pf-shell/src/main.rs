@@ -1850,6 +1850,17 @@ fn fails_raster_text_floor(
     ink_pixels == 0 || (!node.state.disabled && rendered_ratio < floor)
 }
 
+fn core_ink_low_tail(samples: &[Option<(f64, f64)>]) -> Option<f64> {
+    let mut ratios = Vec::new();
+    for &(ratio, coverage) in samples.iter().flatten() {
+        if coverage >= 0.8 {
+            ratios.push(ratio);
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    ratios.get(ratios.len().saturating_sub(1) / 10).copied()
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1888,10 +1899,28 @@ fn assert_raster_text_legible(
         };
         (light + 0.05) / (dark + 0.05)
     }
+    fn rgb(value: &str) -> [u8; 3] {
+        [1, 3, 5].map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+    }
+    fn coverage(ink: [u8; 3], background: [u8; 3], foreground: [u8; 3]) -> f64 {
+        let mut projection = 0.0;
+        let mut magnitude = 0.0;
+        for channel in 0..3 {
+            let direction = f64::from(foreground[channel]) - f64::from(background[channel]);
+            projection += (f64::from(ink[channel]) - f64::from(background[channel])) * direction;
+            magnitude += direction * direction;
+        }
+        if magnitude == 0.0 {
+            0.0
+        } else {
+            (projection / magnitude).clamp(0.0, 1.0)
+        }
+    }
     fn visit(
         node: &Node,
         frame: &RasterFrame,
         textless: &RasterFrame,
+        base: pf_theme::Base,
         floor: f64,
         failures: &mut Vec<String>,
     ) {
@@ -1903,7 +1932,19 @@ fn assert_raster_text_legible(
             let right = (node.bounds.x + node.bounds.width).ceil().max(0.0) as u32;
             let bottom = (node.bounds.y + node.bounds.height).ceil().max(0.0) as u32;
             let mut ink_pixels = 0_usize;
-            let mut ratios = Vec::new();
+            let sample_width = right.min(frame.width).saturating_sub(left) as usize;
+            let sample_height = bottom.min(frame.height).saturating_sub(top) as usize;
+            let mut samples = vec![None; sample_width * sample_height];
+            let text_token = if node.state.disabled {
+                "--state-disabled-text"
+            } else if node.state.unavailable {
+                "--state-unavailable-text"
+            } else if node.state.focused {
+                "--state-focused-text"
+            } else {
+                "--state-rest-text"
+            };
+            let foreground = rgb(pf_theme::flagship().resolve(base, text_token).unwrap());
             for y in top..bottom.min(frame.height) {
                 for x in left..right.min(frame.width) {
                     let offset = ((y * frame.width + x) * 4) as usize;
@@ -1911,20 +1952,20 @@ fn assert_raster_text_legible(
                     let background = &textless.rgba[offset..offset + 3];
                     if ink != background {
                         ink_pixels += 1;
-                        ratios.push(contrast(
-                            [ink[0], ink[1], ink[2]],
-                            [background[0], background[1], background[2]],
+                        let sample = (y - top) as usize * sample_width + (x - left) as usize;
+                        let ink = [ink[0], ink[1], ink[2]];
+                        let background = [background[0], background[1], background[2]];
+                        samples[sample] = Some((
+                            contrast(ink, background),
+                            coverage(ink, background, foreground),
                         ));
                     }
                 }
             }
-            ratios.sort_by(f64::total_cmp);
-            let rendered_ratio = ratios
-                .get(ratios.len() * 9 / 10)
-                .copied()
-                .unwrap_or_default();
-            // The upper decile samples the glyph body without letting its
-            // anti-aliased fringe define the rendered contrast. Every sample comes
+            let rendered_ratio = core_ink_low_tail(&samples).unwrap_or_default();
+            // High coverage structurally removes the anti-aliased fringe. The low
+            // decile then requires the glyph body, rather than a high-contrast
+            // minority, to clear the rendered contrast floor. Every sample comes
             // from the rendered and text-suppressed rasters, never tokens.
             // Disabled text has no available action and is exempt from the text
             // contrast floor, but it must still produce visible raster ink.
@@ -1938,7 +1979,7 @@ fn assert_raster_text_legible(
             }
         }
         for child in &node.children {
-            visit(child, frame, textless, floor, failures);
+            visit(child, frame, textless, base, floor, failures);
         }
     }
 
@@ -1968,7 +2009,7 @@ fn assert_raster_text_legible(
     } else {
         4.5
     };
-    visit(scene.root(), &frame, &textless, floor, &mut failures);
+    visit(scene.root(), &frame, &textless, base, floor, &mut failures);
     if failures.is_empty() {
         Ok(())
     } else {
@@ -2134,6 +2175,49 @@ mod durable_tests {
         let label = contrast_probe(|_| {});
         assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
         assert!(fails_raster_text_floor(&label, 1, 6.9, 7.0));
+    }
+
+    fn synthetic_ink(
+        width: usize,
+        height: usize,
+        ratio: impl Fn(usize) -> f64,
+    ) -> Vec<Option<(f64, f64)>> {
+        let mut samples = vec![None; width * height];
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                samples[y * width + x] = Some((ratio(x), 1.0));
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_mixed_background_core_ink() {
+        let samples = synthetic_ink(12, 7, |x| if x < 6 { 5.0 } else { 4.0 });
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio < 4.5, "low-tail core contrast was {ratio}");
+    }
+
+    #[test]
+    fn raster_ink_guard_accepts_uniform_passing_core_with_aa_fringe() {
+        let mut samples = synthetic_ink(12, 7, |_| 5.0);
+        for x in 1..11 {
+            samples[12 + x] = Some((1.1, 0.3));
+            samples[5 * 12 + x] = Some((1.1, 0.3));
+        }
+        for y in 1..6 {
+            samples[y * 12 + 1] = Some((1.1, 0.3));
+            samples[y * 12 + 10] = Some((1.1, 0.3));
+        }
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio >= 4.5, "AA fringe lowered core contrast to {ratio}");
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_uniform_sub_floor_core_ink() {
+        let samples = synthetic_ink(12, 7, |_| 4.0);
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio < 4.5, "sub-floor core contrast was {ratio}");
     }
 
     #[test]

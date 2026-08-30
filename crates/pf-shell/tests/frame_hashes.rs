@@ -138,13 +138,13 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("04046b7574d88c5761538aec2a3a5c8540d81e98e05c9684bbc672f03bcc29a6  ")
     );
     assert!(
-        transcript.contains("99e980572285b3473accc91dce4f17c0b6eba7962a283bc01f4ca5e3296a6e98  ")
+        transcript.contains("d678f4484682b2a7dca24fba0a8e457c282976ec6fae1b72be4c314f8b4f6a09  ")
     );
     assert!(
-        transcript.contains("a48cc1ce53da524bd7ef2d8198c7962462935382a9c4cb4a8aa8567da52d7d30  ")
+        transcript.contains("ce8aca7c7d0d2be0c0341b76f2b04416fd97f3542aa35c1b88f6e33b8a1ba917  ")
     );
     assert!(
-        transcript.contains("dde3489e7bc2ea76df54632a4ed38e34ecf983cd07a8ab588887e50ab1ec8832  ")
+        transcript.contains("bc79d3fae93c97c431917b53fdcb54760840de9bb0d8b79b1a00b853b7a3259f  ")
     );
     assert!(
         transcript.contains("289f1563c9c41c01c337c1fdb16fe1f71db1a620913a862f73659d248cf7ad01  ")

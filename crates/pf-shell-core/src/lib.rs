@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
-const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 8;
@@ -253,8 +252,6 @@ pub enum LibraryFilter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlsFlow {
     Rows,
-    Capture,
-    RemapPreview,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -461,6 +458,20 @@ struct DisplayPreference {
     label: &'static str,
     effective: PreferenceValue,
     interactive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsRowAction {
+    Preference(usize),
+    Appearance,
+    Recovery,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SettingsSceneRow {
+    id: String,
+    label: String,
+    action: Option<SettingsRowAction>,
 }
 
 #[derive(Clone, Debug)]
@@ -1525,44 +1536,6 @@ impl ShellCore {
                 _ => None,
             };
         }
-        if self.route == Route::Settings && self.settings_room == SettingsRoom::Controls {
-            match self.controls_flow {
-                ControlsFlow::Capture => {
-                    return match action {
-                        ShellAction::Back => {
-                            self.controls_flow = ControlsFlow::Rows;
-                            self.controls_status = None;
-                            None
-                        }
-                        ShellAction::Custom(control) if control.starts_with("Capture.") => {
-                            let selected = self.control_bindings.get(self.focus)?;
-                            let effect = Effect::BeginRemap {
-                                context: selected.context.clone(),
-                                action: selected.action.clone(),
-                                control: control.trim_start_matches("Capture.").into(),
-                            };
-                            self.controls_flow = ControlsFlow::RemapPreview;
-                            Some(effect)
-                        }
-                        _ => None,
-                    };
-                }
-                ControlsFlow::RemapPreview => {
-                    return match action {
-                        ShellAction::Activate => {
-                            self.controls_flow = ControlsFlow::Rows;
-                            Some(Effect::ConfirmRemap)
-                        }
-                        ShellAction::Back => {
-                            self.controls_flow = ControlsFlow::Rows;
-                            Some(Effect::RollbackRemap)
-                        }
-                        _ => None,
-                    };
-                }
-                ControlsFlow::Rows => {}
-            }
-        }
         if self.route == Route::Settings
             && self.settings_room == SettingsRoom::Network
             && self.network_flow == NetworkFlow::Credential
@@ -1708,12 +1681,7 @@ impl ShellCore {
                 }
             }
             ShellAction::Move(AxisMove::Right) if self.route == Route::Settings => {
-                if !self.settings_in_rows {
-                    self.settings_in_rows = true;
-                    self.focus = self.settings_saved_focus
-                        [Self::settings_room_slot(self.settings_room)]
-                    .min(self.focus_count().saturating_sub(1));
-                }
+                self.enter_settings_rows();
             }
             ShellAction::Move(AxisMove::Left)
                 if self.route == Route::Settings && self.settings_in_rows =>
@@ -1820,6 +1788,16 @@ impl ShellCore {
                 self.focus = self.focus.saturating_sub(1);
                 self.settings_room = rooms[self.focus];
             }
+            ShellAction::Move(AxisMove::Down | AxisMove::Right)
+                if self.route == Route::Settings && self.settings_in_rows =>
+            {
+                self.move_settings_focus(true);
+            }
+            ShellAction::Move(AxisMove::Up | AxisMove::Left)
+                if self.route == Route::Settings && self.settings_in_rows =>
+            {
+                self.move_settings_focus(false);
+            }
             ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                 self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1))
             }
@@ -1827,10 +1805,7 @@ impl ShellCore {
                 self.focus = self.focus.saturating_sub(1)
             }
             ShellAction::Activate if self.route == Route::Settings && !self.settings_in_rows => {
-                self.settings_in_rows = true;
-                self.focus = self.settings_saved_focus
-                    [Self::settings_room_slot(self.settings_room)]
-                .min(self.focus_count().saturating_sub(1));
+                self.enter_settings_rows();
             }
             ShellAction::Activate => return self.activate(),
             ShellAction::Back | ShellAction::Custom(_) => {}
@@ -1840,69 +1815,16 @@ impl ShellCore {
 
     fn activate(&mut self) -> Option<Effect> {
         if self.route == Route::Settings {
-            if self.settings_room == SettingsRoom::System
-                && self.recovery_available
-                && self.focus == 3
-            {
-                return Some(Effect::EnterRecovery);
-            }
-            if self.recovery_available
-                && self.settings_room == SettingsRoom::Display
-                && self.focus == self.display_preferences.len().max(1)
-            {
-                return Some(Effect::EnterRecovery);
-            }
-            return match self.settings_room {
-                SettingsRoom::Accessibility => self.preference_effect(self.focus),
-                SettingsRoom::Display => Some(Effect::ChangePreference(PreferenceChange {
+            return match self.settings_scene_rows().get(self.focus)?.action? {
+                SettingsRowAction::Preference(index) => self.preference_effect(index),
+                SettingsRowAction::Appearance => Some(Effect::ChangePreference(PreferenceChange {
                     key: PreferenceKey("appearance".into()),
                     value: PreferenceValue::Text(
                         if self.appearance_day { "Dusk" } else { "Day" }.into(),
                     ),
                     authority: ChangeAuthority("user".into()),
                 })),
-                SettingsRoom::Controls if self.focus < self.control_bindings.len() => {
-                    self.controls_flow = ControlsFlow::Capture;
-                    self.controls_status = None;
-                    Some(Effect::CaptureRemap)
-                }
-                SettingsRoom::Controls => Some(Effect::ResetRemaps),
-                SettingsRoom::Network => {
-                    self.wifi_networks.get(self.focus)?;
-                    self.selected_wifi = Some(self.focus);
-                    self.network_flow = NetworkFlow::Credential;
-                    self.wifi_credential = WifiCredential::new(Vec::new());
-                    None
-                }
-                SettingsRoom::System => match self.system_rows().get(self.focus).copied()? {
-                    SystemRow::TimeUnavailable | SystemRow::TransferUnavailable => None,
-                    SystemRow::Timezone => {
-                        let current = self.time_state.as_ref().ok()?.timezone.as_str();
-                        let next = TIMEZONES
-                            .iter()
-                            .position(|zone| *zone == current)
-                            .map_or(0, |index| (index + 1) % TIMEZONES.len());
-                        Some(Effect::SetTimezone(TIMEZONES[next].into()))
-                    }
-                    SystemRow::Ntp => Some(Effect::SetNtp(
-                        self.time_state.as_ref().ok()?.ntp_state != NtpState::Active,
-                    )),
-                    SystemRow::ManualTime => Some(Effect::RefreshManualTime),
-                    SystemRow::Transfer(service) => {
-                        let enabled = self
-                            .transfer_services
-                            .as_ref()
-                            .ok()?
-                            .iter()
-                            .find(|state| state.service == service)?
-                            .enabled;
-                        Some(Effect::SetTransfer {
-                            service,
-                            enabled: !enabled,
-                        })
-                    }
-                    SystemRow::Accessibility => Some(Effect::ResetFirstRun),
-                },
+                SettingsRowAction::Recovery => Some(Effect::EnterRecovery),
             };
         }
         if self.route == Route::Settings
@@ -2116,21 +2038,181 @@ impl ShellCore {
                 .selected_item
                 .map_or(0, |item| self.ready_variants(item).len())
                 .max(1),
-            Route::Settings => match self.settings_room {
-                SettingsRoom::Accessibility => self.display_preferences.len().max(1) + 2,
-                SettingsRoom::Display => 1,
-                SettingsRoom::Controls => match self.controls_flow {
-                    ControlsFlow::Rows | ControlsFlow::Capture | ControlsFlow::RemapPreview => {
-                        self.control_bindings.len() + 1
-                    }
-                },
-                SettingsRoom::Network => match self.network_flow {
-                    NetworkFlow::Rows => self.wifi_networks.len().max(1),
-                    NetworkFlow::Credential => 1,
-                },
-                SettingsRoom::System => 3 + usize::from(self.recovery_available),
-            },
+            Route::Settings => self.settings_scene_rows().len().max(1),
             Route::Quick => self.screenshot_row() + 1,
+        }
+    }
+
+    fn enter_settings_rows(&mut self) {
+        if self.settings_in_rows {
+            return;
+        }
+        let rows = self.settings_scene_rows();
+        let saved = self.settings_saved_focus[Self::settings_room_slot(self.settings_room)];
+        if let Some(index) = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.action.is_some())
+            .min_by_key(|(index, _)| index.abs_diff(saved))
+            .map(|(index, _)| index)
+        {
+            self.settings_in_rows = true;
+            self.focus = index;
+        }
+    }
+
+    fn move_settings_focus(&mut self, forward: bool) {
+        let rows = self.settings_scene_rows();
+        let next = if forward {
+            rows.iter()
+                .enumerate()
+                .skip(self.focus + 1)
+                .find(|(_, row)| row.action.is_some())
+        } else {
+            rows.iter()
+                .enumerate()
+                .take(self.focus)
+                .rev()
+                .find(|(_, row)| row.action.is_some())
+        };
+        if let Some((index, _)) = next {
+            self.focus = index;
+        }
+    }
+
+    fn settings_scene_rows(&self) -> Vec<SettingsSceneRow> {
+        let disabled = |id: &str, label: String| SettingsSceneRow {
+            id: id.into(),
+            label,
+            action: None,
+        };
+        match self.settings_room {
+            SettingsRoom::Accessibility => self
+                .display_preferences
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let consequence = match row.key {
+                        "textScale" => "Reflows labels and rows live",
+                        "highContrast" => "Uses the strongest text and focus contrast",
+                        "reduceMotion" => "Completes transitions without movement",
+                        _ => "Prevents future flashing treatments",
+                    };
+                    let control = match &row.effective {
+                        PreferenceValue::Bool(value) => format!(
+                            "{} {}",
+                            if *value { "ON" } else { "OFF" },
+                            if *value { "——●" } else { "●——" }
+                        ),
+                        PreferenceValue::Text(value) => format!("100% / 150% / 200% · {value}"),
+                        PreferenceValue::Integer(value) => value.to_string(),
+                    };
+                    SettingsSceneRow {
+                        id: format!("accessibility-{}", row.key),
+                        label: if row.interactive {
+                            format!("{}\n{consequence}\n{control}", row.label)
+                        } else {
+                            format!("{}\nStored, but this build cannot apply it\n—", row.label)
+                        },
+                        action: row
+                            .interactive
+                            .then_some(SettingsRowAction::Preference(index)),
+                    }
+                })
+                .chain([
+                    disabled(
+                        "accessibility-remap",
+                        "Button remap\nThe remap flow is not available here yet\n—".into(),
+                    ),
+                    disabled(
+                        "accessibility-diagnostic",
+                        "ⓘ Mono audio and brightness controls are not available on this device."
+                            .into(),
+                    ),
+                ])
+                .collect(),
+            SettingsRoom::Controls => {
+                let preview = if self.control_bindings.is_empty() {
+                    "No input map reported".into()
+                } else {
+                    self.control_bindings
+                        .iter()
+                        .map(|binding| binding.binding.as_str())
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                };
+                vec![
+                    disabled(
+                        "controls-remap",
+                        format!("Remap buttons\nCurrent map: {preview}\n—"),
+                    ),
+                    disabled(
+                        "controls-safe-return",
+                        format!(
+                            "Safe Return button\nReturns safely from any game\n{}  —",
+                            self.safe_return_binding
+                        ),
+                    ),
+                    disabled(
+                        "controls-source",
+                        "ⓘ Input source facts come from the active device descriptor.".into(),
+                    ),
+                ]
+            }
+            SettingsRoom::Display => vec![SettingsSceneRow {
+                id: "display-appearance".into(),
+                label: format!(
+                    "Appearance\nChanges the room palette; High Contrast composes over it\nDusk / Day · {}",
+                    if self.appearance_day { "Day" } else { "Dusk" }
+                ),
+                action: Some(SettingsRowAction::Appearance),
+            }],
+            SettingsRoom::Network => {
+                let state = self
+                    .network_state
+                    .as_ref()
+                    .expect("filtered network section has authority");
+                vec![
+                    disabled(
+                        "network-ssid",
+                        format!(
+                            "SSID\nObserved connected network\n{}\n—",
+                            state.connected_ssid.as_deref().unwrap_or("Not connected")
+                        ),
+                    ),
+                    disabled(
+                        "network-signal",
+                        "ⓘ Signal and address are not reported by this authority.\n—".into(),
+                    ),
+                ]
+            }
+            SettingsRoom::System => {
+                let mut rows = vec![
+                    disabled(
+                        "system-about",
+                        format!(
+                            "About\nPocketForge shell version\n{}\n—",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    ),
+                    disabled(
+                        "system-device",
+                        "Device and storage\nDesktop simulator fixture\nSimulated device · storage not reported\n—".into(),
+                    ),
+                    disabled(
+                        "system-licenses",
+                        "Licenses\nOpen-source notices\n—".into(),
+                    ),
+                ];
+                if self.recovery_available {
+                    rows.push(SettingsSceneRow {
+                        id: "system-recovery".into(),
+                        label: "Recovery\nOpen the independent recovery entry\n›".into(),
+                        action: Some(SettingsRowAction::Recovery),
+                    });
+                }
+                rows
+            }
         }
     }
 
@@ -3015,7 +3097,6 @@ impl ShellCore {
     fn quiet_settings_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
         if self.system_flow == SystemFlow::ManualTime
             || self.network_flow == NetworkFlow::Credential
-            || self.controls_flow != ControlsFlow::Rows
         {
             self.settings_nodes(out, w);
             return;
@@ -3094,135 +3175,7 @@ impl ShellCore {
             ));
         }
 
-        let mut rows: Vec<(String, String, bool)> = match self.settings_room {
-            SettingsRoom::Accessibility => self
-                .display_preferences
-                .iter()
-                .map(|row| {
-                    let consequence = match row.key {
-                        "textScale" => "Reflows labels and rows live",
-                        "highContrast" => "Uses the strongest text and focus contrast",
-                        "reduceMotion" => "Completes transitions without movement",
-                        _ => "Prevents future flashing treatments",
-                    };
-                    let control = match &row.effective {
-                        PreferenceValue::Bool(value) => format!(
-                            "{} {}",
-                            if *value { "ON" } else { "OFF" },
-                            if *value { "——●" } else { "●——" }
-                        ),
-                        PreferenceValue::Text(value) => format!("100% / 150% / 200% · {value}"),
-                        PreferenceValue::Integer(value) => value.to_string(),
-                    };
-                    let label = if row.interactive {
-                        format!("{}\n{consequence}\n{control}", row.label)
-                    } else {
-                        format!("{}\nStored, but this build cannot apply it\n—", row.label)
-                    };
-                    (format!("accessibility-{}", row.key), label, row.interactive)
-                })
-                .chain([
-                    (
-                        "accessibility-remap".into(),
-                        "Button remap\nThe remap flow is not available here yet\n—".into(),
-                        false,
-                    ),
-                    (
-                        "accessibility-diagnostic".into(),
-                        "ⓘ Mono audio and brightness controls are not available on this device."
-                            .into(),
-                        false,
-                    ),
-                ])
-                .collect(),
-            SettingsRoom::Controls => {
-                let preview = if self.control_bindings.is_empty() {
-                    "No input map reported".into()
-                } else {
-                    self.control_bindings
-                        .iter()
-                        .map(|binding| binding.binding.as_str())
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                };
-                vec![
-                    (
-                        "controls-remap".into(),
-                        format!(
-                            "Remap buttons\nCurrent map: {preview}\n{}",
-                            if self.control_bindings.is_empty() {
-                                "—"
-                            } else {
-                                "›"
-                            }
-                        ),
-                        !self.control_bindings.is_empty(),
-                    ),
-                    (
-                        "controls-safe-return".into(),
-                        format!(
-                            "Safe Return button\nReturns safely from any game\n{}  {}",
-                            self.safe_return_binding,
-                            if self.safe_return_options.is_empty() {
-                                "—"
-                            } else {
-                                "›"
-                            }
-                        ),
-                        !self.safe_return_options.is_empty(),
-                    ),
-                    (
-                        "controls-source".into(),
-                        "ⓘ Input source facts come from the active device descriptor.".into(),
-                        false,
-                    ),
-                ]
-            }
-            SettingsRoom::Display => vec![(
-                "display-appearance".into(),
-                format!(
-                    "Appearance\nChanges the room palette; High Contrast composes over it\nDusk / Day · {}",
-                    if self.appearance_day { "Day" } else { "Dusk" }
-                ),
-                true,
-            )],
-            SettingsRoom::Network => {
-                let state = self
-                    .network_state
-                    .as_ref()
-                    .expect("filtered network section has authority");
-                vec![
-                    (
-                        "network-ssid".into(),
-                        format!(
-                            "SSID\nObserved connected network\n{}",
-                            state.connected_ssid.as_deref().unwrap_or("Not connected")
-                        ),
-                        false,
-                    ),
-                    (
-                        "network-signal".into(),
-                        "ⓘ Signal and address are not reported by this authority.".into(),
-                        false,
-                    ),
-                ]
-            }
-            SettingsRoom::System => {
-                let mut rows = vec![
-                    ("system-about".into(), format!("About\nPocketForge shell version\n{}", env!("CARGO_PKG_VERSION")), false),
-                    ("system-device".into(), "Device and storage\nDesktop simulator fixture\nSimulated device · storage not reported".into(), false),
-                    ("system-licenses".into(), "Licenses\nOpen-source notices\n›".into(), true),
-                ];
-                if self.recovery_available {
-                    rows.push((
-                        "system-recovery".into(),
-                        "Recovery\nOpen the independent recovery entry\n›".into(),
-                        true,
-                    ));
-                }
-                rows
-            }
-        };
+        let mut rows = self.settings_scene_rows();
         let scale = f32::from(self.text_scale) / 100.0;
         let row_height = 74.0 * scale;
         let row_gap = 12.0;
@@ -3247,18 +3200,17 @@ impl ShellCore {
             rows_bottom - rows_top,
             "--color-surface-canvas",
         ));
-        for (index, (id, label, interactive)) in
-            rows.drain(..).enumerate().skip(first).take(capacity)
-        {
+        for (index, row) in rows.drain(..).enumerate().skip(first).take(capacity) {
+            let interactive = row.action.is_some();
             let focused = self.settings_in_rows && self.focus == index && interactive;
             let mut row = node(
-                &format!("settings-row-{id}"),
+                &format!("settings-row-{}", row.id),
                 if interactive {
                     Role::Button
                 } else {
                     Role::Text
                 },
-                &label,
+                &row.label,
                 content_left,
                 rows_top + (index - first) as f32 * (row_height + row_gap),
                 content_width,
@@ -3350,50 +3302,6 @@ impl ShellCore {
                 "--color-text-secondary",
             ));
             return;
-        }
-        if self.settings_room == SettingsRoom::Controls {
-            match self.controls_flow {
-                ControlsFlow::Capture => {
-                    let action = self
-                        .control_bindings
-                        .get(self.focus)
-                        .map_or("control", |binding| binding.label.as_str());
-                    let mut capture = node(
-                        "remap-capture",
-                        Role::Button,
-                        &format!("{action} · Press a button… · Back to cancel"),
-                        48.0,
-                        180.0,
-                        w - 96.0,
-                        72.0,
-                        "--state-focused-ring",
-                    );
-                    capture.state.focused = true;
-                    out.push(capture);
-                    return;
-                }
-                ControlsFlow::RemapPreview => {
-                    let selected = self.control_bindings.get(self.focus);
-                    let mut preview = node(
-                        "remap-preview",
-                        Role::Button,
-                        &format!(
-                            "Previewing {} · Activate to confirm · Back to roll back",
-                            selected.map_or("new binding", |binding| binding.label.as_str())
-                        ),
-                        48.0,
-                        180.0,
-                        w - 96.0,
-                        72.0,
-                        "--state-focused-ring",
-                    );
-                    preview.state.focused = true;
-                    preview.action = Some(NodeAction::Activate);
-                    out.push(preview);
-                    return;
-                }
-                ControlsFlow::Rows => {}
-            }
         }
         let labels: Vec<(String, bool)> = match self.settings_room {
             SettingsRoom::Accessibility => self
@@ -4565,43 +4473,63 @@ mod tests {
     }
 
     #[test]
-    fn controls_rows_derive_bindings_and_drive_capture_preview_rollback_and_reset() {
-        let mut c = core();
-        c.set_control_bindings(vec![ControlBinding {
-            context: "global".into(),
-            action: "Activate".into(),
-            label: "Activate".into(),
-            binding: "A".into(),
-        }]);
-        c.go(Route::Settings);
-        c.settings_room = SettingsRoom::Controls;
-        c.settings_in_rows = true;
-        let debug = format!("{:?}", settings_scene(&c));
-        assert!(debug.contains("Current map: A"));
-        assert!(debug.contains("settings-row-controls-remap"));
-
-        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::CaptureRemap));
-        assert_eq!(c.controls_flow, ControlsFlow::Capture);
-        assert_eq!(
-            c.action(&ShellAction::Custom("Capture.north".into())),
-            Some(Effect::BeginRemap {
+    fn controls_and_licenses_are_honest_disabled_rows_for_any_binding_count() {
+        for bindings in [
+            vec![ControlBinding {
                 context: "global".into(),
                 action: "Activate".into(),
-                control: "north".into(),
-            })
-        );
-        assert_eq!(c.action(&ShellAction::Back), Some(Effect::RollbackRemap));
+                label: "Activate".into(),
+                binding: "A".into(),
+            }],
+            vec![
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Activate".into(),
+                    label: "Activate".into(),
+                    binding: "A".into(),
+                },
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Back".into(),
+                    label: "Back".into(),
+                    binding: "B".into(),
+                },
+            ],
+        ] {
+            let mut core = core();
+            core.set_control_bindings(bindings);
+            core.go(Route::Settings);
+            core.settings_room = SettingsRoom::Controls;
+            core.settings_in_rows = false;
 
-        c.action(&ShellAction::Move(AxisMove::Down));
-        assert_eq!(c.action(&ShellAction::Activate), Some(Effect::ResetRemaps));
+            assert_eq!(core.action(&ShellAction::Activate), None);
+            assert!(!core.settings_in_rows, "disabled rows cannot receive focus");
+            core.settings_in_rows = true;
 
-        c.remap_refused("Back");
-        assert!(
-            c.controls_status
-                .as_deref()
-                .unwrap()
-                .contains("already bound to Back")
-        );
+            let scene = format!("{:?}", settings_scene(&core));
+            assert!(scene.contains("Current map:"));
+            assert!(scene.contains("settings-row-controls-remap"));
+            assert!(scene.contains("settings-row-controls-safe-return"));
+            assert!(scene.contains("--state-disabled-border"));
+            for focus in 0..core.settings_scene_rows().len() {
+                core.focus = focus;
+                assert_eq!(core.action(&ShellAction::Activate), None);
+            }
+            assert_eq!(core.controls_flow, ControlsFlow::Rows);
+        }
+
+        let mut core = core();
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::System;
+        core.settings_in_rows = false;
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert!(!core.settings_in_rows, "Licenses cannot receive focus");
+        core.settings_in_rows = true;
+        core.focus = 2;
+        let scene = format!("{:?}", settings_scene(&core));
+        assert!(scene.contains("settings-row-system-licenses"));
+        assert!(scene.contains("Licenses\\nOpen-source notices\\n—"));
+        assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
     fn device_ports(

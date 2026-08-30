@@ -88,21 +88,21 @@ fn rendered_chrome_contains_sparse_shaped_glyph_ink() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "16eefa888a4f07f3d3755093797a3353b00b1cf19e0d3e28e3cc811154a40f2a  ",
-        "0d8d172a805eeb75ecd8fa0fb12e4691a0479347e38dba46d4508033be6a0405  ",
-        "740fac3d11b5f8166a01a34615496fcf7a39292397036bd91fd4b6e5b85d0be3  ",
-        "47e1a88755fc680aeba418fbdb1b92ba49a1021d8cb9167931d6560b4f37dce9  ",
+        "5ccf59cca151e0b176c841483f70154164851698757100585543e82525efc2c1  ",
+        "0c516c3fb29948950fdf1ca31d24db27f72f7ec9c5db5ad88c1ce4278c282862  ",
+        "9ca038f67d1dce725041bcb5fd9243233e18f49ced7ae05a3d38b3891c2592d1  ",
+        "0c516c3fb29948950fdf1ca31d24db27f72f7ec9c5db5ad88c1ce4278c282862  ",
         "da2c7c1430ef38cf1c5dcabfbadab665ca659e7434deb95a2229f88570404c67  ",
-        "539719bda9eebae0f4d6cacf7921e6434a729909f52d2d5e84bfe4d358f87943  ",
-        "1b98e9e30e8aabd50a6a9de073e6c943c6787e7fba034afd55054f032fce5dc3  ",
-        "919db81ee5bf47367bf4402de086225732add42048a1504f9a96ec23c1092220  ",
-        "13b609e66013590c0a080a0f3ac07490abe0c240a577012c526da1b141d3b5f7  ",
+        "1fa80507146be4bdc4846f9dfb2dbfa87870eb2c7104fe5df723b6a954fe1874  ",
+        "afed935e11e9ea10dd19d594f7a18afff9f1bc48b67b27bb654c7a31e1a5c88e  ",
+        "6ad2bbca6ead66df5f086fc1ccf4c7f2ae3b0353a437a08bb70ef88caea0b38a  ",
+        "3a36ad0a0f3dc2406b31f638fec4c919050d61c3f46206529746181c756f31d3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("0d8d172"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("0c516c3"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("47e1a88"),
+        lines.lines().nth(3).unwrap().starts_with("0c516c3"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -135,19 +135,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("31d0508d1a87856123b66789dc0d7960055f4ce1ce8000233803bc3541bff0a7  ")
+        transcript.contains("1f76c758137df0549de88f9ec8dc609286e36bf02a1eb281ba6dbcd798a401f9  ")
     );
     assert!(
-        transcript.contains("127adf0c8d81ff9a5311f0ef07dcc8dfced6b8928a657b7bb45ec11741aea562  ")
+        transcript.contains("a48a59fc8dfbfcc9b6c60a536e821436dee8e022c30ce9d23dbc14a6b71b0fcf  ")
     );
     assert!(
-        transcript.contains("b7107ae9ea7f3ca9a05d6b4131feab0e116a32c0e11ee884c5453a297f15addd  ")
+        transcript.contains("b644d2f41c1a41ce3c6cab1137f7ef424139d4bbc4166ea6a489108b54dd727b  ")
     );
     assert!(
-        transcript.contains("123037a57a1092cc3bfcd8bd0b060f4656c3f043852b7427c9f57ddb789318b4  ")
+        transcript.contains("b81a8e71b781d0db8f278fb6f17770ff1575a4114fa8c240381cdc35e3dd371c  ")
     );
     assert!(
-        transcript.contains("72df8a6a3a59cde36aefe7130c410700bf2b9bab1023e034bafd523d69625e01  ")
+        transcript.contains("833eac731dbb4830284f238e544c8d3178c12ed2fde18d45d8a4c33975330392  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());
@@ -175,6 +175,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("d0d666591d41f785840f531fc2b920a3939f673da603af471ede11afb7403b84  ")
+        transcript.contains("7137b458b9648f289d0fefba82c8937e1059007ae3ca5902551d367f5ea904ef  ")
     );
 }

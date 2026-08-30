@@ -36,6 +36,57 @@ use std::time::{Duration, SystemTime};
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 8;
+const LIBRARY_SIDE_MARGIN: f32 = 48.0;
+const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
+const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
+const CHIP_HORIZONTAL_PADDING: f32 = 24.0;
+const CHIP_COUNT_GAP: f32 = 8.0;
+
+// The flagship label role is 14 px Manrope semibold. This conservative advance keeps
+// scene geometry renderer-independent while reserving enough room for its widest glyphs.
+fn label_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 8.0
+}
+
+fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
+    label_text_width(label)
+        + CHIP_HORIZONTAL_PADDING
+        + count.map_or(0.0, |value| {
+            CHIP_COUNT_GAP + label_text_width(&value.to_string())
+        })
+}
+
+fn ready_variant_label(variant: &Variant) -> String {
+    let identity = humanize_identifier(&variant.id);
+    match ready_variant_capability(variant) {
+        ReadyVariantCapability::Native => format!("{identity} · Installed on this device"),
+        ReadyVariantCapability::Stream => format!("{identity} · Stream from your PC"),
+        ReadyVariantCapability::Unknown if variant.provenance.runtime_family.is_empty() => identity,
+        ReadyVariantCapability::Unknown => format!(
+            "{identity} · {}",
+            humanize_identifier(&variant.provenance.runtime_family)
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyVariantCapability {
+    Native,
+    Stream,
+    Unknown,
+}
+
+fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
+    let runtime = variant.provenance.runtime_family.to_ascii_lowercase();
+    let families = runtime.split(['/', '-', '_', '.']);
+    if families.clone().any(|part| part == "stream") || runtime.contains("streaming") {
+        ReadyVariantCapability::Stream
+    } else if families.into_iter().any(|part| part == "native") {
+        ReadyVariantCapability::Native
+    } else {
+        ReadyVariantCapability::Unknown
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LibraryGeometry {
@@ -471,6 +522,7 @@ enum SettingsRowAction {
 struct SettingsSceneRow {
     id: String,
     label: String,
+    accessible_label: String,
     action: Option<SettingsRowAction>,
 }
 
@@ -2161,6 +2213,7 @@ impl ShellCore {
         let disabled = |id: &str, label: String| SettingsSceneRow {
             id: id.into(),
             label,
+            accessible_label: String::new(),
             action: None,
         };
         match self.settings_room {
@@ -2186,6 +2239,17 @@ impl ShellCore {
                     };
                     SettingsSceneRow {
                         id: format!("accessibility-{}", row.key),
+                        accessible_label: match &row.effective {
+                            PreferenceValue::Bool(value) => {
+                                format!("{} · {}", row.label, if *value { "ON" } else { "OFF" })
+                            }
+                            PreferenceValue::Text(value) => {
+                                format!("{} · {value}", row.label)
+                            }
+                            PreferenceValue::Integer(value) => {
+                                format!("{} · {value}", row.label)
+                            }
+                        },
                         label: if row.interactive {
                             format!("{}\n{consequence}\n{control}", row.label)
                         } else {
@@ -2238,6 +2302,10 @@ impl ShellCore {
             }
             SettingsRoom::Display => vec![SettingsSceneRow {
                 id: "display-appearance".into(),
+                accessible_label: format!(
+                    "Appearance · {}",
+                    if self.appearance_day { "Day" } else { "Dusk" }
+                ),
                 label: format!(
                     "Appearance\nChanges the room palette; High Contrast composes over it\nDusk / Day · {}",
                     if self.appearance_day { "Day" } else { "Dusk" }
@@ -2285,6 +2353,7 @@ impl ShellCore {
                     rows.push(SettingsSceneRow {
                         id: "system-recovery".into(),
                         label: "Recovery\nOpen the independent recovery entry\n›".into(),
+                        accessible_label: "Recovery".into(),
                         action: Some(SettingsRowAction::Recovery),
                     });
                 }
@@ -2595,6 +2664,23 @@ impl ShellCore {
                 }
                 prompts.join(" · ")
             }
+            Route::Settings => {
+                let mut prompts = self
+                    .binding_prompt("Back", "Back")
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                if self.settings_in_rows
+                    && self.settings_row_focused
+                    && self
+                        .settings_scene_rows()
+                        .get(self.focus)
+                        .is_some_and(|row| row.action.is_some())
+                    && let Some(prompt) = self.binding_prompt("Activate", "Change")
+                {
+                    prompts.push(prompt);
+                }
+                prompts.join(" · ")
+            }
             _ => supplied_footer,
         };
         children.push(node(
@@ -2668,19 +2754,21 @@ impl ShellCore {
             },
             Route::Quick => unreachable!(),
         };
-        out.push(
-            node(
-                "route-heading",
-                Role::Heading,
-                heading,
-                48.0,
-                112.0,
-                500.0,
-                48.0,
-                "--color-surface-canvas",
-            )
-            .with_type_role(TypeRole::Eyebrow),
-        );
+        if self.route != Route::Settings {
+            out.push(
+                node(
+                    "route-heading",
+                    Role::Heading,
+                    heading,
+                    48.0,
+                    112.0,
+                    500.0,
+                    48.0,
+                    "--color-text-primary",
+                )
+                .with_type_role(TypeRole::Eyebrow),
+            );
+        }
         if self.route == Route::Home {
             let heading = out.pop().expect("Home route heading was just added");
             let focused = self
@@ -2833,7 +2921,28 @@ impl ShellCore {
                 .count();
             let other = self.items.len() - games;
             let compact_toolbar = geometry.columns < 6;
-            let search_width = if compact_toolbar { w - 96.0 } else { 310.0 };
+            let filters = [
+                ("Recent".to_owned(), None, LibraryFilter::Recent),
+                ("A–Z".to_owned(), None, LibraryFilter::Alphabetical),
+                ("Games".to_owned(), Some(games), LibraryFilter::Games),
+                (
+                    "Everything else".to_owned(),
+                    Some(other),
+                    LibraryFilter::EverythingElse,
+                ),
+            ];
+            let chip_widths = filters
+                .iter()
+                .map(|(label, count, _)| library_chip_width(label, *count))
+                .collect::<Vec<_>>();
+            let required_toolbar_width = chip_widths.iter().sum::<f32>()
+                + (geometry.toolbar_columns - 1) as f32 * geometry.card_gap;
+            let search_width = if compact_toolbar {
+                w - 2.0 * LIBRARY_SIDE_MARGIN
+            } else {
+                (w - 2.0 * LIBRARY_SIDE_MARGIN - LIBRARY_TOOLBAR_GAP - required_toolbar_width)
+                    .max(LIBRARY_SEARCH_MIN_WIDTH)
+            };
             let mut search = node(
                 "library-search",
                 Role::Button,
@@ -2851,38 +2960,47 @@ impl ShellCore {
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
             out.push(search);
-            for (index, (label, filter)) in [
-                ("Recent".to_owned(), LibraryFilter::Recent),
-                ("A–Z".to_owned(), LibraryFilter::Alphabetical),
-                (format!("Games {games}"), LibraryFilter::Games),
-                (
-                    format!("Everything else {other}"),
-                    LibraryFilter::EverythingElse,
-                ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let toolbar_left = if compact_toolbar { 48.0 } else { 374.0 };
+            for (index, (label, count, filter)) in filters.into_iter().enumerate() {
+                let toolbar_left = if compact_toolbar {
+                    48.0
+                } else {
+                    LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
+                };
                 let toolbar_top = if compact_toolbar { 180.0 } else { 112.0 };
-                let toolbar_width = if compact_toolbar { w - 96.0 } else { w - 422.0 };
-                let chip_width = (toolbar_width
-                    - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
-                    / geometry.toolbar_columns as f32;
+                let toolbar_width = if compact_toolbar {
+                    w - 96.0
+                } else {
+                    w - toolbar_left - 48.0
+                };
+                let chip_width = if compact_toolbar {
+                    (toolbar_width - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
+                        / geometry.toolbar_columns as f32
+                } else {
+                    chip_widths[index]
+                };
                 let chip_column = index % geometry.toolbar_columns;
                 let chip_row = index / geometry.toolbar_columns;
+                let chip_x = if compact_toolbar {
+                    toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap)
+                } else {
+                    toolbar_left
+                        + chip_widths[..index].iter().sum::<f32>()
+                        + index as f32 * geometry.card_gap
+                };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
+                let chip_height = 36.0;
+                let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
-                    &label,
-                    toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap),
+                    &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
+                    chip_x,
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
-                    52.0,
+                    chip_height,
                     if focused {
-                        "--color-text-inverse"
+                        "--state-focused-ring"
                     } else {
                         "--state-rest-surface"
                     },
@@ -2890,14 +3008,52 @@ impl ShellCore {
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
+                chip.children.push(
+                    node(
+                        &format!("library-filter-{index}-label"),
+                        Role::Text,
+                        &label,
+                        chip.bounds.x + 12.0,
+                        chip.bounds.y + 5.0,
+                        chip_width
+                            - CHIP_HORIZONTAL_PADDING
+                            - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_width),
+                        26.0,
+                        if focused {
+                            "--color-text-inverse"
+                        } else {
+                            "--state-rest-text"
+                        },
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
+                if let Some(count) = count {
+                    chip.children.push(
+                        node(
+                            &format!("library-filter-{index}-count"),
+                            Role::Text,
+                            &count.to_string(),
+                            chip.bounds.x + chip_width - 12.0 - count_width,
+                            chip.bounds.y + 5.0,
+                            count_width,
+                            26.0,
+                            if focused {
+                                "--color-text-inverse"
+                            } else {
+                                "--color-text-muted"
+                            },
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
+                }
                 out.push(chip);
                 if active {
                     out.push(node(
                         &format!("library-selected-underline-{index}"),
                         Role::Group,
                         "",
-                        toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap) + 12.0,
-                        toolbar_top + chip_row as f32 * 68.0 + 46.0,
+                        chip_x + 12.0,
+                        toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
                         chip_width - 24.0,
                         3.0,
                         "--state-selected-accent",
@@ -2932,19 +3088,14 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
-                let card_label = if item.has_real_art() {
-                    String::new()
-                } else {
-                    format!(
-                        "{} · {}",
-                        item.title,
-                        availability_text(availability, &self.presentation)
-                    )
-                };
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
-                    &card_label,
+                    &format!(
+                        "{} · {}",
+                        item.title,
+                        availability_text(availability, &self.presentation)
+                    ),
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
@@ -2972,6 +3123,21 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
+                );
+                card.children
+                    .retain(|child| !child.id.as_str().contains("-title-"));
+                card.children.push(
+                    node(
+                        &format!("library-title-{}", item.id),
+                        Role::Text,
+                        &item.title,
+                        card.bounds.x,
+                        card.bounds.y + 154.0,
+                        geometry.card_width,
+                        34.0,
+                        "--color-text-primary",
+                    )
+                    .with_type_role(TypeRole::Label),
                 );
                 out.push(card);
             }
@@ -3110,8 +3276,20 @@ impl ShellCore {
             );
             out.push(cover);
             let detail_availability = best_availability(item);
+            let ready_variant = item
+                .variants
+                .iter()
+                .find(|variant| matches!(variant.availability, Availability::Ready));
             let availability = if matches!(detail_availability, Availability::Ready) {
-                "● Ready".to_owned()
+                match ready_variant.map(ready_variant_capability) {
+                    Some(ReadyVariantCapability::Native) => {
+                        "● Ready · Installed on this device".to_owned()
+                    }
+                    Some(ReadyVariantCapability::Stream) => {
+                        "● Ready · Stream from your PC".to_owned()
+                    }
+                    Some(ReadyVariantCapability::Unknown) | None => "● Ready".to_owned(),
+                }
             } else {
                 format!(
                     "⊘ {}",
@@ -3125,7 +3303,7 @@ impl ShellCore {
                 detail_column_left,
                 218.0,
                 detail_column_width,
-                38.0,
+                30.0,
                 if matches!(detail_availability, Availability::Ready) {
                     "--color-text-primary"
                 } else {
@@ -3135,13 +3313,43 @@ impl ShellCore {
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
+            let description = if item.tags.is_empty() {
+                match ready_variant.map(ready_variant_capability) {
+                    Some(ReadyVariantCapability::Native) => Some(format!(
+                        "{} is ready from the installed catalog.",
+                        item.title
+                    )),
+                    Some(ReadyVariantCapability::Stream | ReadyVariantCapability::Unknown) => {
+                        Some(format!("{} is ready to play.", item.title))
+                    }
+                    None => None,
+                }
+            } else {
+                Some(format!(
+                    "{} · {}",
+                    sentence_kind(&item.kind),
+                    item.tags.join(" · ")
+                ))
+            };
+            if let Some(description) = description {
+                out.push(node(
+                    "detail-description",
+                    Role::Text,
+                    &description,
+                    detail_column_left,
+                    252.0,
+                    detail_column_width,
+                    42.0,
+                    "--color-text-secondary",
+                ));
+            }
             out.push(
                 node(
                     "detail-ways-heading",
                     Role::Heading,
                     "WAYS TO PLAY",
                     detail_column_left,
-                    270.0,
+                    294.0,
                     detail_column_width,
                     28.0,
                     "--color-text-muted",
@@ -3149,9 +3357,9 @@ impl ShellCore {
                 .with_type_role(TypeRole::Eyebrow),
             );
             let ready = self.ready_variants(item_index);
-            let variant_row_height = 54.0;
+            let variant_row_height = 66.0;
             let variant_row_gap = 7.0;
-            let variant_rows_top = 302.0;
+            let variant_rows_top = 326.0;
             let detail_variant_capacity = 2;
             let visible_detail_variants = item.variants.len().min(detail_variant_capacity);
             if self.route == Route::Details {
@@ -3161,23 +3369,38 @@ impl ShellCore {
                     .take(visible_detail_variants)
                     .enumerate()
                 {
-                    let variant_label = if matches!(variant.availability, Availability::Ready) {
-                        format!(
-                            "✓ {}\n{}",
-                            humanize_identifier(&variant.id),
-                            variant
-                                .provenance
-                                .app_version
-                                .as_deref()
-                                .map_or("Installed on this device", |version| version)
-                        )
-                    } else {
-                        format!(
-                            "⊘ {}\n{}",
-                            humanize_identifier(&variant.id),
-                            availability_text(&variant.availability, &self.presentation)
-                        )
-                    };
+                    let (variant_name, variant_sub) =
+                        if matches!(variant.availability, Availability::Ready) {
+                            let capability_copy = match ready_variant_capability(variant) {
+                                ReadyVariantCapability::Native => " · works offline",
+                                ReadyVariantCapability::Stream
+                                | ReadyVariantCapability::Unknown => "",
+                            };
+                            (
+                                ready_variant_label(variant),
+                                format!(
+                                    "{}{}{}",
+                                    variant.provenance.app_version.as_deref().map_or_else(
+                                        || "Current version".to_owned(),
+                                        |version| format!("Version {version}"),
+                                    ),
+                                    if variant.provenance.runtime_family.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(
+                                            " · {}",
+                                            humanize_identifier(&variant.provenance.runtime_family)
+                                        )
+                                    },
+                                    capability_copy,
+                                ),
+                            )
+                        } else {
+                            (
+                                format!("⊘ {}", humanize_identifier(&variant.id)),
+                                availability_text(&variant.availability, &self.presentation),
+                            )
+                        };
                     let variant_focus = item
                         .variants
                         .iter()
@@ -3194,7 +3417,7 @@ impl ShellCore {
                         } else {
                             Role::Text
                         },
-                        &variant_label,
+                        "",
                         detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
@@ -3210,6 +3433,37 @@ impl ShellCore {
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
                     variant_node.state.selected = variant_index == 0;
+                    let text_token = if focused {
+                        "--color-text-inverse"
+                    } else {
+                        "--state-rest-text"
+                    };
+                    variant_node.children = vec![
+                        node(
+                            &format!("detail-variant-{variant_index}-name"),
+                            Role::Text,
+                            &variant_name,
+                            detail_column_left + 16.0,
+                            variant_node.bounds.y + 6.0,
+                            detail_column_width - 32.0,
+                            26.0,
+                            text_token,
+                        ),
+                        node(
+                            &format!("detail-variant-{variant_index}-sub"),
+                            Role::Text,
+                            &variant_sub,
+                            detail_column_left + 16.0,
+                            variant_node.bounds.y + 34.0,
+                            detail_column_width - 32.0,
+                            24.0,
+                            if focused {
+                                "--color-text-inverse"
+                            } else {
+                                "--color-text-secondary"
+                            },
+                        ),
+                    ];
                     if matches!(variant.availability, Availability::Ready) {
                         variant_node.action = Some(NodeAction::Activate);
                     }
@@ -3399,19 +3653,17 @@ impl ShellCore {
                     out.push(pin);
                     634.0
                 };
+                let block_gap = 16.0;
+                let block_height = 54.0;
+                let mut flow_top = actions_bottom + block_gap;
                 if let Some(playtime) = self.playtime.get(&item.id).copied() {
-                    let facts_top = if compact {
-                        actions_bottom + 16.0
-                    } else {
-                        540.0
-                    };
                     out.push(
                         node(
                             "detail-time-played-heading",
                             Role::Heading,
                             "TIME PLAYED",
                             detail_column_left,
-                            facts_top,
+                            flow_top,
                             detail_column_width,
                             22.0,
                             "--color-text-muted",
@@ -3423,11 +3675,62 @@ impl ShellCore {
                         Role::Text,
                         &format_playtime(playtime),
                         detail_column_left,
-                        facts_top + 26.0,
+                        flow_top + 26.0,
                         detail_column_width,
                         28.0,
                         "--color-text-primary",
                     ));
+                    flow_top += block_height + block_gap;
+                }
+                let footer_top = h - PROMPTS_AREA_HEIGHT;
+                if let Some(variant) = ready
+                    .first()
+                    .map(|&variant_index| &item.variants[variant_index])
+                    .filter(|_| !compact && flow_top + block_height <= footer_top)
+                {
+                    let mut facts = vec![(
+                        "developer",
+                        "DEVELOPER",
+                        humanize_identifier(&variant.provenance.provider_id),
+                    )];
+                    if ready_variant_capability(variant) == ReadyVariantCapability::Native {
+                        facts.push((
+                            "installed",
+                            "INSTALLED",
+                            variant.provenance.app_version.as_deref().map_or_else(
+                                || "Current version".to_owned(),
+                                |version| format!("Version {version}"),
+                            ),
+                        ));
+                        facts.push(("offline", "WORKS OFFLINE", "Yes".to_owned()));
+                    }
+                    let fact_width = detail_column_width / facts.len() as f32;
+                    for (column, (id, eyebrow, value)) in facts.into_iter().enumerate() {
+                        let left = detail_column_left + column as f32 * fact_width;
+                        out.push(
+                            node(
+                                &format!("detail-fact-{id}-heading"),
+                                Role::Heading,
+                                eyebrow,
+                                left,
+                                flow_top,
+                                fact_width - 8.0,
+                                22.0,
+                                "--color-text-muted",
+                            )
+                            .with_type_role(TypeRole::Eyebrow),
+                        );
+                        out.push(node(
+                            &format!("detail-fact-{id}"),
+                            Role::Text,
+                            &value,
+                            left,
+                            flow_top + 26.0,
+                            fact_width - 8.0,
+                            28.0,
+                            "--color-text-primary",
+                        ));
+                    }
                 }
             }
         } else if self.route == Route::Settings {
@@ -3489,7 +3792,7 @@ impl ShellCore {
                 let mut nav = node(
                     &format!("settings-nav-{}", name.to_ascii_lowercase()),
                     Role::Button,
-                    &format!("{} {name}", if selected { "▌" } else { " " }),
+                    name,
                     nav_left,
                     nav_top + index as f32 * 62.0,
                     nav_width - 32.0,
@@ -3505,6 +3808,20 @@ impl ShellCore {
                 nav.state.focused = focused;
                 nav.state.selected = selected;
                 nav.action = Some(NodeAction::Activate);
+                nav.children.push(node(
+                    &format!("settings-nav-{}-label", name.to_ascii_lowercase()),
+                    Role::Text,
+                    &format!("{} {name}", if selected { "▌" } else { " " }),
+                    nav.bounds.x + 12.0,
+                    nav.bounds.y + 10.0,
+                    nav.bounds.width - 24.0,
+                    30.0,
+                    if focused || selected {
+                        "--color-text-inverse"
+                    } else {
+                        "--state-rest-text"
+                    },
+                ));
                 out.push(nav);
             }
             if portrait && !self.settings_in_rows {
@@ -3529,7 +3846,7 @@ impl ShellCore {
             112.0,
             content_width,
             48.0,
-            "--state-rest-text",
+            "--color-text-primary",
         ));
         if portrait {
             out.push(node(
@@ -3572,14 +3889,14 @@ impl ShellCore {
         for (index, row) in rows.drain(..).enumerate().skip(first).take(capacity) {
             let interactive = row.action.is_some();
             let focused = self.settings_row_focused && self.focus == index && interactive;
-            let mut row = node(
+            let mut scene_row = node(
                 &format!("settings-row-{}", row.id),
                 if interactive {
                     Role::Button
                 } else {
                     Role::Text
                 },
-                &row.label,
+                &row.accessible_label,
                 content_left,
                 rows_top + (index - first) as f32 * (row_height + row_gap),
                 content_width,
@@ -3592,12 +3909,126 @@ impl ShellCore {
                     "--state-disabled-border"
                 },
             );
-            row.state.focused = focused;
-            row.state.disabled = !interactive;
+            scene_row.state.focused = focused;
+            scene_row.state.disabled = !interactive;
             if interactive {
-                row.action = Some(NodeAction::Activate);
+                scene_row.action = Some(NodeAction::Activate);
             }
-            out.push(row);
+            let text_token = if focused {
+                "--color-text-inverse"
+            } else if interactive {
+                "--state-rest-text"
+            } else {
+                "--color-text-secondary"
+            };
+            let lines = row.label.lines().collect::<Vec<_>>();
+            for (line_index, line) in lines.iter().take(2).enumerate() {
+                scene_row.children.push(node(
+                    &format!("settings-row-{}-line-{line_index}", row.id),
+                    Role::Text,
+                    line,
+                    content_left + 16.0,
+                    scene_row.bounds.y + 7.0 + line_index as f32 * 25.0,
+                    content_width - 150.0,
+                    24.0,
+                    text_token,
+                ));
+            }
+            if row.id == "accessibility-textScale" {
+                let selected_value = lines
+                    .last()
+                    .and_then(|line| line.rsplit_once(" · "))
+                    .map_or("100%", |(_, effective)| effective);
+                for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
+                    let selected = selected_value == value;
+                    let x = content_left + content_width - 240.0 + segment as f32 * 72.0;
+                    scene_row.children.push(node(
+                        &format!("settings-text-scale-segment-{value}"),
+                        Role::Group,
+                        "",
+                        x,
+                        scene_row.bounds.y + 20.0,
+                        68.0,
+                        34.0,
+                        if selected {
+                            "--state-selected-accent"
+                        } else {
+                            "--color-surface-sunken"
+                        },
+                    ));
+                    scene_row.children.push(node(
+                        &format!("settings-text-scale-value-{value}"),
+                        Role::Text,
+                        value,
+                        x + 6.0,
+                        scene_row.bounds.y + 24.0,
+                        56.0,
+                        26.0,
+                        if selected {
+                            "--color-text-inverse"
+                        } else {
+                            "--color-text-primary"
+                        },
+                    ));
+                }
+            } else if row.id.starts_with("accessibility-")
+                && lines
+                    .last()
+                    .is_some_and(|line| line.starts_with("ON") || line.starts_with("OFF"))
+            {
+                let on = lines.last().is_some_and(|line| line.starts_with("ON"));
+                let control_left = content_left + content_width - 128.0;
+                scene_row.children.push(node(
+                    &format!("settings-toggle-{}-state", row.id),
+                    Role::Text,
+                    if on { "ON" } else { "OFF" },
+                    control_left,
+                    scene_row.bounds.y + 24.0,
+                    38.0,
+                    26.0,
+                    text_token,
+                ));
+                scene_row.children.push(node(
+                    &format!("settings-toggle-{}-track", row.id),
+                    Role::Group,
+                    "",
+                    control_left + 44.0,
+                    scene_row.bounds.y + 25.0,
+                    58.0,
+                    28.0,
+                    if on {
+                        "--state-selected-accent"
+                    } else {
+                        "--color-surface-sunken"
+                    },
+                ));
+                scene_row.children.push(node(
+                    &format!("settings-toggle-{}-knob", row.id),
+                    Role::Group,
+                    "",
+                    control_left + if on { 78.0 } else { 48.0 },
+                    scene_row.bounds.y + 29.0,
+                    20.0,
+                    20.0,
+                    if on {
+                        "--color-text-inverse"
+                    } else {
+                        "--color-text-primary"
+                    },
+                ));
+            } else if let Some(control) = lines.get(2) {
+                scene_row.children.push(node(
+                    &format!("settings-row-{}-control", row.id),
+                    Role::Text,
+                    control,
+                    content_left + content_width - 120.0,
+                    scene_row.bounds.y + 24.0,
+                    104.0,
+                    26.0,
+                    text_token,
+                ));
+            }
+            out.push(scene_row);
         }
     }
 
@@ -4828,7 +5259,7 @@ mod tests {
         );
         c.drive_preferences(&mut port).unwrap();
         assert_eq!(c.text_scale(), 150);
-        assert!(format!("{:?}", settings_scene(&c)).contains("100% / 150% / 200% · 150%"));
+        assert!(format!("{:?}", settings_scene(&c)).contains("settings-text-scale-value-150%"));
 
         let mut unsupported = core();
         unsupported
@@ -4960,7 +5391,8 @@ mod tests {
         core.focus = 2;
         let scene = format!("{:?}", settings_scene(&core));
         assert!(scene.contains("settings-row-system-licenses"));
-        assert!(scene.contains("Licenses\\nOpen-source notices\\n—"));
+        assert!(scene.contains("Licenses"));
+        assert!(scene.contains("Open-source notices"));
         assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
@@ -5352,7 +5784,8 @@ mod tests {
         core.go(Route::Settings);
         let before = format!("{:?}", settings_scene(&core));
         assert!(before.contains("Reduce motion"));
-        assert!(before.contains("OFF ●——"));
+        assert!(before.contains("settings-toggle-accessibility-reduceMotion-state"));
+        assert!(before.contains("accessible_label: \"OFF\""));
 
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("reduceMotion".into()),
@@ -5362,7 +5795,7 @@ mod tests {
         });
         let after = format!("{:?}", settings_scene(&core));
         assert!(after.contains("Reduce motion"));
-        assert!(after.contains("ON ——●"));
+        assert!(after.contains("accessible_label: \"ON\""));
     }
 
     #[test]
@@ -5372,10 +5805,53 @@ mod tests {
         core.go(Route::Settings);
         let scene = format!("{:?}", settings_scene(&core));
         assert!(scene.contains("High contrast"));
-        assert!(scene.contains("OFF ●——"));
+        assert!(scene.contains("settings-toggle-accessibility-highContrast-state"));
         assert!(scene.contains("Reduce motion"));
         assert!(scene.contains("Reduce flashing"));
-        assert!(scene.contains("100% / 150% / 200% · 100%"));
+        assert!(scene.contains("settings-text-scale-value-100%"));
+    }
+
+    #[test]
+    fn text_scale_control_selects_exactly_one_effective_segment() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        for effective in ["100%", "150%", "200%"] {
+            let mut core = core();
+            core.load_preferences(&preferences(true), true).unwrap();
+            core.go(Route::Settings);
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(effective.into()),
+                stored: PreferenceValue::Text(effective.into()),
+                applied: true,
+            });
+
+            let scene = settings_scene(&core);
+            let selected_segments = ["100%", "150%", "200%"]
+                .into_iter()
+                .filter(|value| {
+                    find(
+                        scene.root(),
+                        &format!("settings-text-scale-segment-{value}"),
+                    )
+                    .is_some_and(|node| node.style_token == "--state-selected-accent")
+                })
+                .collect::<Vec<_>>();
+            let inverse_labels = ["100%", "150%", "200%"]
+                .into_iter()
+                .filter(|value| {
+                    find(scene.root(), &format!("settings-text-scale-value-{value}"))
+                        .is_some_and(|node| node.style_token == "--color-text-inverse")
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(selected_segments, [effective]);
+            assert_eq!(inverse_labels, [effective]);
+        }
     }
 
     #[test]
@@ -5472,7 +5948,7 @@ mod tests {
         core.go(Route::Settings);
         core.action(&ShellAction::Move(AxisMove::Right));
         let off = format!("{:?}", settings_scene(&core));
-        assert!(off.contains("OFF ●——"));
+        assert!(off.contains("accessible_label: \"OFF\""));
         core.focus = 1;
         let Some(Effect::ChangePreference(change)) = core.action(&ShellAction::Activate) else {
             panic!("high contrast toggle")
@@ -5483,7 +5959,7 @@ mod tests {
             stored: change.value,
             applied: true,
         });
-        assert!(format!("{:?}", settings_scene(&core)).contains("ON ——●"));
+        assert!(format!("{:?}", settings_scene(&core)).contains("accessible_label: \"ON\""));
 
         core.settings_room = SettingsRoom::Display;
         core.focus = 0;
@@ -5806,6 +6282,12 @@ mod tests {
         core
     }
 
+    fn node_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+        (node.id.as_str() == id)
+            .then_some(node)
+            .or_else(|| node.children.iter().find_map(|child| node_by_id(child, id)))
+    }
+
     #[test]
     fn five_hundred_items_filter_deterministically_and_search_opens_details_only() {
         let items = (0..500)
@@ -5953,6 +6435,39 @@ mod tests {
                     chip.id.as_str()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn widest_library_chip_label_fits_at_desktop_breakpoints() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+
+        for width in [1100.0, 1280.0] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let label = node_by_id(scene.root(), "library-filter-3-label").unwrap();
+            assert_eq!(label.accessible_label, "Everything else");
+            assert!(
+                label.bounds.width >= label_text_width(&label.accessible_label),
+                "Everything else needs {}px but receives {}px at {width}px",
+                label_text_width(&label.accessible_label),
+                label.bounds.width
+            );
         }
     }
 
@@ -6171,14 +6686,12 @@ mod tests {
                 "",
             )
             .unwrap();
-        let labels = scene
-            .root()
-            .children
-            .iter()
-            .filter(|node| node.id.as_str().starts_with("library-filter-"))
-            .map(|node| node.accessible_label.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(labels, ["Recent", "A–Z", "Games 2", "Everything else 1"]);
+        let debug = format!("{scene:?}");
+        for label in ["Recent", "A–Z", "Games", "Everything else"] {
+            assert!(debug.contains(&format!("accessible_label: \"{label}\"")));
+        }
+        assert!(debug.contains("library-filter-2-count"));
+        assert!(debug.contains("library-filter-3-count"));
     }
 
     #[test]
@@ -6448,6 +6961,255 @@ mod tests {
                 .children
                 .iter()
                 .any(|node| node.id.as_str() == "detail-open")
+        );
+        assert!(
+            !scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str().starts_with("detail-fact-")),
+            "unavailable variants must not produce installed or offline claims"
+        );
+    }
+
+    #[test]
+    fn details_without_a_ready_variant_omit_readiness_copy() {
+        let mut unavailable = item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "standard-edition",
+                "setup-app",
+                Availability::NeedsSetup {
+                    reason: "choose a profile once".into(),
+                },
+            )],
+        );
+        unavailable.tags.clear();
+        let mut core = fixture_core(vec![unavailable]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(
+            node_by_id(scene.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .contains("choose a profile once")
+        );
+        assert!(node_by_id(scene.root(), "detail-description").is_none());
+        assert!(!format!("{scene:?}").contains("ready to play"));
+    }
+
+    #[test]
+    fn details_facts_come_from_a_ready_variant_and_stay_above_the_footer() {
+        let mut unavailable = variant(
+            "setup",
+            "setup-app",
+            Availability::NeedsSetup {
+                reason: "choose a profile once".into(),
+            },
+        );
+        unavailable.provenance.provider_id = "unavailable-provider".into();
+        unavailable.provenance.app_version = Some("0.1".into());
+        let mut ready = variant("native", "ready-app", Availability::Ready);
+        ready.provenance.provider_id = "ready-provider".into();
+        ready.provenance.app_version = Some("2.4".into());
+        let mut core = fixture_core(vec![item("mixed", "Mixed Game", vec![unavailable, ready])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let fact = |id: &str| {
+            root.children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap()
+        };
+        assert_eq!(
+            fact("detail-fact-developer").accessible_label,
+            "Ready provider"
+        );
+        assert_eq!(
+            fact("detail-fact-installed").accessible_label,
+            "Version 2.4"
+        );
+        assert_eq!(fact("detail-fact-offline").accessible_label, "Yes");
+        let footer_top = root
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "prompt-bar")
+            .unwrap()
+            .bounds
+            .y;
+        for node in root
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("detail-fact-"))
+        {
+            assert!(
+                node.bounds.y + node.bounds.height <= footer_top,
+                "{} crosses the footer",
+                node.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn details_facts_flow_after_recorded_playtime() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn assert_subtree_misses(node: &Node, bounds: Bounds) {
+            assert!(
+                !intersects(node.bounds, bounds),
+                "{} {:?} intersects playtime {:?}",
+                node.id.as_str(),
+                node.bounds,
+                bounds
+            );
+            for child in &node.children {
+                assert_subtree_misses(child, bounds);
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "played",
+            "Played Game",
+            vec![variant("native", "played", Availability::Ready)],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        core.load_history(&[history_entry(
+            "played",
+            Some(start),
+            Some((start + Duration::from_secs(3_600), EndPrecision::Observed)),
+        )]);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let playtime = node_by_id(scene.root(), "detail-playtime").unwrap().bounds;
+        for fact in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("detail-fact-"))
+        {
+            assert_subtree_misses(fact, playtime);
+        }
+    }
+
+    #[test]
+    fn details_offline_claims_require_observed_native_runtime() {
+        fn details_for(mut variant: Variant) -> Scene {
+            variant.availability = Availability::Ready;
+            let mut core = fixture_core(vec![item("game", "Game", vec![variant])]);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap()
+        }
+
+        let native = details_for(variant("native", "game", Availability::Ready));
+        assert!(
+            node_by_id(native.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .contains("Installed on this device")
+        );
+        assert!(node_by_id(native.root(), "detail-fact-offline").is_some());
+        assert!(
+            node_by_id(native.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label
+                .contains("works offline")
+        );
+
+        let mut streaming = variant("stream", "game", Availability::Ready);
+        streaming.provenance.runtime_family = "pocketforge/stream".into();
+        let streaming = details_for(streaming);
+        let streaming_copy = [
+            node_by_id(streaming.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+            node_by_id(streaming.root(), "detail-description")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+            node_by_id(streaming.root(), "detail-variant-0-name")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+        ]
+        .join("\n");
+        assert!(streaming_copy.contains("Stream from your PC"));
+        assert!(!streaming_copy.to_ascii_lowercase().contains("install"));
+        assert!(node_by_id(streaming.root(), "detail-fact-installed").is_none());
+        assert!(node_by_id(streaming.root(), "detail-fact-offline").is_none());
+        assert!(
+            !node_by_id(streaming.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label
+                .contains("offline")
+        );
+
+        let mut unknown = variant("unknown", "game", Availability::Ready);
+        unknown.provenance.runtime_family.clear();
+        let unknown = details_for(unknown);
+        assert!(node_by_id(unknown.root(), "detail-fact-offline").is_none());
+        assert_eq!(
+            node_by_id(unknown.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label,
+            "Version 1.0"
         );
     }
 
@@ -6732,6 +7494,83 @@ mod tests {
     }
 
     #[test]
+    fn ready_native_and_stream_variants_have_distinct_human_labels() {
+        let native = variant("native", "many-native", Availability::Ready);
+        let mut stream = variant("stream", "many-stream", Availability::Ready);
+        stream.provenance.runtime_family = "pocketforge/stream".into();
+        let mut core = fixture_core(vec![item("many", "Many Moons", vec![native, stream])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let native_label = &node_by_id(scene.root(), "detail-variant-0-name")
+            .unwrap()
+            .accessible_label;
+        let stream_label = &node_by_id(scene.root(), "detail-variant-1-name")
+            .unwrap()
+            .accessible_label;
+        assert_eq!(native_label, "Native · Installed on this device");
+        assert_eq!(stream_label, "Stream · Stream from your PC");
+        assert_ne!(native_label, stream_label);
+    }
+
+    #[test]
+    fn ready_variants_within_the_same_capability_family_have_distinct_labels() {
+        let standard = variant("standard-edition", "many-standard", Availability::Ready);
+        let deluxe = variant("deluxe-edition", "many-deluxe", Availability::Ready);
+        let mut core = fixture_core(vec![item("many", "Many Moons", vec![standard, deluxe])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let standard_label = &node_by_id(scene.root(), "detail-variant-0-name")
+            .unwrap()
+            .accessible_label;
+        let deluxe_label = &node_by_id(scene.root(), "detail-variant-1-name")
+            .unwrap()
+            .accessible_label;
+
+        assert_eq!(
+            standard_label,
+            "Standard edition · Installed on this device"
+        );
+        assert_eq!(deluxe_label, "Deluxe edition · Installed on this device");
+        assert_ne!(standard_label, deluxe_label);
+    }
+
+    #[test]
+    fn single_ready_variant_label_reads_as_a_natural_capability_phrase() {
+        let native = variant("native", "only-native", Availability::Ready);
+
+        assert_eq!(
+            ready_variant_label(&native),
+            "Native · Installed on this device"
+        );
+    }
+
+    #[test]
     fn item_without_variants_renders_as_unavailable() {
         let mut core = fixture_core(vec![item("empty", "Empty Orbit", vec![])]);
 
@@ -6962,15 +7801,22 @@ mod tests {
     }
 
     #[test]
-    fn emitted_routes_never_make_structural_groups_actionable() {
-        fn assert_no_actionable_group(node: &Node) {
+    fn emitted_routes_keep_actions_named_and_off_structural_groups() {
+        fn assert_action_contract(node: &Node) {
             assert!(
                 node.role != Role::Group || node.action.is_none(),
                 "structural group {} must not carry an action",
                 node.id.as_str()
             );
+            if node.action.is_some() {
+                assert!(
+                    !node.accessible_label.trim().is_empty(),
+                    "actionable node {} must have an accessible label",
+                    node.id.as_str()
+                );
+            }
             for child in &node.children {
-                assert_no_actionable_group(child);
+                assert_action_contract(child);
             }
         }
 
@@ -7001,7 +7847,21 @@ mod tests {
         ] {
             core.go(route);
             let scene = core.scene(metrics, "").unwrap();
-            assert_no_actionable_group(scene.root());
+            assert_action_contract(scene.root());
+        }
+
+        core.recovery_available = true;
+        for room in [
+            SettingsRoom::Accessibility,
+            SettingsRoom::Display,
+            SettingsRoom::Controls,
+            SettingsRoom::Network,
+            SettingsRoom::System,
+        ] {
+            core.settings_room = room;
+            core.settings_in_rows = true;
+            let scene = core.scene(metrics, "").unwrap();
+            assert_action_contract(scene.root());
         }
     }
 
@@ -7400,10 +8260,10 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "library-item-long")
             .unwrap();
-        assert!(
-            card.accessible_label
+        assert!(card.children.iter().any(|node| {
+            node.accessible_label
                 .contains("connect to Wi-Fi to use this edition")
-        );
+        }));
         assert!(!card.accessible_label.contains("EDITION PLATE"));
         assert!(
             card.children
@@ -7876,47 +8736,17 @@ mod tests {
 
     #[test]
     fn emitted_text_on_light_surfaces_has_a_declared_paired_on_color() {
-        const PAIRS: [(&str, &str); 8] = [
-            ("--color-surface-canvas", "--color-text-primary"),
-            ("--color-surface-raised", "--state-rest-text"),
-            ("--color-surface-overlay", "--color-text-primary"),
-            ("--color-surface-sunken", "--color-text-primary"),
-            ("--state-rest-surface", "--state-rest-text"),
-            ("--color-focus-ring", "--color-text-inverse"),
-            ("--state-selected-accent", "--color-text-inverse"),
-            ("--color-surface-scrim", "--color-text-primary"),
-        ];
-        fn visit(node: &Node, theme: &Theme) {
-            if !node.accessible_label.is_empty()
-                && let Some((_, on_color)) = PAIRS
-                    .iter()
-                    .find(|(surface, _)| *surface == node.style_token)
-            {
-                assert!(
-                    theme.resolve(Base::Dusk, on_color).is_ok(),
-                    "{} has surface {} without resolvable paired {}",
-                    node.id.as_str(),
-                    node.style_token,
-                    on_color
-                );
-            }
-            for child in &node.children {
-                visit(child, theme);
-            }
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
         }
-
-        let theme = pf_theme::flagship();
         let mut core = fixture_core(vec![item(
-            "setup",
-            "Setup Game",
-            vec![variant(
-                "stream",
-                "setup",
-                Availability::NeedsNetwork {
-                    reason: "connect to Wi-Fi".into(),
-                },
-            )],
+            "ready",
+            "Ready Game",
+            vec![variant("installed", "ready", Availability::Ready)],
         )]);
+        core.load_preferences(&preferences(true), true).unwrap();
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -7924,11 +8754,53 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
-        for route in [Route::Home, Route::Library, Route::Search, Route::Details] {
-            core.selected_item = Some(0);
-            core.go(route);
-            visit(core.scene(metrics, "").unwrap().root(), &theme);
+        core.go(Route::Library);
+        core.focus = 3;
+        let library = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            find(library.root(), "library-filter-2-label")
+                .unwrap()
+                .style_token,
+            "--color-text-inverse"
+        );
+
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let details = core.scene(metrics, "").unwrap();
+        for id in [
+            "detail-provenance",
+            "detail-availability-reason",
+            "detail-description",
+            "detail-ways-heading",
+        ] {
+            assert!(
+                find(details.root(), id)
+                    .unwrap()
+                    .style_token
+                    .starts_with("--color-text")
+            );
         }
+        assert_eq!(
+            find(details.root(), "detail-variant-0-name")
+                .unwrap()
+                .style_token,
+            "--color-text-inverse"
+        );
+
+        core.go(Route::Settings);
+        let settings = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            find(settings.root(), "settings-section-title")
+                .unwrap()
+                .style_token,
+            "--color-text-primary"
+        );
+        assert_eq!(
+            find(settings.root(), "settings-nav-accessibility-label")
+                .unwrap()
+                .style_token,
+            "--color-text-inverse"
+        );
     }
 
     #[test]

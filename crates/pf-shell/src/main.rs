@@ -3486,6 +3486,25 @@ exec="./launch"
     }
 
     #[test]
+    fn fresh_and_schema_v2_preferences_default_text_scale_to_one_hundred_percent() {
+        for existing in [None, Some(r#"{"schemaVersion":2}"#)] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(document) = existing {
+                std::fs::write(dir.path().join("prefs.json"), document).unwrap();
+            }
+            let preferences = DurablePreferences::open(dir.path()).unwrap();
+            assert_eq!(
+                preferences
+                    .read(&PreferenceKey("textScale".into()))
+                    .unwrap()
+                    .unwrap()
+                    .effective,
+                PreferenceValue::Text("100%".into())
+            );
+        }
+    }
+
+    #[test]
     fn first_run_completion_survives_two_boots_in_one_state_dir() {
         let dir = tempfile::tempdir().unwrap();
         let mut first = DurablePreferences::open(dir.path()).unwrap();

@@ -1119,6 +1119,7 @@ fn desktop_sim_marker(authority_state: &Path) -> Result<Option<PathBuf>, String>
 fn reconcile_desktop_sim_startup(
     socket: &Path,
     phase: ObservableAuthorityPhase,
+    mut sample_phase: impl FnMut() -> Result<ObservableAuthorityPhase, String>,
     mut sample_marker: impl FnMut() -> Result<Option<PathBuf>, String>,
 ) -> Result<Option<PathBuf>, String> {
     let mut marker = sample_marker()?;
@@ -1134,13 +1135,30 @@ fn reconcile_desktop_sim_startup(
         // last possible moment before treating the authority session as interrupted.
         marker = sample_marker()?;
     }
-    match (&marker, phase) {
+    let reconciled_phase = if marker.is_some() && phase == ObservableAuthorityPhase::Idle {
+        sample_phase()?
+    } else {
+        phase
+    };
+    match (&marker, reconciled_phase) {
         (Some(path), ObservableAuthorityPhase::Starting) => {
             observe_desktop_sim_running(socket)?;
             println!("SUPERVISOR running marker={}", path.display());
         }
         (Some(path), ObservableAuthorityPhase::Running) => {
             println!("SUPERVISOR reconciled running marker={}", path.display());
+        }
+        (Some(path), ObservableAuthorityPhase::Returning) => {
+            // Returning rejects SessionRunning, but the marker proves a new launch
+            // raced the return. Adopt it without that invalid observation so the
+            // watch loop tracks its eventual removal.
+            println!("SUPERVISOR reconciled returning marker={}", path.display());
+        }
+        (Some(path), ObservableAuthorityPhase::Idle) => {
+            fs::remove_file(path)
+                .map_err(|error| format!("remove orphan marker {}: {error}", path.display()))?;
+            println!("SUPERVISOR removed orphan marker={}", path.display());
+            marker = None;
         }
         (
             None,
@@ -1162,8 +1180,12 @@ fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(
         "SUPERVISOR watching state_dir={} phase={phase:?}",
         authority_state.display(),
     );
-    let marker =
-        reconcile_desktop_sim_startup(socket, phase, || desktop_sim_marker(authority_state))?;
+    let marker = reconcile_desktop_sim_startup(
+        socket,
+        phase,
+        || observable_authority_phase(socket),
+        || desktop_sim_marker(authority_state),
+    )?;
     let mut active_marker = marker;
     loop {
         let marker = desktop_sim_marker(authority_state)?;
@@ -1864,11 +1886,16 @@ mod durable_tests {
 
         let marker = state.path().join("sessions/session-1.running");
         let mut samples = [None, Some(marker.clone())].into_iter();
-        let adopted = reconcile_desktop_sim_startup(&socket, phase, || {
-            Ok(samples
-                .next()
-                .expect("startup sampled marker too many times"))
-        })
+        let adopted = reconcile_desktop_sim_startup(
+            &socket,
+            phase,
+            || Ok(phase),
+            || {
+                Ok(samples
+                    .next()
+                    .expect("startup sampled marker too many times"))
+            },
+        )
         .unwrap();
         assert_eq!(adopted, Some(marker));
         {
@@ -1904,6 +1931,83 @@ mod durable_tests {
         assert_supervisor_adopts_marker_appearing_during_reconcile(
             ObservableAuthorityPhase::Running,
         );
+    }
+
+    #[test]
+    fn supervisor_rechecks_idle_phase_before_adopting_racing_marker() {
+        use std::os::unix::net::UnixListener;
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut stream).unwrap();
+            let request =
+                serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap();
+            assert!(matches!(
+                request,
+                pf_session_authority::RpcRequest::Observe {
+                    observation: pf_session_authority::RpcObservation::SessionRunning
+                }
+            ));
+            let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+            pf_wire::write_frame(&mut stream, &body).unwrap();
+        });
+
+        let marker = state.path().join("session-1.running");
+        fs::write(&marker, []).unwrap();
+        let adopted = reconcile_desktop_sim_startup(
+            &socket,
+            ObservableAuthorityPhase::Idle,
+            || Ok(ObservableAuthorityPhase::Starting),
+            || Ok(Some(marker.clone())),
+        )
+        .unwrap();
+
+        assert_eq!(adopted, Some(marker));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn supervisor_removes_idle_orphan_before_next_launch_cycle() {
+        use std::os::unix::net::UnixListener;
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let orphan = state.path().join("orphan.running");
+        fs::write(&orphan, []).unwrap();
+        let adopted = reconcile_desktop_sim_startup(
+            &socket,
+            ObservableAuthorityPhase::Idle,
+            || Ok(ObservableAuthorityPhase::Idle),
+            || Ok(Some(orphan.clone())),
+        )
+        .unwrap();
+        assert_eq!(adopted, None);
+        assert!(!orphan.exists());
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _request = pf_wire::read_frame(&mut stream).unwrap();
+                let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+                pf_wire::write_frame(&mut stream, &body).unwrap();
+            }
+        });
+        let next_marker = state.path().join("next.running");
+        fs::write(&next_marker, []).unwrap();
+        let adopted = reconcile_desktop_sim_startup(
+            &socket,
+            ObservableAuthorityPhase::Starting,
+            || Ok(ObservableAuthorityPhase::Starting),
+            || Ok(Some(next_marker.clone())),
+        )
+        .unwrap();
+        assert_eq!(adopted, Some(next_marker));
+        observe_desktop_sim_return(&socket, true).unwrap();
+        server.join().unwrap();
     }
 
     fn observe_against_response(response: pf_session_authority::RpcResponse) -> Result<(), String> {

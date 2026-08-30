@@ -135,19 +135,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("3fb5ab8a24f15abf1a415c32f8465d50591452c78a9e7e6c35c9ecdc97db644a  ")
+        transcript.contains("04046b7574d88c5761538aec2a3a5c8540d81e98e05c9684bbc672f03bcc29a6  ")
     );
     assert!(
-        transcript.contains("60f12c06a715a6daa33d072b25af979e4e38ff2abe243951ccabe2f407596220  ")
+        transcript.contains("99e980572285b3473accc91dce4f17c0b6eba7962a283bc01f4ca5e3296a6e98  ")
     );
     assert!(
-        transcript.contains("696f1e3778be73d93a31e13abb6a4ef6b3c84902ea3490ab9860f1d34fc63df4  ")
+        transcript.contains("a48cc1ce53da524bd7ef2d8198c7962462935382a9c4cb4a8aa8567da52d7d30  ")
     );
     assert!(
-        transcript.contains("5b77ba93a0d01c3461a91974a98213f3bd6f64740b812a8bbcc984361fcd9e3d  ")
+        transcript.contains("dde3489e7bc2ea76df54632a4ed38e34ecf983cd07a8ab588887e50ab1ec8832  ")
     );
     assert!(
-        transcript.contains("db701365e327f825fbcb5d4a9c0d7c8c024757ed86940a1266be9a88185ec12e  ")
+        transcript.contains("289f1563c9c41c01c337c1fdb16fe1f71db1a620913a862f73659d248cf7ad01  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());

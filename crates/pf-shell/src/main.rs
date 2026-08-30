@@ -16,7 +16,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{RasterFrame, RenderNote, ThemeBase};
+use pf_render::{RasterFrame, RenderNote};
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -523,11 +523,12 @@ fn main() -> Result<(), String> {
         core.action(&ShellAction::Custom("Room.next".into()));
         core.action(&ShellAction::Custom("Room.next".into()));
         emit(&mut host, &mut core, &footer, out, "settings")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "controls")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "network")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "system")?;
         core.reset_first_run();
         emit(&mut host, &mut core, &footer, out, "first-run")?;
@@ -1610,6 +1611,7 @@ fn fixture_preferences() -> FakePreferencePort {
         ("highContrast", PreferenceValue::Bool(false)),
         ("reduceMotion", PreferenceValue::Bool(false)),
         ("reduceFlashing", PreferenceValue::Bool(false)),
+        ("appearance", PreferenceValue::Text("Dusk".into())),
     ]
     .into_iter()
     .map(|(key, value)| EffectivePreference {
@@ -1700,6 +1702,20 @@ impl DurablePreferences {
 
 impl PreferencePort for DurablePreferences {
     fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
+        if key.0 == "appearance" {
+            let value = self
+                .launcher_state()?
+                .get("appearance")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Dusk")
+                .to_owned();
+            return Ok(Some(EffectivePreference {
+                key: key.clone(),
+                effective: PreferenceValue::Text(value.clone()),
+                stored: PreferenceValue::Text(value),
+                applied: true,
+            }));
+        }
         if matches!(key.0.as_str(), "firstRunComplete" | "safeReturnBinding") {
             return Ok(None);
         }
@@ -1732,19 +1748,29 @@ impl PreferencePort for DurablePreferences {
     ) -> Result<PreferenceChangeResult, PreferenceError> {
         if matches!(
             change.key.0.as_str(),
-            "firstRunComplete" | "safeReturnBinding"
+            "firstRunComplete" | "safeReturnBinding" | "appearance"
         ) {
             if change.authority != ChangeAuthority("user".into()) {
                 return Ok(PreferenceChangeResult::Unauthorized);
             }
             let mut state = self.launcher_state()?;
+            let effective = change.value.clone();
             let value = match change.value {
                 PreferenceValue::Bool(value) => serde_json::Value::Bool(value),
                 PreferenceValue::Text(value) => serde_json::Value::String(value),
                 PreferenceValue::Integer(value) => serde_json::Value::Number(value.into()),
             };
-            state.insert(change.key.0, value);
+            let key = change.key;
+            state.insert(key.0.clone(), value);
             self.write_launcher_state(&state)?;
+            if key.0 == "appearance" {
+                self.pending.push_back(EffectivePreference {
+                    key,
+                    effective: effective.clone(),
+                    stored: effective,
+                    applied: true,
+                });
+            }
             return Ok(PreferenceChangeResult::Accepted);
         }
         let key = change.key.clone();
@@ -1865,11 +1891,7 @@ fn present_scene(
     prompt: &str,
     scene: &pf_scene::Scene,
 ) -> Result<(), String> {
-    host.set_theme_base(if core.high_contrast() {
-        ThemeBase::HighContrast
-    } else {
-        ThemeBase::Dusk
-    });
+    host.set_theme_base(core.theme_base());
     host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
         .render_notes()
@@ -2820,18 +2842,11 @@ exec="./launch"
         };
 
         let network_scene = format!("{:?}", core.scene(metrics, "").unwrap());
-        assert!(network_scene.contains("Scan unavailable · BackendUnavailable"));
-        assert!(network_scene.contains("disabled: true"));
+        assert!(!network_scene.contains("settings-nav-network"));
+        assert!(network_scene.contains("settings-nav-system"));
         assert_eq!(core.action(&ShellAction::Activate), None);
 
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-        let system_scene = format!("{:?}", core.scene(metrics, "").unwrap());
-        assert!(
-            system_scene.contains("Time status unavailable · BackendUnavailable"),
-            "{system_scene}"
-        );
-        assert!(system_scene.contains("disabled: true"));
-        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert!(network_scene.contains("Button remap"));
     }
 
     #[test]
@@ -3339,6 +3354,38 @@ exec="./launch"
                 .chunks_exact(4)
                 .any(|pixel| pixel[..3] == [255, 255, 255]),
             "high-contrast label text should contain a white pixel"
+        );
+    }
+
+    #[test]
+    fn appearance_preference_is_durable_and_publishes_applied_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        assert_eq!(
+            preferences
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("appearance".into()),
+                    value: PreferenceValue::Text("Day".into()),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap(),
+            PreferenceChangeResult::Accepted
+        );
+        let PreferencePoll::Changed(change) = preferences
+            .next_change(Deadline(MonotonicTime::ZERO))
+            .unwrap()
+        else {
+            panic!("appearance change must redraw immediately")
+        };
+        assert_eq!(change.effective, PreferenceValue::Text("Day".into()));
+        let reopened = DurablePreferences::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened
+                .read(&PreferenceKey("appearance".into()))
+                .unwrap()
+                .unwrap()
+                .effective,
+            PreferenceValue::Text("Day".into())
         );
     }
 

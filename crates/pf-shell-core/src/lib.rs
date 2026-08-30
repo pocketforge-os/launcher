@@ -28,6 +28,7 @@ use pf_scene::{
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -36,6 +37,38 @@ const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LibraryGeometry {
+    columns: usize,
+    card_width: f32,
+    card_gap: f32,
+    card_left: f32,
+    card_top: f32,
+    toolbar_columns: usize,
+}
+
+fn library_geometry(surface_width: f32) -> LibraryGeometry {
+    let (columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
+        (6, 4, 184.0)
+    } else if surface_width >= 760.0 {
+        (4, 4, 252.0)
+    } else {
+        (3, 2, 320.0)
+    };
+    let card_left = 48.0;
+    let card_gap = 16.0;
+    let card_width =
+        (surface_width - 2.0 * card_left - (columns - 1) as f32 * card_gap) / columns as f32;
+    LibraryGeometry {
+        columns,
+        card_width,
+        card_gap,
+        card_left,
+        card_top,
+        toolbar_columns,
+    }
+}
 
 fn action_label(action: &str) -> String {
     if action == "SafeReturn" {
@@ -441,6 +474,7 @@ pub struct ShellCore {
     search_results: Vec<usize>,
     library_filter: LibraryFilter,
     library_items: Vec<usize>,
+    library_surface_width: Cell<f32>,
     launch_focus: usize,
     active_title: String,
     crash_summary: String,
@@ -565,6 +599,7 @@ impl ShellCore {
             search_results: (0..snapshot.items.len()).collect(),
             library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
+            library_surface_width: Cell::new(1280.0),
             launch_focus: 0,
             active_title: String::new(),
             crash_summary: String::new(),
@@ -1570,7 +1605,8 @@ impl ShellCore {
                 if self.route == Route::Library && self.focus >= 5 =>
             {
                 let item = self.focus - 5;
-                if item % 6 < 5 && item + 1 < self.library_items.len() {
+                let columns = library_geometry(self.library_surface_width.get()).columns;
+                if item % columns + 1 < columns && item + 1 < self.library_items.len() {
                     self.focus += 1;
                 }
             }
@@ -1603,7 +1639,8 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Left)
                 if self.route == Route::Library && self.focus >= 5 =>
             {
-                if (self.focus - 5) % 6 > 0 {
+                let columns = library_geometry(self.library_surface_width.get()).columns;
+                if (self.focus - 5) % columns > 0 {
                     self.focus -= 1;
                 }
             }
@@ -1618,15 +1655,18 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Down)
                 if self.route == Route::Library && self.focus >= 5 =>
             {
-                if self.focus - 5 + 6 < self.library_items.len() {
-                    self.focus += 6;
+                let columns = library_geometry(self.library_surface_width.get()).columns;
+                if self.focus - 5 + columns < self.library_items.len() {
+                    self.focus += columns;
                 }
             }
-            ShellAction::Move(AxisMove::Up) if self.route == Route::Library && self.focus >= 11 => {
-                self.focus -= 6;
-            }
             ShellAction::Move(AxisMove::Up) if self.route == Route::Library && self.focus >= 5 => {
-                self.focus = (self.focus - 5).min(3) + 1;
+                let columns = library_geometry(self.library_surface_width.get()).columns;
+                if self.focus - 5 >= columns {
+                    self.focus -= columns;
+                } else {
+                    self.focus = (self.focus - 5).min(3) + 1;
+                }
             }
             ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                 self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1))
@@ -1998,6 +2038,7 @@ impl ShellCore {
             return None;
         }
         let (w, h) = (metrics.logical_width, metrics.logical_height);
+        self.library_surface_width.set(w);
         let mut children = vec![
             node(
                 "status-bar",
@@ -2282,19 +2323,22 @@ impl ShellCore {
             ));
             out.extend(content);
         } else if self.route == Route::Library {
+            let geometry = library_geometry(w);
             let games = self
                 .items
                 .iter()
                 .filter(|item| matches!(item.kind, AppKind::Game))
                 .count();
             let other = self.items.len() - games;
+            let compact_toolbar = geometry.columns < 6;
+            let search_width = if compact_toolbar { w - 96.0 } else { 310.0 };
             let mut search = node(
                 "library-search",
                 Role::Button,
                 &format!("Search {} titles", self.items.len()),
                 48.0,
                 112.0,
-                310.0,
+                search_width,
                 52.0,
                 if self.focus == 0 {
                     "--state-focused-ring"
@@ -2317,15 +2361,23 @@ impl ShellCore {
             .into_iter()
             .enumerate()
             {
+                let toolbar_left = if compact_toolbar { 48.0 } else { 374.0 };
+                let toolbar_top = if compact_toolbar { 180.0 } else { 112.0 };
+                let toolbar_width = if compact_toolbar { w - 96.0 } else { w - 422.0 };
+                let chip_width = (toolbar_width
+                    - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
+                    / geometry.toolbar_columns as f32;
+                let chip_column = index % geometry.toolbar_columns;
+                let chip_row = index / geometry.toolbar_columns;
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
                     &label,
-                    374.0 + index as f32 * 194.0,
-                    112.0,
-                    if index == 3 { 230.0 } else { 178.0 },
+                    toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap),
+                    toolbar_top + chip_row as f32 * 68.0,
+                    chip_width,
                     52.0,
                     if focused {
                         "--state-focused-ring"
@@ -2338,21 +2390,13 @@ impl ShellCore {
                 chip.action = Some(NodeAction::Activate);
                 out.push(chip);
             }
-            let columns = if w >= 1100.0 {
-                6
-            } else if w >= 760.0 {
-                4
-            } else {
-                3
-            };
-            let card_width = (w - 96.0 - (columns - 1) as f32 * 16.0) / columns as f32;
             let row_height = 292.0;
-            let card_top = 184.0;
+            let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
             while card_top + (visible_rows + 1) as f32 * row_height - 18.0 <= h {
                 visible_rows += 1;
             }
-            let focused_row = self.focus.saturating_sub(5) / columns;
+            let focused_row = self.focus.saturating_sub(5) / geometry.columns;
             let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
             out.push(node(
                 "library-grid-scroll",
@@ -2367,8 +2411,8 @@ impl ShellCore {
             for (i, &item_index) in self.library_items.iter().enumerate() {
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
-                let column = i % columns;
-                let row = i / columns;
+                let column = i % geometry.columns;
+                let row = i / geometry.columns;
                 let card_label = if item.has_real_art() {
                     String::new()
                 } else {
@@ -2382,9 +2426,9 @@ impl ShellCore {
                     &format!("library-item-{}", item.id),
                     Role::Group,
                     &card_label,
-                    48.0 + column as f32 * (card_width + 16.0),
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
-                    card_width,
+                    geometry.card_width,
                     276.0,
                     state_token(availability, self.focus == i + 5),
                 );
@@ -2395,9 +2439,9 @@ impl ShellCore {
                 card.children = art_nodes(
                     item,
                     "library-card",
-                    48.0 + column as f32 * (card_width + 16.0),
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
-                    card_width,
+                    geometry.card_width,
                     self.focus == i + 5,
                 );
                 out.push(card);
@@ -4708,6 +4752,97 @@ mod tests {
         assert_eq!(core.focus, 4, "top row returns to the nearest chip");
         core.action(&ShellAction::Move(AxisMove::Down));
         assert_eq!(core.focus, 8, "chip enters the nearest grid column");
+    }
+
+    #[test]
+    fn library_grid_navigation_uses_rendered_breakpoint_geometry() {
+        let items = (0..18)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+
+        for (width, columns) in [(640.0, 3), (800.0, 4), (1280.0, 6)] {
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: width,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+            core.focus = 5 + columns - 1;
+            core.action(&ShellAction::Move(AxisMove::Right));
+            assert_eq!(core.focus, 5 + columns - 1, "right edge at {width}px");
+
+            core.focus = 6;
+            core.action(&ShellAction::Move(AxisMove::Right));
+            core.action(&ShellAction::Move(AxisMove::Left));
+            assert_eq!(core.focus, 6, "left/right inverse at {width}px");
+
+            core.action(&ShellAction::Move(AxisMove::Down));
+            assert_eq!(core.focus, 6 + columns, "down at {width}px");
+            core.action(&ShellAction::Move(AxisMove::Up));
+            assert_eq!(core.focus, 6, "up/down inverse at {width}px");
+        }
+    }
+
+    #[test]
+    fn library_toolbar_stays_inside_each_breakpoint_viewport() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+
+        for width in [640.0, 800.0, 1280.0] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let chips = scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("library-filter-"))
+                .collect::<Vec<_>>();
+            assert_eq!(chips.len(), 4);
+            for chip in chips {
+                assert!(
+                    chip.bounds.x >= 0.0,
+                    "{} starts off {width}px",
+                    chip.id.as_str()
+                );
+                assert!(
+                    chip.bounds.x + chip.bounds.width <= width,
+                    "{} ends off {width}px",
+                    chip.id.as_str()
+                );
+            }
+        }
     }
 
     #[test]

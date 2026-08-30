@@ -50,9 +50,10 @@ fn label_text_width(text: &str) -> f32 {
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     label_text_width(label)
+        + 20.0
         + CHIP_HORIZONTAL_PADDING
         + count.map_or(0.0, |value| {
-            CHIP_COUNT_GAP + label_text_width(&value.to_string())
+            CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
         })
 }
 
@@ -3031,6 +3032,7 @@ impl ShellCore {
                 let active = self.library_filter == filter;
                 let chip_height = 36.0;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
+                let label_width = label_text_width(&label) + 20.0;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -3055,9 +3057,7 @@ impl ShellCore {
                         &label,
                         chip.bounds.x + 12.0,
                         chip.bounds.y + 5.0,
-                        chip_width
-                            - CHIP_HORIZONTAL_PADDING
-                            - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_width),
+                        label_width,
                         26.0,
                         chip.style_token.as_str(),
                     )
@@ -3071,9 +3071,9 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width - 12.0 - count_width,
+                            chip.bounds.x + chip_width - 12.0 - count_width - 12.0,
                             chip.bounds.y + 5.0,
-                            count_width,
+                            count_width + 12.0,
                             26.0,
                             chip.style_token.as_str(),
                         )
@@ -3132,15 +3132,16 @@ impl ShellCore {
                         item.title,
                         availability_text(availability, &self.presentation)
                     ),
-                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + (row as f32 - first_visible_row as f32) * row_height,
-                    geometry.card_width,
-                    276.0,
-                    state_token(availability, self.focus == i + 5),
+                    geometry.card_left
+                        + column as f32 * (geometry.card_width + geometry.card_gap)
+                        + 8.0,
+                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    geometry.card_width - 16.0,
+                    136.0,
+                    "--color-surface-canvas",
                 );
                 card.state.focused = self.focus == i + 5;
                 card.state.unavailable = !matches!(availability, Availability::Ready);
-                card.elevation = Elevation::Elev1;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
@@ -3161,15 +3162,27 @@ impl ShellCore {
                     geometry.card_width,
                     None,
                 );
-                card.children
-                    .retain(|child| !child.id.as_str().contains("-title-"));
+                card.children.retain(|child| {
+                    !child.id.as_str().contains("-title-")
+                        && !child.id.as_str().contains("-label-mask-")
+                        && !child.id.as_str().contains("-plate-")
+                });
+                if self.focus == i + 5
+                    && let Some(art) = card
+                        .children
+                        .iter_mut()
+                        .find(|child| child.id.as_str() == format!("library-card-art-{}", item.id))
+                {
+                    art.style_token = "--state-focused-ring".into();
+                    art.state.focused = true;
+                }
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
                         Role::Text,
                         &item.title,
-                        card.bounds.x,
-                        card.bounds.y + 178.0,
+                        card.bounds.x - 8.0,
+                        card.bounds.y + 170.0,
                         geometry.card_width,
                         34.0,
                         "--color-surface-canvas",
@@ -3943,7 +3956,6 @@ impl ShellCore {
                 },
             );
             scene_row.state.focused = focused;
-            scene_row.state.disabled = !interactive;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
             }
@@ -3969,7 +3981,6 @@ impl ShellCore {
                     row_surface,
                 );
                 label.state.focused = focused;
-                label.state.disabled = !interactive;
                 text.push(label);
             }
             if row.id == "accessibility-textScale" {
@@ -3977,28 +3988,49 @@ impl ShellCore {
                     .last()
                     .and_then(|line| line.rsplit_once(" · "))
                     .map_or("100%", |(_, effective)| effective);
+                let control_left = content_left + content_width - 240.0;
+                fills.push(node(
+                    "settings-text-scale-segmented-control",
+                    Role::Group,
+                    "",
+                    control_left,
+                    scene_row.bounds.y + 20.0,
+                    216.0,
+                    34.0,
+                    "--state-rest-surface",
+                ));
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
-                    let x = content_left + content_width - 240.0 + segment as f32 * 72.0;
-                    fills.push(node(
-                        &format!("settings-text-scale-segment-{value}"),
-                        Role::Group,
-                        "",
-                        x,
-                        scene_row.bounds.y + 20.0,
-                        68.0,
-                        34.0,
-                        if selected {
-                            "--color-surface-raised"
-                        } else {
-                            "--color-surface-sunken"
-                        },
-                    ));
+                    let x = control_left + segment as f32 * 72.0;
+                    if selected {
+                        fills.push(node(
+                            &format!("settings-text-scale-selected-{value}"),
+                            Role::Group,
+                            "",
+                            x,
+                            scene_row.bounds.y + 20.0,
+                            72.0,
+                            34.0,
+                            "--color-surface-raised",
+                        ));
+                    }
+                    if segment > 0 {
+                        fills.push(node(
+                            &format!("settings-text-scale-divider-{segment}"),
+                            Role::Group,
+                            "",
+                            x,
+                            scene_row.bounds.y + 20.0,
+                            1.0,
+                            34.0,
+                            "--state-disabled-border",
+                        ));
+                    }
                     let mut value_node = node(
                         &format!("settings-text-scale-value-{value}"),
                         Role::Text,
                         value,
-                        x + 6.0,
+                        x + 8.0,
                         scene_row.bounds.y + 24.0,
                         56.0,
                         26.0,
@@ -4018,14 +4050,14 @@ impl ShellCore {
                     .is_some_and(|line| line.starts_with("ON") || line.starts_with("OFF"))
             {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
-                let control_left = content_left + content_width - 128.0;
+                let control_left = content_left + content_width - 136.0;
                 let mut state_node = node(
                     &format!("settings-toggle-{}-state", row.id),
                     Role::Text,
                     if on { "ON" } else { "OFF" },
                     control_left,
                     scene_row.bounds.y + 24.0,
-                    38.0,
+                    44.0,
                     26.0,
                     row_surface,
                 );
@@ -4035,7 +4067,7 @@ impl ShellCore {
                     &format!("settings-toggle-{}-track", row.id),
                     Role::Group,
                     "",
-                    control_left + 44.0,
+                    control_left + 52.0,
                     scene_row.bounds.y + 25.0,
                     58.0,
                     28.0,
@@ -4049,7 +4081,7 @@ impl ShellCore {
                     &format!("settings-toggle-{}-knob", row.id),
                     Role::Group,
                     "",
-                    control_left + if on { 78.0 } else { 48.0 },
+                    control_left + if on { 86.0 } else { 56.0 },
                     scene_row.bounds.y + 29.0,
                     20.0,
                     20.0,
@@ -4071,7 +4103,6 @@ impl ShellCore {
                     row_surface,
                 );
                 control_node.state.focused = focused;
-                control_node.state.disabled = !interactive;
                 text.push(control_node);
             }
             scene_row.children.extend(fills);
@@ -5321,7 +5352,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("chooser-") && id != "chooser-note" && id != "chooser-scroll-region"
         || id.starts_with("settings-nav-") && !id.ends_with("-label")
         || id.starts_with("settings-row-") && !id.contains("-line-") && !id.ends_with("-control")
-        || id.starts_with("settings-text-scale-segment-")
+        || id == "settings-text-scale-segmented-control"
         || id.starts_with("comfort-")
     {
         Some(RADIUS_M)
@@ -6107,7 +6138,44 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert_eq!(selected_labels, [effective]);
+            assert!(find(scene.root(), "settings-text-scale-segmented-control").is_some());
+            let selected_fills = ["100%", "150%", "200%"]
+                .into_iter()
+                .filter(|value| {
+                    find(
+                        scene.root(),
+                        &format!("settings-text-scale-selected-{value}"),
+                    )
+                    .is_some()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(selected_fills, [effective]);
+            assert!(find(scene.root(), "settings-text-scale-divider-1").is_some());
+            assert!(find(scene.root(), "settings-text-scale-divider-2").is_some());
         }
+    }
+
+    #[test]
+    fn settings_toggle_state_and_disabled_remap_value_are_not_clipped() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        let scene = settings_scene(&core);
+        let off = node_by_id(
+            scene.root(),
+            "settings-toggle-accessibility-highContrast-state",
+        )
+        .unwrap();
+        assert_eq!(off.accessible_label, "OFF");
+        assert!(off.bounds.width >= label_text_width("OFF") + 12.0);
+
+        core.settings_room = SettingsRoom::Controls;
+        let controls = settings_scene(&core);
+        let dash = node_by_id(controls.root(), "settings-row-controls-remap-control").unwrap();
+        let row = node_by_id(controls.root(), "settings-row-controls-remap").unwrap();
+        assert_eq!(dash.accessible_label, "—");
+        assert!(dash.bounds.x + dash.bounds.width <= row.bounds.x + row.bounds.width);
+        assert!(dash.bounds.x >= row.bounds.x + row.bounds.width - 120.0);
     }
 
     #[test]
@@ -6882,7 +6950,7 @@ mod tests {
             .find(|node| node.state.focused)
             .expect("focused item below the initial fold");
         assert_eq!(focused.id.as_str(), "library-item-item-3");
-        assert!((focused.bounds.y - library_geometry(640.0).card_top).abs() < f32::EPSILON);
+        assert!((focused.bounds.y - library_geometry(640.0).card_top - 8.0).abs() < f32::EPSILON);
         assert!(
             !has_fold(&scrolled),
             "fold hides when the final row is fully visible"
@@ -6948,6 +7016,81 @@ mod tests {
         }
         assert!(debug.contains("library-filter-2-count"));
         assert!(debug.contains("library-filter-3-count"));
+    }
+
+    #[test]
+    fn library_cards_are_art_label_and_optional_reason_without_caption_plates() {
+        let unavailable = item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "stream",
+                "setup-game",
+                Availability::NeedsSetup {
+                    reason: "choose a profile".into(),
+                },
+            )],
+        );
+        let mut core = fixture_core(vec![unavailable]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let card = node_by_id(scene.root(), "library-item-setup").unwrap();
+        assert_eq!(card.style_token, "--color-surface-canvas");
+        assert!((card.bounds.height - 136.0).abs() < f32::EPSILON);
+        for required in [
+            "library-card-art-setup",
+            "library-title-setup",
+            "library-card-reason-setup",
+        ] {
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
+        }
+        assert!(card.children.iter().all(|child| {
+            !child.id.as_str().contains("-plate-") && !child.id.as_str().contains("-label-mask-")
+        }));
+        assert_eq!(
+            node_by_id(card, "library-card-reason-setup")
+                .unwrap()
+                .accessible_label,
+            "⊘ Finish setup — choose a profile"
+        );
+    }
+
+    #[test]
+    fn focused_library_search_uses_the_focus_pairing_and_full_placeholder() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        core.focus = 0;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        assert_eq!(search.accessible_label, "⌕  Search 1 titles");
+        assert!(search.state.focused);
+        assert_eq!(search.style_token, "--state-focused-ring");
     }
 
     #[test]
@@ -8539,7 +8682,8 @@ mod tests {
         assert!(
             card.children
                 .iter()
-                .any(|node| node.id.as_str() == "library-card-plate-long")
+                .all(|node| node.id.as_str() != "library-card-plate-long"),
+            "Library captions sit on the canvas without an edition plate"
         );
     }
 
@@ -9397,7 +9541,7 @@ mod tests {
                 10.0 * multiplier
             );
             assert_eq!(
-                find(settings.root(), "settings-text-scale-segment-100%").corner_radius,
+                find(settings.root(), "settings-text-scale-segmented-control").corner_radius,
                 10.0 * multiplier
             );
             assert_eq!(

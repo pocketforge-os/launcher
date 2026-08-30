@@ -21,7 +21,7 @@ fn every_evidence_route_has_rasterized_contrasting_text_ink() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pf-shell"));
         command
             .arg("--offscreen")
-            .args(extra_args)
+            .args(&extra_args)
             .args(["--out", out.path().to_str().unwrap()])
             .env("PF_RASTER_INK_GUARD", "1");
         let run = command.output().unwrap();
@@ -30,6 +30,12 @@ fn every_evidence_route_has_rasterized_contrasting_text_ink() {
             "{}",
             String::from_utf8_lossy(&run.stderr)
         );
+        if extra_args.is_empty() {
+            assert!(
+                out.path().join("search.png").is_file(),
+                "the guarded evidence route set must include Search"
+            );
+        }
     }
 }
 
@@ -112,7 +118,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "f4a71f46d9b93b9338252a7294a5ea04e2fab2cfe11c63cf48b23181efeefd55  ",
         "3d1e9c32a8fdb2eb8d0d3910f8fa9d9f36be2a082d388614722b97dc0a31ab2d  ",
         "4b6d2ffe193bab49a645ed8978d803b354d11884fe22965010d35d712efbfd51  ",
-        "0ffcdd0f704e2dab48c098e046d80edc1ab4afca9858f19a0d0157730f9f57e4  ",
+        "ca93211b27214a9de4ff88159c5da68bd5dbb5b1208c8cb630f06d98b6e4a94f  ",
         "9deb5d54235f106b8e0b314d79dcce0cfbd238f00b8b5b0db915f7fac0b814de  ",
         "ae8bb54e53c8ef6796534eacf0d5a911895836d07701d0e01239d4289a345a67  ",
         "8f87fea4ece796c834f4d1293e83d10eebe961baf1c7624261f213ff8a9a0721  ",
@@ -156,16 +162,16 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("c913508b5a2bbc543bc6d034d5a0e875865013c695ba2537c6c1fad307ed3e67  ")
+        transcript.contains("e381bee34567e1bcb1e7e689167e0db575bc589decd034280d7b9cac0b4f1848  ")
     );
     assert!(
-        transcript.contains("9d32b1bca0ffefbbc9e199ea3facabfa4eb48fb65ba61e4b7eb5f96dfe111e2c  ")
+        transcript.contains("d3be44730f104b4bf9ead7aef2cb66d4d2e8db272aa1c5e3f2510ea9a2755ad0  ")
     );
     assert!(
-        transcript.contains("07d52133220c7b543d7203dd683f25d86f45715b34507a0d60effb279339a023  ")
+        transcript.contains("720a54816daa35f71c59652e0fc8697a07a2de53ea7cc6c85ea2e301b9a597a2  ")
     );
     assert!(
-        transcript.contains("2b7d01de6e8d0ee49bf148b772d08562a9c08524de9ca72c1317819fefe9fa70  ")
+        transcript.contains("dddc642bf719a535cc5b8ace92637bace4f44bdf13f79f6f0bcf786ec0a25e0b  ")
     );
     assert!(
         transcript.contains("f885eede7587428b04680f32bbc0ba9c6cd71204ed2b5d802d31eb2301db576b  ")

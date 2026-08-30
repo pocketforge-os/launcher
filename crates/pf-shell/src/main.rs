@@ -4,8 +4,8 @@ use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
-    ActionEvent, ActionPoll, ActionSource, AppliedNetworkEnabled, AppliedTransferState,
-    AppliedValue, ChangeAuthority, Deadline, EffectivePreference, FakeNetworkPort, FakePowerPort,
+    ActionEvent, ActionPoll, AppliedNetworkEnabled, AppliedTransferState, AppliedValue,
+    ChangeAuthority, Deadline, EffectivePreference, FakeNetworkPort, FakePowerPort,
     FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost, IdlePolicy, LaunchResult,
     MonotonicTime, NetworkError, NetworkPort, NetworkState, NtpState, ObservedSessionState,
     PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult, PreferenceChange,
@@ -21,12 +21,12 @@ use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
-    EvdevActionSource, FavoriteCatalog, GamepadRemap, commit_favorite, commit_pinned_variant,
-    control_bindings, favorite_footer_prompt, footer_prompt, safe_return_options,
+    EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
+    commit_pinned_variant, control_bindings, favorite_footer_prompt, footer_prompt,
+    safe_return_options,
 };
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
-#[cfg(feature = "wayland")]
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::{
@@ -45,6 +45,9 @@ use std::{
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
+// A future input-repeat preference may own these handheld defaults.
+const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
+const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
 const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
@@ -106,49 +109,31 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         })
 }
 
-#[cfg(feature = "wayland")]
 #[derive(Default)]
 struct KeyRepeatScheduler {
     held: BTreeMap<u32, (ShellAction, Duration)>,
 }
 
-#[cfg(feature = "wayland")]
 impl KeyRepeatScheduler {
     fn transition(
         &mut self,
-        event: KeyEvent,
+        code: u32,
+        pressed: bool,
         action: Option<ShellAction>,
         now: Duration,
-        info: RepeatInfo,
+        delay: Duration,
     ) {
-        match event.state {
-            KeyState::Released => {
-                self.held.remove(&event.code);
-            }
-            KeyState::Pressed => {
-                if matches!(action, Some(ShellAction::Move(_)))
-                    && info.rate > 0
-                    && info.delay_ms >= 0
-                {
-                    self.held.insert(
-                        event.code,
-                        (
-                            action.expect("checked focus move"),
-                            now + Duration::from_millis(
-                                u64::try_from(info.delay_ms).expect("non-negative delay"),
-                            ),
-                        ),
-                    );
-                }
-            }
+        if !pressed {
+            self.held.remove(&code);
+        } else if let Some(action @ ShellAction::Move(_)) = action {
+            self.held.insert(code, (action, now + delay));
         }
     }
 
-    fn due(&mut self, now: Duration, info: RepeatInfo) -> Vec<ShellAction> {
-        if info.rate <= 0 {
+    fn due(&mut self, now: Duration, interval: Duration) -> Vec<ShellAction> {
+        if interval.is_zero() {
             return Vec::new();
         }
-        let interval = Duration::from_secs_f64(1.0 / f64::from(info.rate));
         let mut due = Vec::new();
         for (action, next) in self.held.values_mut() {
             while *next <= now {
@@ -157,6 +142,10 @@ impl KeyRepeatScheduler {
             }
         }
         due
+    }
+
+    fn clear(&mut self) {
+        self.held.clear();
     }
 }
 
@@ -457,7 +446,7 @@ fn main() -> Result<(), String> {
         let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
             .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
-        let mut input = EvdevInteractiveInput(&mut actions);
+        let mut input = EvdevInteractiveInput::new(&mut actions);
         return run_interactive(
             &mut host,
             &mut input,
@@ -684,7 +673,23 @@ trait InteractiveInput<H> {
     fn apply_effective_map(&mut self, map: &EffectiveMap);
 }
 
-struct EvdevInteractiveInput<'a>(&'a mut EvdevActionSource);
+struct EvdevInteractiveInput<'a> {
+    source: &'a mut EvdevActionSource,
+    repeat: KeyRepeatScheduler,
+    pending: VecDeque<ShellAction>,
+    started: Instant,
+}
+
+impl<'a> EvdevInteractiveInput<'a> {
+    fn new(source: &'a mut EvdevActionSource) -> Self {
+        Self {
+            source,
+            repeat: KeyRepeatScheduler::default(),
+            pending: VecDeque::new(),
+            started: Instant::now(),
+        }
+    }
+}
 
 impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
     fn next_action(
@@ -692,17 +697,52 @@ impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
         _host: &mut FbdevHost,
         deadline: Deadline,
     ) -> Result<ActionPoll, String> {
-        self.0
-            .next_action(deadline)
-            .map_err(|e| format!("input: {e:?}"))
+        let now = self.started.elapsed();
+        match self.source.next_input_event(deadline) {
+            Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
+                self.repeat.transition(
+                    u32::from(code),
+                    true,
+                    action.clone(),
+                    now,
+                    EVDEV_REPEAT_DELAY,
+                );
+                self.pending.extend(action);
+            }
+            Ok(Some(EvdevInputEvent::Released { code })) => {
+                self.repeat
+                    .transition(u32::from(code), false, None, now, EVDEV_REPEAT_DELAY);
+            }
+            Ok(Some(EvdevInputEvent::ActiveSourceChanged)) => {
+                self.repeat.clear();
+                self.pending.clear();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.repeat.clear();
+                self.pending.clear();
+                return Err(format!("input: {error:?}"));
+            }
+        }
+        self.pending
+            .extend(self.repeat.due(now, EVDEV_REPEAT_INTERVAL));
+        self.pending
+            .pop_front()
+            .map_or(Ok(ActionPoll::DeadlineReached), |action| {
+                Ok(ActionPoll::Event(ActionEvent::Action(action)))
+            })
     }
 
     fn capture_next_button(&mut self) {
-        self.0.capture_next_button();
+        self.repeat.clear();
+        self.pending.clear();
+        self.source.capture_next_button();
     }
 
     fn apply_effective_map(&mut self, map: &EffectiveMap) {
-        self.0.apply_effective_map(map);
+        self.repeat.clear();
+        self.pending.clear();
+        self.source.apply_effective_map(map);
     }
 }
 
@@ -752,22 +792,42 @@ impl WaylandInteractiveInput {
 impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
     fn next_action(&mut self, host: &mut H, _deadline: Deadline) -> Result<ActionPoll, String> {
         if host.is_closed() {
+            self.repeat.clear();
+            self.pending.clear();
             return Ok(ActionPoll::Closed);
         }
         let repeat_info = host.repeat_info().unwrap_or(RepeatInfo {
             rate: 25,
             delay_ms: 600,
         });
+        let repeat_delay = if repeat_info.delay_ms >= 0 {
+            Duration::from_millis(u64::try_from(repeat_info.delay_ms).expect("non-negative delay"))
+        } else {
+            Duration::ZERO
+        };
+        let repeat_interval = if repeat_info.rate > 0 {
+            Duration::from_secs_f64(1.0 / f64::from(repeat_info.rate))
+        } else {
+            Duration::ZERO
+        };
         let now = self.started.elapsed();
         while let Some(event) = host.poll_key_event() {
             let action = effective_keyboard_action(&self.map, event.key, event.keysym);
-            self.repeat
-                .transition(event, action.clone(), now, repeat_info);
+            let repeat_action = (repeat_info.rate > 0 && repeat_info.delay_ms >= 0)
+                .then(|| action.clone())
+                .flatten();
+            self.repeat.transition(
+                event.code,
+                event.state == KeyState::Pressed,
+                repeat_action,
+                now,
+                repeat_delay,
+            );
             if event.state == KeyState::Pressed {
                 self.pending.extend(action);
             }
         }
-        self.pending.extend(self.repeat.due(now, repeat_info));
+        self.pending.extend(self.repeat.due(now, repeat_interval));
         if let Some(action) = self.pending.pop_front() {
             Ok(ActionPoll::Event(ActionEvent::Action(action)))
         } else {
@@ -1737,26 +1797,29 @@ mod durable_tests {
     #[cfg(feature = "wayland")]
     #[test]
     fn repeat_scheduler_uses_fake_time_and_only_repeats_focus_moves() {
-        let info = RepeatInfo {
-            rate: 10,
-            delay_ms: 300,
-        };
         let mut scheduler = KeyRepeatScheduler::default();
         scheduler.transition(
-            key_event(1, 0xff52, KeyState::Pressed, Key::Up),
+            1,
+            true,
             Some(ShellAction::Move(pf_scene::AxisMove::Up)),
             Duration::ZERO,
-            info,
+            Duration::from_millis(300),
         );
         scheduler.transition(
-            key_event(2, 0xff0d, KeyState::Pressed, Key::Enter),
+            2,
+            true,
             Some(ShellAction::Activate),
             Duration::ZERO,
-            info,
+            Duration::from_millis(300),
         );
-        assert!(scheduler.due(Duration::from_millis(299), info).is_empty());
+        let interval = Duration::from_millis(100);
+        assert!(
+            scheduler
+                .due(Duration::from_millis(299), interval)
+                .is_empty()
+        );
         assert_eq!(
-            scheduler.due(Duration::from_millis(500), info),
+            scheduler.due(Duration::from_millis(500), interval),
             vec![
                 ShellAction::Move(pf_scene::AxisMove::Up),
                 ShellAction::Move(pf_scene::AxisMove::Up),
@@ -1764,12 +1827,73 @@ mod durable_tests {
             ]
         );
         scheduler.transition(
-            key_event(1, 0xff52, KeyState::Released, Key::Up),
+            1,
+            false,
             None,
             Duration::from_millis(501),
-            info,
+            Duration::from_millis(300),
         );
-        assert!(scheduler.due(Duration::from_secs(1), info).is_empty());
+        assert!(scheduler.due(Duration::from_secs(1), interval).is_empty());
+    }
+
+    #[test]
+    fn evdev_repeat_defaults_hold_release_and_device_loss_are_deterministic() {
+        let mut scheduler = KeyRepeatScheduler::default();
+        scheduler.transition(
+            103,
+            true,
+            Some(ShellAction::Move(pf_scene::AxisMove::Up)),
+            Duration::ZERO,
+            EVDEV_REPEAT_DELAY,
+        );
+        scheduler.transition(
+            304,
+            true,
+            Some(ShellAction::Activate),
+            Duration::ZERO,
+            EVDEV_REPEAT_DELAY,
+        );
+
+        assert!(
+            scheduler
+                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
+            vec![
+                ShellAction::Move(pf_scene::AxisMove::Up),
+                ShellAction::Move(pf_scene::AxisMove::Up),
+                ShellAction::Move(pf_scene::AxisMove::Up),
+            ]
+        );
+
+        scheduler.transition(
+            103,
+            false,
+            None,
+            Duration::from_millis(561),
+            EVDEV_REPEAT_DELAY,
+        );
+        assert!(
+            scheduler
+                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
+
+        scheduler.transition(
+            108,
+            true,
+            Some(ShellAction::Move(pf_scene::AxisMove::Down)),
+            Duration::from_secs(2),
+            EVDEV_REPEAT_DELAY,
+        );
+        scheduler.clear();
+        assert!(
+            scheduler
+                .due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "wayland")]
@@ -1829,7 +1953,12 @@ mod durable_tests {
                 .unwrap(),
             ActionPoll::DeadlineReached
         );
-        assert!(input.repeat.due(Duration::from_secs(2), info).is_empty());
+        assert!(
+            input
+                .repeat
+                .due(Duration::from_secs(2), Duration::from_millis(100))
+                .is_empty()
+        );
     }
 
     #[test]

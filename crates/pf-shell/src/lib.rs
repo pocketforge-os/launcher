@@ -37,6 +37,18 @@ pub struct EvdevActionSource {
     announced: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EvdevInputEvent {
+    ActiveSourceChanged,
+    Pressed {
+        code: u16,
+        action: Option<ShellAction>,
+    },
+    Released {
+        code: u16,
+    },
+}
+
 fn evdev_grab_enabled(no_grab: bool, is_character_device: bool) -> bool {
     !no_grab && is_character_device
 }
@@ -127,12 +139,38 @@ impl EvdevActionSource {
 }
 
 impl ActionSource for EvdevActionSource {
-    fn next_action(&mut self, _deadline: Deadline) -> Result<ActionPoll, ActionSourceError> {
+    fn next_action(&mut self, deadline: Deadline) -> Result<ActionPoll, ActionSourceError> {
+        match self.next_input_event(deadline)? {
+            Some(EvdevInputEvent::ActiveSourceChanged) => Ok(ActionPoll::Event(
+                ActionEvent::ActiveSourceChanged(Some(self.source.clone())),
+            )),
+            Some(EvdevInputEvent::Pressed {
+                action: Some(action),
+                ..
+            }) => Ok(ActionPoll::Event(ActionEvent::Action(action))),
+            Some(EvdevInputEvent::Pressed { .. } | EvdevInputEvent::Released { .. }) | None => {
+                Ok(ActionPoll::DeadlineReached)
+            }
+        }
+    }
+}
+
+impl EvdevActionSource {
+    /// Polls one physical key transition, including releases needed by repeat schedulers.
+    ///
+    /// # Errors
+    /// Returns [`ActionSourceError::Unavailable`] when the device or its grab is lost, and
+    /// [`ActionSourceError::CorruptSequence`] when an incomplete event record is read.
+    ///
+    /// # Panics
+    /// Panics only if the internally allocated native `input_event` record has an invalid size.
+    pub fn next_input_event(
+        &mut self,
+        _deadline: Deadline,
+    ) -> Result<Option<EvdevInputEvent>, ActionSourceError> {
         if !self.announced {
             self.announced = true;
-            return Ok(ActionPoll::Event(ActionEvent::ActiveSourceChanged(Some(
-                self.source.clone(),
-            ))));
+            return Ok(Some(EvdevInputEvent::ActiveSourceChanged));
         }
         let mut descriptors = [rustix::event::PollFd::new(
             &self.file,
@@ -149,7 +187,7 @@ impl ActionSource for EvdevActionSource {
         )
         .map_err(|_| ActionSourceError::Unavailable)?;
         if ready == 0 {
-            return Ok(ActionPoll::DeadlineReached);
+            return Ok(None);
         }
         if !descriptors[0]
             .revents()
@@ -178,16 +216,21 @@ impl ActionSource for EvdevActionSource {
             if self.capture_next {
                 self.capture_next = false;
                 if let Some(control) = self.control_by_code.get(&code) {
-                    return Ok(ActionPoll::Event(ActionEvent::Action(ShellAction::Custom(
-                        format!("Capture.{control}"),
-                    ))));
+                    return Ok(Some(EvdevInputEvent::Pressed {
+                        code,
+                        action: Some(ShellAction::Custom(format!("Capture.{control}"))),
+                    }));
                 }
             }
-            if let Some(action) = self.by_code.get(&code) {
-                return Ok(ActionPoll::Event(ActionEvent::Action(action.clone())));
-            }
+            return Ok(Some(EvdevInputEvent::Pressed {
+                code,
+                action: self.by_code.get(&code).cloned(),
+            }));
         }
-        Ok(ActionPoll::DeadlineReached)
+        if event_type == 1 && value == 0 {
+            return Ok(Some(EvdevInputEvent::Released { code }));
+        }
+        Ok(None)
     }
 }
 

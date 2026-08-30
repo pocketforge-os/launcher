@@ -443,6 +443,7 @@ pub struct ShellCore {
     crash_exit_detail: String,
     recovery_available: bool,
     authority_unavailable: bool,
+    safe_return_failed: bool,
     session_status: Option<String>,
     pending_ack: bool,
     just_returned: bool,
@@ -565,6 +566,7 @@ impl ShellCore {
             crash_exit_detail: String::new(),
             recovery_available: false,
             authority_unavailable: false,
+            safe_return_failed: false,
             session_status: None,
             pending_ack: false,
             just_returned: false,
@@ -1214,11 +1216,15 @@ impl ShellCore {
     }
     #[must_use]
     pub const fn authority_unavailable(&self) -> bool {
-        self.authority_unavailable
+        self.authority_unavailable || self.safe_return_failed
     }
     #[must_use]
     pub fn session_status(&self) -> Option<&str> {
-        self.session_status.as_deref()
+        if self.safe_return_failed {
+            Some("The session service isn't reachable; Safe Return can retry")
+        } else {
+            self.session_status.as_deref()
+        }
     }
     #[must_use]
     pub const fn session_active(&self) -> bool {
@@ -1244,6 +1250,16 @@ impl ShellCore {
         self.authority_unavailable = true;
         self.session_status =
             Some("The session service isn't reachable; Safe Return can retry".into());
+    }
+    pub fn safe_return_failed(&mut self) {
+        self.bump_revision();
+        self.safe_return_failed = true;
+    }
+    pub fn safe_return_succeeded(&mut self) {
+        if self.safe_return_failed {
+            self.bump_revision();
+        }
+        self.safe_return_failed = false;
     }
     pub fn session_backend_reachable(&mut self) {
         if self.authority_unavailable || self.session_status.is_some() {
@@ -1864,6 +1880,9 @@ impl ShellCore {
     }
     pub fn session_event(&mut self, event: &SessionEvent) {
         self.bump_revision();
+        if matches!(event, SessionEvent::Terminal(_)) {
+            self.safe_return_failed = false;
+        }
         match event {
             SessionEvent::Observed(ObservedSessionState::Starting) => {
                 self.presentation = Presentation::Starting
@@ -1940,7 +1959,7 @@ impl ShellCore {
             node(
                 "status-cluster",
                 Role::Text,
-                if self.authority_unavailable {
+                if self.authority_unavailable() {
                     "Wi-Fi   82%   !   9:41"
                 } else {
                     "Wi-Fi   82%   9:41"
@@ -1952,7 +1971,7 @@ impl ShellCore {
                 "--color-text-secondary",
             ),
         ];
-        if let Some(status) = &self.session_status {
+        if let Some(status) = self.session_status() {
             children.push(node(
                 "session-status",
                 Role::Text,

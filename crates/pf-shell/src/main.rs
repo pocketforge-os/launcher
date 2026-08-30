@@ -1580,8 +1580,11 @@ fn request_safe_return_if_active(core: &mut ShellCore, session: &SessionClient<S
         return;
     }
     match session.safe_return() {
-        Ok(()) => core.session_backend_reachable(),
-        Err(_) => core.active_session_backend_unavailable(),
+        Ok(()) => {
+            core.safe_return_succeeded();
+            core.session_backend_reachable();
+        }
+        Err(_) => core.safe_return_failed(),
     }
 }
 
@@ -1994,6 +1997,64 @@ mod durable_tests {
         }));
         assert!(!core.session_active());
         assert_eq!(core.presentation(), &pf_shell_core::Presentation::Returned);
+    }
+
+    #[test]
+    fn safe_return_failure_survives_successful_events_poll_until_session_ends() {
+        use std::os::unix::net::UnixListener;
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut failed_stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut failed_stream).unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap(),
+                pf_session_authority::RpcRequest::SafeReturn
+            ));
+            drop(failed_stream);
+
+            for expected in ["history", "events", "history"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let body = pf_wire::read_frame(&mut stream).unwrap();
+                let request =
+                    serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap();
+                let response = match (expected, request) {
+                    ("history", pf_session_authority::RpcRequest::History) => {
+                        pf_session_authority::RpcResponse::History { entries: vec![] }
+                    }
+                    ("events", pf_session_authority::RpcRequest::Events { .. }) => {
+                        pf_session_authority::RpcResponse::Events { events: vec![] }
+                    }
+                    (_, request) => panic!("unexpected {expected} request: {request:?}"),
+                };
+                pf_wire::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap()).unwrap();
+            }
+        });
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "session-1".into(),
+        });
+        let mut session = SessionClient::new("test", SocketTransport::connect(&socket));
+
+        request_safe_return_if_active(&mut core, &session);
+        drive_socket_session(&mut core, &mut session).unwrap();
+        server.join().unwrap();
+        assert!(core.authority_unavailable());
+        assert_eq!(
+            redraw_state(&core).3.as_deref(),
+            Some("The session service isn't reachable; Safe Return can retry"),
+            "the state used to decide and present the follow-up frame must keep the note"
+        );
+
+        core.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "session-1".into(),
+        }));
+        assert!(!core.authority_unavailable());
+        assert_eq!(core.session_status(), None);
     }
 
     #[test]

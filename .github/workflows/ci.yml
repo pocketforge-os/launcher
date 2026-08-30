@@ -17,6 +17,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Soak desktop launch and return against real authority
+        run: ./scripts/desktop-sim-soak.sh
       - name: Install Wayland keyboard dependency
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - run: cargo test -p pf-shell --features wayland --locked

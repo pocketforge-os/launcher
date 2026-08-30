@@ -466,7 +466,7 @@ fn main() -> Result<(), String> {
     }
     #[cfg(feature = "wayland")]
     if args.iter().any(|a| a == "--wayland") {
-        let mut host = WaylandHost::connect().map_err(|e| e.to_string())?;
+        let mut host = WaylandHost::connect_with_size(1280, 720).map_err(|e| e.to_string())?;
         let mut input = WaylandInteractiveInput::new(glyphs.clone());
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         return run_interactive(

@@ -23,6 +23,7 @@ use pf_ports::{
 };
 use pf_scene::{
     AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
+    TypeRole,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
@@ -2152,16 +2153,19 @@ impl ShellCore {
             },
             Route::Quick => unreachable!(),
         };
-        out.push(node(
-            "route-heading",
-            Role::Heading,
-            heading,
-            48.0,
-            112.0,
-            500.0,
-            48.0,
-            "--state-rest-text",
-        ));
+        out.push(
+            node(
+                "route-heading",
+                Role::Heading,
+                heading,
+                48.0,
+                112.0,
+                500.0,
+                48.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Eyebrow),
+        );
         if self.route == Route::Home {
             let heading = out.pop().expect("Home route heading was just added");
             let focused = self
@@ -2177,8 +2181,10 @@ impl ShellCore {
                     144.0,
                     w - 96.0,
                     72.0,
-                    "--state-rest-text",
-                ),
+                    "--color-surface-canvas",
+                )
+                .with_type_role(TypeRole::Hero)
+                .with_line_height(1.04),
                 node(
                     "hero-status",
                     Role::Text,
@@ -2191,12 +2197,9 @@ impl ShellCore {
                     224.0,
                     480.0,
                     32.0,
-                    if matches!(self.presentation, Presentation::Starting) {
-                        "--color-text-muted"
-                    } else {
-                        "--color-status-ready"
-                    },
-                ),
+                    "--color-surface-canvas",
+                )
+                .with_type_role(TypeRole::Label),
             ];
             if self.presentation == Presentation::ForcedClose {
                 content.push(node(
@@ -2210,16 +2213,19 @@ impl ShellCore {
                     "--color-status-attention",
                 ));
             }
-            content.push(node(
-                "home-shelf-label",
-                Role::Heading,
-                "RECENT",
-                48.0,
-                344.0,
-                220.0,
-                28.0,
-                "--color-text-muted",
-            ));
+            content.push(
+                node(
+                    "home-shelf-label",
+                    Role::Heading,
+                    "RECENT",
+                    48.0,
+                    344.0,
+                    220.0,
+                    28.0,
+                    "--color-surface-canvas",
+                )
+                .with_type_role(TypeRole::Eyebrow),
+            );
             let count = self.items.len().min(HOME_SHELF_LIMIT);
             let gap = 16.0;
             let card_width = ((w - 96.0 - gap * count.saturating_sub(1) as f32)
@@ -2268,7 +2274,7 @@ impl ShellCore {
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
                 Role::Group,
-                "Home content scroll region",
+                "",
                 Bounds::new(
                     0.0,
                     STATUS_BAR_HEIGHT,
@@ -3442,31 +3448,39 @@ fn procedural_art_nodes(
         ),
     ];
     if let Some(edition) = edition {
-        nodes.push(node(
-            &format!("{context}-plate-{id}"),
-            Role::Text,
-            edition,
-            if favorite { x + 68.0 } else { x + 12.0 },
-            kind_y,
-            if favorite { width - 72.0 } else { width - 24.0 },
-            if favorite { 20.0 } else { 24.0 },
-            token,
-        ));
+        nodes.push(
+            node(
+                &format!("{context}-plate-{id}"),
+                Role::Text,
+                edition,
+                if favorite { x + 68.0 } else { x + 12.0 },
+                kind_y,
+                if favorite { width - 72.0 } else { width - 24.0 },
+                if favorite { 20.0 } else { 24.0 },
+                token,
+            )
+            .with_type_role(TypeRole::Plate),
+        );
     }
-    nodes.push(node(
-        &format!("{context}-title-{id}"),
-        Role::Text,
-        title,
-        if favorite { x + 68.0 } else { x },
-        label_y,
-        if favorite { width - 72.0 } else { width },
-        if favorite { 32.0 } else { 28.0 },
-        if focused {
-            "--state-focused-text"
-        } else {
-            "--color-text-secondary"
-        },
-    ));
+    nodes.push(
+        node(
+            &format!("{context}-title-{id}"),
+            Role::Text,
+            title,
+            if favorite { x + 68.0 } else { x },
+            label_y,
+            if favorite { width - 72.0 } else { width },
+            if favorite { 32.0 } else { 28.0 },
+            if context == "home-card" {
+                "--color-surface-canvas"
+            } else if focused {
+                "--state-focused-text"
+            } else {
+                "--color-text-secondary"
+            },
+        )
+        .with_type_role(TypeRole::Label),
+    );
     nodes
 }
 
@@ -3517,7 +3531,8 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 if favorite { width - 72.0 } else { width - 24.0 },
                 if favorite { 20.0 } else { 24.0 },
                 "--state-rest-surface",
-            ),
+            )
+            .with_type_role(TypeRole::Plate),
             node(
                 &format!("{context}-title-{}", item.id),
                 Role::Text,
@@ -3526,12 +3541,15 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 label_y,
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                if focused {
+                if context == "home-card" {
+                    "--color-surface-canvas"
+                } else if focused {
                     "--state-focused-text"
                 } else {
                     "--color-text-secondary"
                 },
-            ),
+            )
+            .with_type_role(TypeRole::Label),
         ];
     }
     procedural_art_nodes(
@@ -4987,6 +5005,28 @@ mod tests {
         ] {
             assert_eq!(find(scene.root(), id).map(|node| node.role), Some(role));
         }
+        for (id, type_role) in [
+            ("route-heading", TypeRole::Eyebrow),
+            ("hero-title", TypeRole::Hero),
+            ("hero-status", TypeRole::Label),
+            ("home-shelf-label", TypeRole::Eyebrow),
+        ] {
+            assert_eq!(
+                find(scene.root(), id).map(|node| node.type_role),
+                Some(type_role)
+            );
+        }
+        let scroll_region = find(scene.root(), "home-scroll-region").unwrap();
+        assert!(
+            scroll_region.accessible_label.is_empty(),
+            "structural region metadata must not become rasterizable label content"
+        );
+        assert!(
+            !scene
+                .root()
+                .accessible_label
+                .contains("Home content scroll region")
+        );
         for id in ["ridge", "tides"] {
             for (part, role) in [
                 ("art", Role::Group),
@@ -5001,6 +5041,15 @@ mod tests {
                     "missing Home card anatomy node {node_id}"
                 );
             }
+            assert_eq!(
+                find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
+                Some(TypeRole::Plate)
+            );
+            assert_eq!(
+                find(scene.root(), &format!("home-card-title-{id}"))
+                    .map(|node| (node.type_role, node.style_token.as_str())),
+                Some((TypeRole::Label, "--color-surface-canvas"))
+            );
         }
     }
 

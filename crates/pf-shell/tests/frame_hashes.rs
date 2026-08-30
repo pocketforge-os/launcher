@@ -1,7 +1,6 @@
 use std::process::Command;
 
-#[test]
-fn vertical_slice_frame_hashes_are_stable() {
+fn render_offscreen() -> (tempfile::TempDir, String) {
     let out = tempfile::tempdir().unwrap();
     let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
         .args(["--offscreen", "--out", out.path().to_str().unwrap()])
@@ -12,23 +11,61 @@ fn vertical_slice_frame_hashes_are_stable() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let lines = String::from_utf8(run.stdout).unwrap();
+    (out, String::from_utf8(run.stdout).unwrap())
+}
+
+#[test]
+fn rendered_home_uses_shaped_hero_glyphs_without_a_solid_text_slab() {
+    let (out, _) = render_offscreen();
+    let decoder = png::Decoder::new(std::fs::File::open(out.path().join("boot-home.png")).unwrap());
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let pixels = &pixels[..info.buffer_size()];
+    assert_eq!((info.width, info.height), (1280, 720));
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+
+    let stride = info.width as usize * 4;
+    let canvas = &pixels[100 * stride + 10 * 4..100 * stride + 10 * 4 + 4];
+    let mut ink = 0_usize;
+    let mut canvas_pixels = 0_usize;
+    for y in 144..216 {
+        for x in 48..1232 {
+            let offset = y * stride + x * 4;
+            if &pixels[offset..offset + 4] == canvas {
+                canvas_pixels += 1;
+            } else {
+                ink += 1;
+            }
+        }
+    }
+    let area = 72 * 1184;
+    assert!(ink > 100, "hero title must produce visible glyph ink");
+    assert!(
+        canvas_pixels > area * 3 / 4,
+        "hero title must be sparse shaped glyphs, not a solid extent rectangle"
+    );
+}
+
+#[test]
+fn vertical_slice_frame_hashes_are_stable() {
+    let (_out, lines) = render_offscreen();
     for expected in [
-        "25e81439ea858d1a863fd7640c165b4ffa78ffdee47af2e2d6c2de38324d6cb5  ",
-        "53887481b035321bbde2d902c7d56461674b856e0d44442e99882824fb13dd49  ",
-        "08d497c16f3511f7abc6b7664a520daf7c990017b3c7ee7e1de6b4e03bf72a2a  ",
-        "53887481b035321bbde2d902c7d56461674b856e0d44442e99882824fb13dd49  ",
-        "e918cb5bdef79ff59ff74dc80816a097a5ddea2f72c3d0150dfdb6129e6aa5a0  ",
-        "accc43e0b8f6cc52b6501d2376f30404e5946109e75335ed28b7c439a792ff5f  ",
-        "84fdeb3db0c9dd4143732c39251da322cc3616afe38702e147de8e95495c0c93  ",
-        "2074069911e03f056d02cf323bac74888d96f6e9b9f39fefc9be55d4862dd1f8  ",
-        "9e06259a9514ed99c08777d3b11be2b350828b5846f596a44e866a996548e9bb  ",
+        "d5adc836135159caf9ce62aad45f3a283e0a14ec82e95f4d48eeba26c6298d9c  ",
+        "9105ec8978cfd89948fc380cbf5128e0520aab13426cd881abbee54284f7417e  ",
+        "2e07811a3b7f98becdb757c9dc0cea2b33d27690f7f032a87a95832dba1ccfcf  ",
+        "81914dc5e21c977dbe00c98fc3baa348e01fb433b4ca77a0ea797d4c0f720218  ",
+        "28490456a795300b745cd9e01b6a26e2b92dbe40d6409c7090945a84b0efdb6e  ",
+        "94c50c67b5627e9f7fa4716dc7ce933d8054ba3e7c74a4f460ed2dcff0ea8dee  ",
+        "cae2da9b528958a28475468afd08c0fe0ef0d996e02ef4e5f0aa8820e7e9d486  ",
+        "86facf30fed289e73ad1b6c5753fbdb6c8358731d8ed2c3f2f5157ed2cad1295  ",
+        "3bc2c66fb218042edb7660a04aa70e5ff047fb34ae294f6d1f98dc4d51b09c55  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("5388748"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("9105ec8"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("5388748"),
+        lines.lines().nth(3).unwrap().starts_with("81914dc"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -61,19 +98,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("40004562ab402d3ec8caa9a0929b0379ce011435ae36e8d528b93fec965dfda4  ")
+        transcript.contains("55df39487a518c5e70cf885ee36774d8bae3ed94fbc5a6e8f695d2e02c82b90d  ")
     );
     assert!(
-        transcript.contains("c7d54ee2de89e3f467af1ee47d5051336b9dc7dbc2d773d44fd31e06144d4418  ")
+        transcript.contains("839c9ceb1aa07ed6417659685a9de4e92f40af8a2f190919475a6c0b7f8a8a12  ")
     );
     assert!(
-        transcript.contains("fdaf390ba94bc4e39d66f42eb06b2dc97d54263fa448260600b237719e8d67bf  ")
+        transcript.contains("94232ec020a3a0ff5e341987dff67cf214ad6aabbc2c1a08424b6d944b7956c7  ")
     );
     assert!(
-        transcript.contains("3aa69c288d3761ab161c2c1b90ce8d51c335dc1753b072385ddc47df0176555b  ")
+        transcript.contains("0187488f1031c473a78a83b0a850785c80cfa93bf39f1ad4337671b654dccfa1  ")
     );
     assert!(
-        transcript.contains("677fe72dd1a209e63cf00dba25d04436d4f7a80e93bb415a67926f1f02ed5db2  ")
+        transcript.contains("9463bbbc9578fe8c9f208e6c6d380aee1d14d8796d8e1b339109e12bca3fae22  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());
@@ -101,6 +138,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("8fc57858be546f509a87350f50155592a2369dd9de671bba8fa1d6e6f1eeb5f5  ")
+        transcript.contains("1ca57d38a0a57afa633d87522877f9a48dea22f2e67cb58f7fe9c412597f4261  ")
     );
 }

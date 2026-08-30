@@ -16,7 +16,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{RasterFrame, RenderNote};
+use pf_render::{Palette, RasterFrame, RenderNote};
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -1640,6 +1640,11 @@ fn present(
     core: &mut ShellCore,
     prompt: &str,
 ) -> Result<(), String> {
+    host.set_palette(if core.high_contrast() {
+        Palette::high_contrast()
+    } else {
+        Palette::standard()
+    });
     host.present(
         core.scene(host.metrics(), prompt)
             .as_ref()
@@ -2589,6 +2594,55 @@ exec="./launch"
             Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
         ));
         assert!(host.frame().unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn high_contrast_preference_changes_rendered_palette_in_same_redraw() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let mut host = OffscreenHost::new(metrics);
+        let palette_probe = || {
+            let root = pf_scene::Node::new(
+                pf_scene::NodeId::new("palette-probe").unwrap(),
+                pf_scene::Role::Text,
+                "Palette",
+                pf_scene::Bounds::new(16.0, 16.0, 160.0, 48.0),
+                "--color-surface-canvas",
+            );
+            pf_scene::Scene::new(root, pf_scene::NodeId::new("palette-probe").unwrap()).unwrap()
+        };
+
+        present(&mut host, &mut core, "A Open").unwrap();
+        host.present(&palette_probe()).unwrap();
+        let standard = host.frame().unwrap();
+        assert_eq!(&standard.rgba[..3], &[13, 17, 23]);
+
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("highContrast".into()),
+            effective: PreferenceValue::Bool(true),
+            stored: PreferenceValue::Bool(true),
+            applied: true,
+        });
+        present(&mut host, &mut core, "A Open").unwrap();
+        host.present(&palette_probe()).unwrap();
+        let high_contrast = host.frame().unwrap();
+        assert_eq!(&high_contrast.rgba[..3], &[0, 0, 0]);
+        assert!(
+            high_contrast
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [255, 255, 255]),
+            "high-contrast label text should contain a white pixel"
+        );
     }
 
     #[test]

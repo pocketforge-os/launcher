@@ -61,7 +61,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("0c93216b0126acff1a6097034338defc86c73b242eaf54be79417fee8e2f3736  ")
+        transcript.contains("8c219ffa1a5d1fecb5a04b2ffa12ce3f6ab5a10d12942cc3a39b665549e906b4  ")
     );
     assert!(
         transcript.contains("89aff19d00e5c2de5c5e7a3d8c83bc0b5341df963e1b55c839a334db809db6b0  ")
@@ -73,7 +73,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("386de425da34d23814ef155b20adc33198b9170d14865298be102ca7fb0a56c9  ")
     );
     assert!(
-        transcript.contains("56ca3935dd18cac7637771022b31cc0099415b1f4fa87bd4b02f9bd1a73927e9  ")
+        transcript.contains("bc5c6597d77cd4fd749b11329b82110530f4e672cd5f8db05e9520a71ad3af4b  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());

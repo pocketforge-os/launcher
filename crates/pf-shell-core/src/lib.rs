@@ -25,7 +25,7 @@ use pf_scene::{
     AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
-use pf_theme::Theme;
+use pf_theme::{Base, Theme};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -446,6 +446,8 @@ pub struct ShellCore {
     pending_ack: bool,
     just_returned: bool,
     motion_ms: u32,
+    normal_motion_ms: u32,
+    env_reduced_motion: bool,
     reduced_motion: bool,
     high_contrast: bool,
     reduce_flashing: bool,
@@ -479,6 +481,23 @@ pub struct ShellCore {
 }
 
 impl ShellCore {
+    fn preference_is_applied(key: &str) -> bool {
+        matches!(key, "highContrast" | "reduceMotion")
+    }
+
+    fn preference_label(row: &DisplayPreference) -> String {
+        let value = match &row.effective {
+            PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
+            PreferenceValue::Text(value) => value.clone(),
+            PreferenceValue::Integer(value) => value.to_string(),
+        };
+        if Self::preference_is_applied(row.key) {
+            format!("{} · {value}", row.label)
+        } else {
+            format!("{} · {value} · not applied on this build", row.label)
+        }
+    }
+
     #[must_use]
     pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
         Self::boot_with_art(snapshot, theme, reduced_motion, |_| None)
@@ -552,6 +571,11 @@ impl ShellCore {
                 .resolve_motion("launch", reduced_motion)
                 .expect("motion.launch")
                 .duration_ms,
+            normal_motion_ms: theme
+                .resolve_motion("launch", false)
+                .expect("motion.launch")
+                .duration_ms,
+            env_reduced_motion: reduced_motion,
             reduced_motion,
             high_contrast: false,
             reduce_flashing: false,
@@ -903,13 +927,14 @@ impl ShellCore {
 
     fn apply_effective(&mut self, key: &str, value: &PreferenceValue) {
         match (key, value) {
-            ("textScale", PreferenceValue::Text(value)) => {
-                self.text_scale = value.trim_end_matches('%').parse().unwrap_or(100)
-            }
             ("highContrast", PreferenceValue::Bool(value)) => self.high_contrast = *value,
             ("reduceMotion", PreferenceValue::Bool(value)) => {
-                self.reduced_motion = *value;
-                self.motion_ms = if *value { 0 } else { 180 };
+                self.reduced_motion = self.env_reduced_motion || *value;
+                self.motion_ms = if self.reduced_motion {
+                    0
+                } else {
+                    self.normal_motion_ms
+                };
             }
             ("reduceFlashing", PreferenceValue::Bool(value)) => self.reduce_flashing = *value,
             _ => {}
@@ -969,6 +994,14 @@ impl ShellCore {
     #[must_use]
     pub const fn high_contrast(&self) -> bool {
         self.high_contrast
+    }
+    #[must_use]
+    pub const fn theme_base(&self) -> Base {
+        if self.high_contrast {
+            Base::HighContrast
+        } else {
+            Base::Dark
+        }
     }
     #[must_use]
     pub const fn reduce_flashing(&self) -> bool {
@@ -2645,20 +2678,9 @@ impl ShellCore {
                 .display_preferences
                 .iter()
                 .map(|row| {
-                    let value = match &row.effective {
-                        PreferenceValue::Bool(v) => {
-                            if *v {
-                                "On".into()
-                            } else {
-                                "Off".into()
-                            }
-                        }
-                        PreferenceValue::Text(v) => v.clone(),
-                        PreferenceValue::Integer(v) => v.to_string(),
-                    };
                     (
                         if row.interactive {
-                            format!("{} · {value}", row.label)
+                            Self::preference_label(row)
                         } else {
                             format!("{} · — Not supported on this device", row.label)
                         },
@@ -2938,15 +2960,10 @@ impl ShellCore {
         ));
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
-            let value = match &row.effective {
-                PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
-                PreferenceValue::Text(value) => value.clone(),
-                PreferenceValue::Integer(value) => value.to_string(),
-            };
             let mut n = node(
                 &format!("comfort-{i}"),
                 Role::Button,
-                &format!("{} · {value}", row.label),
+                &Self::preference_label(row),
                 w / 2.0 - 340.0,
                 180.0 + i as f32 * 64.0,
                 680.0,
@@ -3627,7 +3644,11 @@ mod tests {
             PreferenceChangeResult::Accepted
         );
         c.drive_preferences(&mut port).unwrap();
-        assert_eq!(c.text_scale(), 150);
+        assert_eq!(c.text_scale(), 100);
+        assert!(
+            format!("{:?}", settings_scene(&c))
+                .contains("Text size · 150% · not applied on this build")
+        );
 
         let mut unsupported = core();
         unsupported
@@ -4038,15 +4059,10 @@ mod tests {
                 applied: true,
             });
         }
-        assert_eq!(
-            (
-                c.text_scale(),
-                c.high_contrast(),
-                c.reduced_motion(),
-                c.reduce_flashing()
-            ),
-            (200, true, true, true)
-        );
+        assert_eq!(c.text_scale(), 100);
+        assert_eq!(c.theme_base(), Base::HighContrast);
+        assert!(c.reduced_motion());
+        assert!(c.reduce_flashing());
         c.action(&ShellAction::Custom("Start".into()));
         assert_eq!(c.presentation(), &Presentation::Ready);
         c.load_preferences(&preferences(true), true).unwrap();
@@ -4076,6 +4092,65 @@ mod tests {
         let after = format!("{:?}", settings_scene(&core));
         assert!(after.contains("Reduce motion · On"));
         assert!(!after.contains("Reduce motion · Off"));
+    }
+
+    #[test]
+    fn accessibility_rows_distinguish_applied_and_stored_only_values() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), false).unwrap();
+        let scene = format!("{:?}", settings_scene(&core));
+        assert!(scene.contains("High contrast · Off"));
+        assert!(!scene.contains("High contrast · Off · not applied"));
+        assert!(scene.contains("Reduce motion · Off"));
+        assert!(scene.contains("Reduce flashing · Off · not applied on this build"));
+        assert!(scene.contains("Text size · 100% · not applied on this build"));
+    }
+
+    #[test]
+    fn high_contrast_selects_theme_base() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        assert_eq!(core.theme_base(), Base::Dark);
+
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("highContrast".into()),
+            effective: PreferenceValue::Bool(true),
+            stored: PreferenceValue::Bool(true),
+            applied: true,
+        });
+        assert_eq!(core.theme_base(), Base::HighContrast);
+        assert_ne!(
+            pf_theme::flagship()
+                .resolve(Base::Dark, "--color-surface-canvas")
+                .unwrap(),
+            pf_theme::flagship()
+                .resolve(Base::HighContrast, "--color-surface-canvas")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reduced_motion_is_preference_or_environment_override() {
+        let mut env_override = ShellCore::boot(&snapshot(), &pf_theme::flagship(), true);
+        env_override
+            .load_preferences(&preferences(true), true)
+            .unwrap();
+        assert!(env_override.reduced_motion());
+        assert_eq!(env_override.motion_duration_ms(), 0);
+
+        let mut preference = core();
+        preference
+            .load_preferences(&preferences(true), true)
+            .unwrap();
+        assert!(!preference.reduced_motion());
+        preference.preference_changed(&EffectivePreference {
+            key: PreferenceKey("reduceMotion".into()),
+            effective: PreferenceValue::Bool(true),
+            stored: PreferenceValue::Bool(true),
+            applied: true,
+        });
+        assert!(preference.reduced_motion());
+        assert_eq!(preference.motion_duration_ms(), 0);
     }
     #[test]
     fn back_restores_route_focus_and_one_owner() {

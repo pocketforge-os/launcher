@@ -33,6 +33,7 @@ use std::{
     collections::VecDeque,
     env, fs,
     io::{BufWriter, Write},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -44,7 +45,7 @@ use std::{
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -321,10 +322,12 @@ fn main() -> Result<(), String> {
     let interactive_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
-    let fixture_mode = args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
-        || !interactive_mode;
+    let fixture_mode = args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--sim-frame" | "--settings-evidence" | "--desktop-sim-script"
+        )
+    }) || !interactive_mode;
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
@@ -504,6 +507,22 @@ fn main() -> Result<(), String> {
         orientation: Orientation::Landscape,
     };
     let mut host = OffscreenHost::new(metrics);
+    if args.iter().any(|a| a == "--desktop-sim-script") {
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        let authority_state = value(&args, "--authority-state-dir")
+            .ok_or("--desktop-sim-script requires --authority-state-dir")?;
+        return run_desktop_sim_script(
+            &mut host,
+            &mut core,
+            &footer,
+            Path::new(session_socket),
+            Path::new(authority_state),
+        );
+    }
+    if let Some(authority_state) = value(&args, "--desktop-sim-supervise") {
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        return run_desktop_sim_supervisor(Path::new(session_socket), Path::new(authority_state));
+    }
     if args.iter().any(|a| a == "--settings-evidence") {
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
@@ -928,6 +947,167 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             present(host, core, &activate)?;
         }
     }
+}
+
+fn authority_rpc(socket: &Path, request: &pf_session_authority::RpcRequest) -> Result<(), String> {
+    let mut stream =
+        UnixStream::connect(socket).map_err(|error| format!("authority rpc connect: {error}"))?;
+    let body = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+    pf_wire::write_frame(&mut stream, &body).map_err(|error| error.to_string())?;
+    let body = pf_wire::read_frame(&mut stream).map_err(|error| error.to_string())?;
+    match serde_json::from_slice::<pf_session_authority::RpcResponse>(&body)
+        .map_err(|error| error.to_string())?
+    {
+        pf_session_authority::RpcResponse::Ok => Ok(()),
+        pf_session_authority::RpcResponse::Error { message } => Err(message),
+        response => Err(format!("unexpected authority response: {response:?}")),
+    }
+}
+
+fn observe_desktop_sim_running(socket: &Path) -> Result<(), String> {
+    use pf_session_authority::{RpcObservation, RpcRequest};
+
+    authority_rpc(
+        socket,
+        &RpcRequest::Observe {
+            observation: RpcObservation::SessionRunning,
+        },
+    )
+}
+
+fn observe_desktop_sim_return(socket: &Path) -> Result<(), String> {
+    use pf_session_authority::{RpcObservation, RpcRequest};
+
+    for observation in [
+        RpcObservation::SessionExitedCleanly,
+        RpcObservation::UnitInactive,
+        RpcObservation::TargetReleased,
+        RpcObservation::SelectedOwnerActive,
+        RpcObservation::PresentationAcknowledged,
+    ] {
+        authority_rpc(socket, &RpcRequest::Observe { observation })?;
+    }
+    Ok(())
+}
+
+fn desktop_sim_marker(authority_state: &Path) -> Result<Option<PathBuf>, String> {
+    let sessions = authority_state.join("sessions");
+    let entries = match fs::read_dir(&sessions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", sessions.display())),
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("read session marker: {error}"))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("running") {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(), String> {
+    let mut active_marker = None;
+    println!(
+        "SUPERVISOR watching state_dir={}",
+        authority_state.display()
+    );
+    loop {
+        let marker = desktop_sim_marker(authority_state)?;
+        match (&active_marker, marker) {
+            (None, Some(path)) => {
+                observe_desktop_sim_running(socket)?;
+                println!("SUPERVISOR running marker={}", path.display());
+                active_marker = Some(path);
+            }
+            (Some(path), None) => {
+                observe_desktop_sim_return(socket)?;
+                println!("SUPERVISOR returned marker={}", path.display());
+                active_marker = None;
+            }
+            _ => {}
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn run_desktop_sim_script(
+    host: &mut OffscreenHost,
+    core: &mut ShellCore,
+    footer: &str,
+    socket: &Path,
+    authority_state: &Path,
+) -> Result<(), String> {
+    let mut session = SessionClient::new("pf-shell-desktop-soak", SocketTransport::connect(socket));
+    wait_for_session_authority(&mut session, Duration::from_secs(3))
+        .map_err(|error| format!("authority ready: {error:?}"))?;
+    drive_socket_session(core, &mut session)?;
+    present(host, core, footer)?;
+    let initial_revision = redraw_state(core);
+
+    let _ = core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    let request = match core.action(&ShellAction::Activate) {
+        Some(Effect::Launch(request)) => request,
+        other => return Err(format!("scripted launch action produced {other:?}")),
+    };
+    let session_id = match session.launch(request) {
+        Ok(LaunchResult::Accepted { session_id }) => session_id,
+        Ok(other) => return Err(format!("authority rejected scripted launch: {other:?}")),
+        Err(error) => return Err(format!("authority launch: {error:?}")),
+    };
+    core.launch_result(&LaunchResult::Accepted {
+        session_id: session_id.clone(),
+    });
+    present(host, core, footer)?;
+    println!("SOAK launched session_id={session_id}");
+
+    let marker = authority_state
+        .join("sessions")
+        .join(format!("{session_id}.running"));
+    let marker_deadline = Instant::now() + Duration::from_secs(3);
+    while !marker.is_file() {
+        if Instant::now() >= marker_deadline {
+            return Err(format!(
+                "desktop-sim marker did not appear: {}",
+                marker.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    println!("SOAK marker={}", marker.display());
+
+    observe_desktop_sim_running(socket)?;
+    drive_socket_session(core, &mut session)?;
+
+    // The desktop preset's title is deliberately only a marker-backed stub. Script its clean
+    // exit, then feed the same supervisor observations used by the real authority lifecycle.
+    fs::remove_file(&marker).map_err(|error| format!("remove stub marker: {error}"))?;
+    observe_desktop_sim_return(socket)?;
+    drive_socket_session(core, &mut session)?;
+    present(host, core, footer)?;
+    if initial_revision == redraw_state(core) {
+        return Err("redraw state did not advance across launch/return".into());
+    }
+    if marker.exists() {
+        return Err(format!("desktop-sim marker remains: {}", marker.display()));
+    }
+    if !authority_state.join("shell-selected").is_file() {
+        return Err("authority did not reactivate the shell owner".into());
+    }
+    let returned = session.history().iter().any(|event| {
+        matches!(
+            event,
+            SessionEvent::Terminal(TerminalReceipt::Returned { session_id: returned })
+                if returned == &session_id
+        )
+    });
+    if !returned {
+        return Err("authority returned receipt was not consumed".into());
+    }
+    println!("SOAK returned session_id={session_id} redraw_advanced=true state_clean=true");
+    Ok(())
 }
 
 trait ScreenshotWriter {

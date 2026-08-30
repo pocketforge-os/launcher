@@ -2567,7 +2567,15 @@ impl ShellCore {
                     .variants
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
-                n.children = art_nodes(item, "home-card", x, 390.0, card_width, i == self.focus);
+                n.children = art_nodes(
+                    item,
+                    "home-card",
+                    x,
+                    390.0,
+                    card_width,
+                    158.0,
+                    i == self.focus,
+                );
                 add_unavailable_card_cues(
                     &mut n.children,
                     item,
@@ -2744,6 +2752,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
+                    136.0,
                     self.focus == i + 5,
                 );
                 add_unavailable_card_cues(
@@ -2887,6 +2896,7 @@ impl ShellCore {
                 cover_left,
                 cover_top,
                 cover_width,
+                cover_height,
                 false,
             );
             out.push(cover);
@@ -3924,6 +3934,7 @@ fn procedural_art_nodes(
     x: f32,
     y: f32,
     width: f32,
+    art_height: f32,
     focused: bool,
 ) -> Vec<Node> {
     let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
@@ -3948,10 +3959,13 @@ fn procedural_art_nodes(
     let monogram = title.chars().next().unwrap_or('·').to_string();
     let home = context == "home-card";
     let favorite = context == "favorite-card";
+    let detail = context == "detail-art";
     let kind_y = if home {
         y + 166.0
     } else if favorite {
         y + 8.0
+    } else if detail {
+        y + art_height - 68.0
     } else {
         y + 142.0
     };
@@ -3959,6 +3973,8 @@ fn procedural_art_nodes(
         y + 210.0
     } else if favorite {
         y + 32.0
+    } else if detail {
+        y + art_height - 36.0
     } else {
         y + 176.0
     };
@@ -3972,9 +3988,17 @@ fn procedural_art_nodes(
         Role::Group,
         "",
         if favorite { art_x } else { x },
-        if favorite { y + 4.0 } else { y - 8.0 },
+        if favorite {
+            y + 4.0
+        } else if detail {
+            y
+        } else {
+            y - 8.0
+        },
         if favorite { art_width } else { width },
-        if home {
+        if detail {
+            art_height
+        } else if home {
             166.0
         } else if favorite {
             64.0
@@ -3992,7 +4016,9 @@ fn procedural_art_nodes(
             art_x,
             if favorite { y + 4.0 } else { y },
             art_width,
-            if home {
+            if detail {
+                art_height
+            } else if home {
                 158.0
             } else if favorite {
                 64.0
@@ -4064,20 +4090,19 @@ fn procedural_art_nodes(
     nodes
 }
 
-fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
+fn art_nodes(
+    item: &Item,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    art_height: f32,
+    focused: bool,
+) -> Vec<Node> {
     if let Some(art) = item.art.as_ref().filter(|_| !item.art_failed) {
         let home = context == "home-card";
         let favorite = context == "favorite-card";
         let detail = context == "detail-art";
-        let art_height = if detail {
-            428.0
-        } else if home {
-            158.0
-        } else if favorite {
-            64.0
-        } else {
-            136.0
-        };
         let label_y = if home {
             y + 210.0
         } else if favorite {
@@ -4122,6 +4147,7 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
         x,
         y,
         width,
+        art_height,
         focused,
     )
 }
@@ -5958,7 +5984,7 @@ mod tests {
     }
 
     #[test]
-    fn details_nodes_stay_in_surface_and_clear_of_cover_at_supported_widths() {
+    fn details_subtrees_stay_in_surface_and_separate_regions_at_supported_widths() {
         fn intersects(a: Bounds, b: Bounds) -> bool {
             a.x < b.x + b.width
                 && a.x + a.width > b.x
@@ -5966,68 +5992,129 @@ mod tests {
                 && a.y + a.height > b.y
         }
 
-        let mut core = fixture_core(vec![item(
-            "game",
-            "Game",
-            vec![variant("native", "game-native", Availability::Ready)],
-        )]);
-        core.selected_item = Some(0);
-        core.go(Route::Details);
-        let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        core.load_history(&[history_entry(
-            "game",
-            Some(started_at),
-            Some((
-                started_at + Duration::from_secs(120),
-                EndPrecision::Observed,
-            )),
-        )]);
+        fn descendants<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(node);
+            for child in &node.children {
+                descendants(child, out);
+            }
+        }
 
-        for width in [640.0, 1024.0, 1280.0] {
-            let scene = core
-                .scene(
-                    SurfaceMetrics {
-                        logical_width: width,
-                        logical_height: 720.0,
-                        scale: 1.0,
-                        safe_insets: Default::default(),
-                        orientation: pf_scene::Orientation::Landscape,
-                    },
-                    "",
-                )
-                .unwrap();
-            let cover = scene
-                .root()
-                .children
-                .iter()
-                .find(|node| node.id.as_str() == "detail-cover")
-                .unwrap();
-            for detail in scene
-                .root()
-                .children
-                .iter()
-                .filter(|node| node.id.as_str().starts_with("detail-"))
-            {
-                assert!(detail.bounds.x >= 0.0, "{}", detail.id.as_str());
-                assert!(detail.bounds.y >= 0.0, "{}", detail.id.as_str());
-                assert!(
-                    detail.bounds.x + detail.bounds.width <= width,
-                    "{} overflows width {width}",
-                    detail.id.as_str()
-                );
-                assert!(
-                    detail.bounds.y + detail.bounds.height <= 720.0,
-                    "{} overflows height at width {width}",
-                    detail.id.as_str()
-                );
-                assert!(
-                    detail.id.as_str() == "detail-cover"
-                        || !intersects(detail.bounds, cover.bounds),
-                    "{} {:?} intersects cover {:?} at width {width}",
-                    detail.id.as_str(),
-                    detail.bounds,
-                    cover.bounds
-                );
+        let art_item = |with_real_art| {
+            let mut catalog_item = item(
+                "game",
+                "Game",
+                vec![variant("native", "game-native", Availability::Ready)],
+            );
+            if with_real_art {
+                catalog_item.presentation.icon_reference = Some("art/game.png".into());
+                catalog_item.presentation.icon_decodable = true;
+            }
+            catalog_item
+        };
+
+        for with_real_art in [true, false] {
+            let snapshot = CatalogSnapshot {
+                revision: 10,
+                observed_at_unix_seconds: 0,
+                provider_results: vec![],
+                items: vec![art_item(with_real_art)],
+                user_projection: UserProjection::default(),
+            };
+            let mut core =
+                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_| {
+                    with_real_art.then(|| Arc::from(&b"png"[..]))
+                });
+            core.authority_snapshot(false);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+
+            for width in [640.0, 1024.0, 1280.0] {
+                let scene = core
+                    .scene(
+                        SurfaceMetrics {
+                            logical_width: width,
+                            logical_height: 720.0,
+                            scale: 1.0,
+                            safe_insets: Default::default(),
+                            orientation: pf_scene::Orientation::Landscape,
+                        },
+                        "",
+                    )
+                    .unwrap();
+                let root = scene.root();
+                let cover = root
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == "detail-cover")
+                    .unwrap();
+                let footer = root
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == "prompts")
+                    .unwrap();
+                let column: Vec<_> = root
+                    .children
+                    .iter()
+                    .filter(|node| {
+                        node.id.as_str().starts_with("detail-")
+                            && node.id.as_str() != "detail-cover"
+                    })
+                    .collect();
+                let mut cover_tree = Vec::new();
+                descendants(cover, &mut cover_tree);
+                let mut column_tree = Vec::new();
+                for node in &column {
+                    descendants(node, &mut column_tree);
+                }
+                let mut footer_tree = Vec::new();
+                descendants(footer, &mut footer_tree);
+
+                for top_level in root
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("detail-"))
+                {
+                    let mut tree = Vec::new();
+                    descendants(top_level, &mut tree);
+                    for node in tree {
+                        assert!(node.bounds.x >= 0.0, "{}", node.id.as_str());
+                        assert!(node.bounds.y >= 0.0, "{}", node.id.as_str());
+                        assert!(
+                            node.bounds.x + node.bounds.width <= width,
+                            "{} overflows width {width}",
+                            node.id.as_str()
+                        );
+                        assert!(
+                            node.bounds.y + node.bounds.height <= 720.0,
+                            "{} overflows height at width {width}",
+                            node.id.as_str()
+                        );
+                    }
+                }
+
+                for (left_name, left, right_name, right) in [
+                    ("cover", &cover_tree, "column", &column_tree),
+                    ("cover", &cover_tree, "footer", &footer_tree),
+                    ("column", &column_tree, "footer", &footer_tree),
+                ] {
+                    for left_node in left {
+                        for right_node in right {
+                            assert!(
+                                !intersects(left_node.bounds, right_node.bounds),
+                                "{left_name} {} {:?} intersects {right_name} {} {:?} at width {width} ({})",
+                                left_node.id.as_str(),
+                                left_node.bounds,
+                                right_node.id.as_str(),
+                                right_node.bounds,
+                                if with_real_art {
+                                    "real art"
+                                } else {
+                                    "Edition Plate"
+                                }
+                            );
+                        }
+                    }
+                }
             }
         }
     }

@@ -22,8 +22,8 @@ use pf_ports::{
     TransferServiceState, WifiCredential, WifiNetwork,
 };
 use pf_scene::{
-    AxisMove, Bounds, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene, SurfaceMetrics,
-    TypeRole,
+    AxisMove, Bounds, Elevation, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene,
+    SurfaceMetrics, TypeRole,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
@@ -182,9 +182,10 @@ enum PowerDialog {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LibraryFilter {
     #[default]
-    All,
-    Favorites,
-    Ready,
+    Recent,
+    Alphabetical,
+    Games,
+    EverythingElse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -562,7 +563,7 @@ impl ShellCore {
             selected_item: None,
             search_query: String::new(),
             search_results: (0..snapshot.items.len()).collect(),
-            library_filter: LibraryFilter::All,
+            library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
             launch_focus: 0,
             active_title: String::new(),
@@ -1065,12 +1066,9 @@ impl ShellCore {
             .filter(|(_, item)| {
                 let haystack = format!("{} {}", item.title, item.tags.join(" ")).to_lowercase();
                 let filter_matches = match self.library_filter {
-                    LibraryFilter::All => true,
-                    LibraryFilter::Favorites => item.favorite,
-                    LibraryFilter::Ready => item
-                        .variants
-                        .iter()
-                        .any(|variant| matches!(variant.availability, Availability::Ready)),
+                    LibraryFilter::Recent | LibraryFilter::Alphabetical => true,
+                    LibraryFilter::Games => matches!(item.kind, AppKind::Game),
+                    LibraryFilter::EverythingElse => !matches!(item.kind, AppKind::Game),
                 };
                 filter_matches && words.iter().all(|word| haystack.contains(word))
             })
@@ -1129,23 +1127,29 @@ impl ShellCore {
             .enumerate()
             .filter_map(|(index, item)| {
                 let included = match self.library_filter {
-                    LibraryFilter::All => true,
-                    LibraryFilter::Favorites => item.favorite,
-                    LibraryFilter::Ready => item
-                        .variants
-                        .iter()
-                        .any(|variant| matches!(variant.availability, Availability::Ready)),
+                    LibraryFilter::Recent | LibraryFilter::Alphabetical => true,
+                    LibraryFilter::Games => matches!(item.kind, AppKind::Game),
+                    LibraryFilter::EverythingElse => !matches!(item.kind, AppKind::Game),
                 };
                 included.then_some(index)
             })
             .collect();
+        if self.library_filter == LibraryFilter::Alphabetical {
+            self.library_items.sort_by(|left, right| {
+                self.items[*left]
+                    .title
+                    .to_lowercase()
+                    .cmp(&self.items[*right].title.to_lowercase())
+                    .then_with(|| self.items[*left].id.cmp(&self.items[*right].id))
+            });
+        }
     }
 
     fn focused_item_index(&self) -> Option<usize> {
         match self.route {
             Route::Library => self
                 .focus
-                .checked_sub(4)
+                .checked_sub(5)
                 .and_then(|i| self.library_items.get(i))
                 .copied(),
             Route::Search => self.search_results.get(self.focus).copied(),
@@ -1190,7 +1194,7 @@ impl ShellCore {
                     .library_items
                     .iter()
                     .position(|&item| item == index)
-                    .map(|position| position + 4),
+                    .map(|position| position + 5),
                 Route::Search => self.search_results.iter().position(|&item| item == index),
                 _ => None,
             }
@@ -1200,7 +1204,7 @@ impl ShellCore {
         }
         self.focus = match self.caller_route {
             Route::Library if !self.library_items.is_empty() => {
-                self.caller_focus.clamp(4, self.library_items.len() + 3)
+                self.caller_focus.clamp(5, self.library_items.len() + 4)
             }
             Route::Search if !self.search_results.is_empty() => self
                 .caller_focus
@@ -1529,18 +1533,6 @@ impl ShellCore {
         }
         match action {
             ShellAction::Custom(name) if name == "Favorite" => {
-                if self.route == Route::VariantChooser {
-                    let item = self.selected_item?;
-                    let ready = self.ready_variants(item);
-                    let variant = self.items[item].variants.get(*ready.get(self.focus)?)?;
-                    let variant_id = (self.items[item].pinned_variant_id.as_deref()
-                        != Some(variant.id.as_str()))
-                    .then(|| variant.id.clone());
-                    return Some(Effect::SetPinnedVariant {
-                        item_id: self.items[item].id.clone(),
-                        variant_id,
-                    });
-                }
                 if let Some(item) = self.focused_item_index() {
                     return Some(Effect::ToggleFavorite {
                         item_id: self.items[item].id.clone(),
@@ -1570,12 +1562,17 @@ impl ShellCore {
                 self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1));
             }
             ShellAction::Move(AxisMove::Right)
-                if self.route == Route::Library && (1..=3).contains(&self.focus) =>
+                if self.route == Route::Library && (1..=4).contains(&self.focus) =>
             {
-                self.focus = (self.focus + 1).min(3);
+                self.focus = (self.focus + 1).min(4);
             }
-            ShellAction::Move(AxisMove::Right) if self.route == Route::Library => {
-                self.go(Route::Settings)
+            ShellAction::Move(AxisMove::Right)
+                if self.route == Route::Library && self.focus >= 5 =>
+            {
+                let item = self.focus - 5;
+                if item % 6 < 5 && item + 1 < self.library_items.len() {
+                    self.focus += 1;
+                }
             }
             ShellAction::Move(AxisMove::Right) if self.route == Route::Settings => {
                 self.settings_room = match self.settings_room {
@@ -1599,12 +1596,37 @@ impl ShellCore {
                 self.go(Route::Library)
             }
             ShellAction::Move(AxisMove::Left)
-                if self.route == Route::Library && (2..=3).contains(&self.focus) =>
+                if self.route == Route::Library && (2..=4).contains(&self.focus) =>
             {
                 self.focus -= 1;
             }
-            ShellAction::Move(AxisMove::Left) if self.route == Route::Library => {
-                self.focus = self.focus.saturating_sub(1);
+            ShellAction::Move(AxisMove::Left)
+                if self.route == Route::Library && self.focus >= 5 =>
+            {
+                if (self.focus - 5) % 6 > 0 {
+                    self.focus -= 1;
+                }
+            }
+            ShellAction::Move(AxisMove::Down) if self.route == Route::Library && self.focus < 5 => {
+                if !self.library_items.is_empty() {
+                    self.focus = 5 + self
+                        .focus
+                        .saturating_sub(1)
+                        .min(self.library_items.len().saturating_sub(1));
+                }
+            }
+            ShellAction::Move(AxisMove::Down)
+                if self.route == Route::Library && self.focus >= 5 =>
+            {
+                if self.focus - 5 + 6 < self.library_items.len() {
+                    self.focus += 6;
+                }
+            }
+            ShellAction::Move(AxisMove::Up) if self.route == Route::Library && self.focus >= 11 => {
+                self.focus -= 6;
+            }
+            ShellAction::Move(AxisMove::Up) if self.route == Route::Library && self.focus >= 5 => {
+                self.focus = (self.focus - 5).min(3) + 1;
             }
             ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                 self.focus = (self.focus + 1).min(self.focus_count().saturating_sub(1))
@@ -1727,16 +1749,17 @@ impl ShellCore {
                 self.go(Route::Search);
                 return None;
             }
-            if (1..=3).contains(&self.focus) {
+            if (1..=4).contains(&self.focus) {
                 self.library_filter = [
-                    LibraryFilter::All,
-                    LibraryFilter::Favorites,
-                    LibraryFilter::Ready,
+                    LibraryFilter::Recent,
+                    LibraryFilter::Alphabetical,
+                    LibraryFilter::Games,
+                    LibraryFilter::EverythingElse,
                 ][self.focus - 1];
                 self.refresh_library_items();
                 return None;
             }
-            self.selected_item = self.library_items.get(self.focus - 4).copied();
+            self.selected_item = self.library_items.get(self.focus - 5).copied();
             self.remember_caller();
             self.go(Route::Details);
             return None;
@@ -1750,15 +1773,7 @@ impl ShellCore {
         }
         if self.route == Route::Details {
             let item = self.selected_item?;
-            if let Some(variant) = self.pinned_ready_variant(item) {
-                return self.launch_variant(item, variant);
-            }
             let ready = self.ready_variants(item);
-            if self.items[item].pinned_variant_id.is_some() {
-                self.go(Route::VariantChooser);
-                self.focus = 0;
-                return None;
-            }
             return match ready.len() {
                 0 => None,
                 1 => self.launch_variant(item, ready[0]),
@@ -1782,17 +1797,7 @@ impl ShellCore {
             return None;
         }
         let item = self.focused_item_index()?;
-        if let Some(variant) = self.pinned_ready_variant(item) {
-            return self.launch_variant(item, variant);
-        }
         let ready = self.ready_variants(item);
-        if self.items[item].pinned_variant_id.is_some() {
-            self.selected_item = Some(item);
-            self.remember_caller();
-            self.go(Route::VariantChooser);
-            self.focus = 0;
-            return None;
-        }
         match ready.len() {
             0 => None,
             1 => self.launch_variant(item, ready[0]),
@@ -1814,13 +1819,6 @@ impl ShellCore {
             .filter(|(_, variant)| matches!(variant.availability, Availability::Ready))
             .map(|(index, _)| index)
             .collect()
-    }
-
-    fn pinned_ready_variant(&self, item: usize) -> Option<usize> {
-        let pinned = self.items[item].pinned_variant_id.as_deref()?;
-        self.items[item].variants.iter().position(|variant| {
-            variant.id == pinned && matches!(variant.availability, Availability::Ready)
-        })
     }
 
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
@@ -1900,7 +1898,7 @@ impl ShellCore {
     fn focus_count(&self) -> usize {
         match self.route {
             Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
-            Route::Library => self.library_items.len() + 4,
+            Route::Library => self.library_items.len() + 5,
             Route::Search => self.search_results.len().max(1),
             Route::Details => 1,
             Route::VariantChooser => self
@@ -2070,21 +2068,7 @@ impl ShellCore {
             self.focused_item_index().map_or_else(
                 || base.to_owned(),
                 |item| {
-                    let label = if self.route == Route::VariantChooser {
-                        let ready = self.ready_variants(item);
-                        ready
-                            .get(self.focus)
-                            .and_then(|index| self.items[item].variants.get(*index))
-                            .map_or("Set as default", |variant| {
-                                if self.items[item].pinned_variant_id.as_deref()
-                                    == Some(variant.id.as_str())
-                                {
-                                    "Remove default"
-                                } else {
-                                    "Set as default"
-                                }
-                            })
-                    } else if self.items[item].favorite {
+                    let label = if self.items[item].favorite {
                         "Unfavorite"
                     } else {
                         "Favorite"
@@ -2298,13 +2282,19 @@ impl ShellCore {
             ));
             out.extend(content);
         } else if self.route == Route::Library {
+            let games = self
+                .items
+                .iter()
+                .filter(|item| matches!(item.kind, AppKind::Game))
+                .count();
+            let other = self.items.len() - games;
             let mut search = node(
                 "library-search",
                 Role::Button,
                 &format!("Search {} titles", self.items.len()),
                 48.0,
-                170.0,
-                w - 96.0,
+                112.0,
+                310.0,
                 52.0,
                 if self.focus == 0 {
                     "--state-focused-ring"
@@ -2316,9 +2306,13 @@ impl ShellCore {
             search.action = Some(NodeAction::Activate);
             out.push(search);
             for (index, (label, filter)) in [
-                ("All", LibraryFilter::All),
-                ("Favorites", LibraryFilter::Favorites),
-                ("Ready", LibraryFilter::Ready),
+                ("Recent".to_owned(), LibraryFilter::Recent),
+                ("A–Z".to_owned(), LibraryFilter::Alphabetical),
+                (format!("Games {games}"), LibraryFilter::Games),
+                (
+                    format!("Everything else {other}"),
+                    LibraryFilter::EverythingElse,
+                ),
             ]
             .into_iter()
             .enumerate()
@@ -2326,17 +2320,15 @@ impl ShellCore {
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let mut chip = node(
-                    &format!("library-filter-{}", label.to_lowercase()),
+                    &format!("library-filter-{index}"),
                     Role::Button,
-                    label,
-                    48.0 + index as f32 * 142.0,
-                    232.0,
-                    126.0,
-                    38.0,
+                    &label,
+                    374.0 + index as f32 * 194.0,
+                    112.0,
+                    if index == 3 { 230.0 } else { 178.0 },
+                    52.0,
                     if focused {
                         "--state-focused-ring"
-                    } else if active {
-                        "--state-selected-surface"
                     } else {
                         "--state-rest-surface"
                     },
@@ -2354,14 +2346,24 @@ impl ShellCore {
                 3
             };
             let card_width = (w - 96.0 - (columns - 1) as f32 * 16.0) / columns as f32;
-            let row_height = 250.0;
-            let card_top = 286.0;
+            let row_height = 292.0;
+            let card_top = 184.0;
             let mut visible_rows: usize = 1;
             while card_top + (visible_rows + 1) as f32 * row_height - 18.0 <= h {
                 visible_rows += 1;
             }
-            let focused_row = self.focus.saturating_sub(4) / columns;
+            let focused_row = self.focus.saturating_sub(5) / columns;
             let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
+            out.push(node(
+                "library-grid-scroll",
+                Role::Group,
+                "Library covers",
+                48.0,
+                card_top,
+                w - 96.0,
+                h - card_top - PROMPTS_AREA_HEIGHT,
+                "--color-surface-canvas",
+            ));
             for (i, &item_index) in self.library_items.iter().enumerate() {
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
@@ -2378,15 +2380,17 @@ impl ShellCore {
                 };
                 let mut card = node(
                     &format!("library-item-{}", item.id),
-                    Role::Button,
+                    Role::Group,
                     &card_label,
                     48.0 + column as f32 * (card_width + 16.0),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
-                    232.0,
-                    state_token(availability, self.focus == i + 4),
+                    276.0,
+                    state_token(availability, self.focus == i + 5),
                 );
-                card.state.focused = self.focus == i + 4;
+                card.state.focused = self.focus == i + 5;
+                card.state.unavailable = !matches!(availability, Availability::Ready);
+                card.elevation = Elevation::Elev1;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
@@ -2394,10 +2398,20 @@ impl ShellCore {
                     48.0 + column as f32 * (card_width + 16.0),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     card_width,
-                    self.focus == i + 4,
+                    self.focus == i + 5,
                 );
                 out.push(card);
             }
+            out.push(node(
+                "library-fold-fade",
+                Role::Group,
+                "More titles below",
+                48.0,
+                h - PROMPTS_AREA_HEIGHT - 32.0,
+                w - 96.0,
+                32.0,
+                "--color-surface-scrim",
+            ));
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -2466,10 +2480,10 @@ impl ShellCore {
                 || kind_text(&item.kind).to_owned(),
                 |variant| {
                     format!(
-                        "{} · Provider {} · {}",
-                        kind_text(&item.kind),
-                        variant.provenance.provider_id,
-                        variant.launch_target.descriptor_path.display()
+                        "{} · {} · {}",
+                        sentence_kind(&item.kind),
+                        humanize_identifier(&variant.provenance.provider_id),
+                        descriptor_file(variant)
                     )
                 },
             );
@@ -2505,81 +2519,88 @@ impl ShellCore {
                     "--color-text-secondary",
                 ));
             }
-            out.extend(art_nodes(item, "detail-art", 48.0, 165.0, 304.0, false));
-            if let Some(pinned) = &item.pinned_variant_id {
-                out.push(node(
-                    "detail-pinned-variant",
-                    Role::Text,
-                    &format!("Default version · {pinned}"),
-                    400.0,
-                    350.0 + detail_offset,
-                    w - 448.0,
-                    34.0,
-                    "--state-rest-surface",
-                ));
-            }
-            let detail_availability = first_variant
-                .map_or_else(|| best_availability(item), |variant| &variant.availability);
+            let mut cover = node(
+                "detail-cover",
+                Role::Group,
+                &format!("Cover for {}", item.title),
+                48.0,
+                96.0,
+                320.0,
+                428.0,
+                "--color-surface-raised",
+            )
+            .with_elevation(Elevation::Elev2);
+            cover.children = art_nodes(item, "detail-art", 48.0, 96.0, 320.0, false);
+            out.push(cover);
+            let detail_availability = best_availability(item);
             let availability = availability_text(detail_availability, &self.presentation);
-            let state = availability.split(" — ").next().unwrap_or(&availability);
-            let mut badges = vec![state.to_owned()];
-            if let Some(variant) = first_variant {
-                badges.extend([
-                    format!("Provider {}", variant.provenance.provider_id),
-                    format!("Edition {}", variant.id),
-                ]);
-            }
-            for (index, label) in badges.into_iter().enumerate() {
-                out.push(node(
-                    &format!("detail-badge-{index}"),
-                    Role::Text,
-                    &label,
-                    400.0 + index as f32 * 190.0,
-                    278.0 + detail_offset,
-                    174.0,
-                    36.0,
-                    state_token(detail_availability, false),
-                ));
-            }
-            out.push(node(
+            let mut availability_node = node(
                 "detail-availability-reason",
                 Role::Text,
                 &availability,
                 400.0,
-                320.0 + detail_offset,
+                294.0 + detail_offset,
                 w - 448.0,
                 38.0,
-                "--color-text-secondary",
-            ));
+                state_token(detail_availability, false),
+            );
+            availability_node.state.unavailable =
+                !matches!(detail_availability, Availability::Ready);
+            out.push(availability_node);
+            if item.variants.len() >= 2 {
+                out.push(
+                    node(
+                        "detail-ways-heading",
+                        Role::Heading,
+                        "Ways to play",
+                        400.0,
+                        342.0 + detail_offset,
+                        w - 448.0,
+                        28.0,
+                        "--color-text-muted",
+                    )
+                    .with_type_role(TypeRole::Eyebrow),
+                );
+            }
+            let ready = self.ready_variants(item_index);
             for (variant_index, variant) in item.variants.iter().enumerate() {
-                out.push(node(
+                if item.variants.len() < 2 {
+                    break;
+                }
+                let variant_label = if matches!(variant.availability, Availability::Ready) {
+                    format!("{} · Ready", humanize_identifier(&variant.id))
+                } else if variant_index == 0 && ready.is_empty() {
+                    format!(
+                        "{} · See availability above",
+                        humanize_identifier(&variant.id)
+                    )
+                } else {
+                    format!(
+                        "{} · {}",
+                        humanize_identifier(&variant.id),
+                        availability_text(&variant.availability, &self.presentation)
+                    )
+                };
+                let mut variant_node = node(
                     &format!("detail-variant-{variant_index}"),
                     Role::Text,
-                    &format!(
-                        "{} · Provider {} · {}",
-                        variant.id,
-                        variant.provenance.provider_id,
-                        availability_text(&variant.availability, &self.presentation)
-                    ),
+                    &variant_label,
                     400.0,
-                    390.0 + detail_offset + variant_index as f32 * 55.0,
+                    378.0 + detail_offset + variant_index as f32 * 55.0,
                     w - 448.0,
                     48.0,
                     state_token(&variant.availability, false),
-                ));
+                );
+                variant_node.state.unavailable =
+                    !matches!(variant.availability, Availability::Ready);
+                variant_node.state.selected = variant_index == 0;
+                out.push(variant_node);
             }
-            let ready = self.ready_variants(item_index);
             if self.route == Route::VariantChooser {
-                let pin_unavailable = item.pinned_variant_id.is_some()
-                    && self.pinned_ready_variant(item_index).is_none();
                 out.push(node(
                     "chooser-note",
                     Role::Text,
-                    if pin_unavailable {
-                        "Default unavailable — choose a version"
-                    } else {
-                        "Ready right now. Back leaves without opening anything."
-                    },
+                    "Ready right now. Back leaves without opening anything.",
                     360.0,
                     235.0,
                     w - 720.0,
@@ -2591,16 +2612,7 @@ impl ShellCore {
                     let mut row = node(
                         &format!("chooser-{}", variant.id),
                         Role::Button,
-                        &format!(
-                            "{} · Provider {}{}",
-                            variant.id,
-                            variant.provenance.provider_id,
-                            if item.pinned_variant_id.as_deref() == Some(&variant.id) {
-                                " · Default"
-                            } else {
-                                ""
-                            }
-                        ),
+                        &format!("{} · Ready", humanize_identifier(&variant.id)),
                         360.0,
                         300.0 + choice as f32 * 64.0,
                         w - 720.0,
@@ -2634,16 +2646,18 @@ impl ShellCore {
                 open.action = Some(NodeAction::Activate);
                 out.push(open);
             } else {
-                out.push(node(
+                let mut unavailable = node(
                     "detail-unavailable",
                     Role::Text,
-                    "Unavailable · No usable way to play right now",
+                    "No launch action is available",
                     400.0,
                     510.0,
                     w - 448.0,
                     60.0,
-                    "--state-unavailable-surface",
-                ));
+                    "--state-unavailable-text",
+                );
+                unavailable.state.unavailable = true;
+                out.push(unavailable);
             }
         } else if self.route == Route::Settings {
             self.settings_nodes(out, w);
@@ -2951,7 +2965,7 @@ impl ShellCore {
                 w - 96.0,
                 row_height * f32::from(self.text_scale) / 100.0,
                 if !interactive {
-                    "--state-unavailable-surface"
+                    "--state-rest-surface"
                 } else if i == self.focus {
                     "--state-focused-ring"
                 } else {
@@ -3641,17 +3655,46 @@ fn kind_text(kind: &AppKind) -> &'static str {
         AppKind::Settings => "SETTINGS",
     }
 }
+fn sentence_kind(kind: &AppKind) -> &'static str {
+    match kind {
+        AppKind::Media => "Media",
+        AppKind::Stream => "Stream",
+        AppKind::Game => "Game",
+        AppKind::System => "Tool",
+        AppKind::Settings => "Settings",
+    }
+}
+fn humanize_identifier(value: &str) -> String {
+    let words = value
+        .split(['-', '_', '.', '/'])
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = words.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
+}
+fn descriptor_file(variant: &Variant) -> String {
+    variant
+        .launch_target
+        .descriptor_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("App descriptor")
+        .to_owned()
+}
 fn state_token(a: &Availability, focused: bool) -> &'static str {
     if focused {
         "--state-focused-ring"
     } else {
         match a {
-            Availability::Ready => "--state-rest-surface",
             Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => {
                 "--color-status-attention"
             }
-            Availability::UnsupportedCapability { .. }
-            | Availability::IncompatibleRuntime { .. } => "--state-unavailable-surface",
+            Availability::Ready
+            | Availability::UnsupportedCapability { .. }
+            | Availability::IncompatibleRuntime { .. } => "--state-rest-surface",
         }
     }
 }
@@ -4388,7 +4431,7 @@ mod tests {
 
     #[test]
     fn details_back_restores_library_items_in_route_local_space() {
-        for (focus, expected_item) in [(4, 0), (5, 1)] {
+        for (focus, expected_item) in [(5, 0), (6, 1)] {
             let mut c = core();
             c.go(Route::Library);
             c.focus = focus;
@@ -4633,6 +4676,171 @@ mod tests {
     }
 
     #[test]
+    fn library_grid_navigation_is_row_major_with_hard_edges() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5;
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.focus, 5, "left edge is hard");
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.focus, 6);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 12);
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(core.focus, 6);
+        core.focus = 10;
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.focus, 10, "right edge is hard");
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(core.focus, 4, "top row returns to the nearest chip");
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 8, "chip enters the nearest grid column");
+    }
+
+    #[test]
+    fn library_filter_counts_match_the_catalog_snapshot() {
+        let mut tool = item(
+            "tool",
+            "Button Tester",
+            vec![variant("native", "tool", Availability::Ready)],
+        );
+        tool.kind = AppKind::System;
+        let mut core = fixture_core(vec![
+            item(
+                "game-a",
+                "Game A",
+                vec![variant("native", "game-a", Availability::Ready)],
+            ),
+            item(
+                "game-b",
+                "Game B",
+                vec![variant("native", "game-b", Availability::Ready)],
+            ),
+            tool,
+        ]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let labels = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-filter-"))
+            .map(|node| node.accessible_label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Recent", "A–Z", "Games 2", "Everything else 1"]);
+    }
+
+    #[test]
+    fn details_hide_raw_provenance_and_show_one_setup_reason_with_runtime_cue() {
+        fn visit(node: &Node, labels: &mut Vec<String>) {
+            labels.push(node.accessible_label.clone());
+            for child in &node.children {
+                visit(child, labels);
+            }
+        }
+
+        let reason = "choose a profile once";
+        let mut setup = variant(
+            "standard-edition",
+            "setup-app",
+            Availability::NeedsSetup {
+                reason: reason.into(),
+            },
+        );
+        setup.provenance.provider_id = "provider.debug/raw-id".into();
+        setup.launch_target.descriptor_path = PathBuf::from("/srv/apps/private/setup.app.toml");
+        let mut core = fixture_core(vec![item("setup", "Setup Game", vec![setup])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let mut labels = Vec::new();
+        visit(scene.root(), &mut labels);
+        let joined = labels.join("\n");
+        assert!(!joined.contains("provider.debug/raw-id"));
+        assert!(!joined.contains("/srv/apps/private"));
+        assert_eq!(joined.matches(reason).count(), 1);
+        let availability = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "detail-availability-reason")
+            .unwrap();
+        assert!(
+            availability.state.unavailable,
+            "runtime supplies the slash cue"
+        );
+        assert!(
+            !scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "detail-open")
+        );
+    }
+
+    #[test]
+    fn library_and_details_scene_styles_are_token_keys_only() {
+        fn assert_tokens(node: &Node) {
+            assert!(node.style_token.starts_with("--"), "{}", node.style_token);
+            for child in &node.children {
+                assert_tokens(child);
+            }
+        }
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        assert_tokens(core.scene(metrics, "").unwrap().root());
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        assert_tokens(core.scene(metrics, "").unwrap().root());
+    }
+
+    #[test]
     fn one_many_and_no_usable_variant_flows_are_per_launch() {
         let unavailable = Availability::NeedsNetwork {
             reason: "connect to Wi-Fi".into(),
@@ -4736,7 +4944,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_pin_launches_directly_and_unavailable_pin_falls_back_honestly() {
+    fn remembered_pin_does_not_bypass_per_launch_variant_choice() {
         let variants = vec![
             variant("native", "many-native", Availability::Ready),
             variant("stream", "many-stream", Availability::Ready),
@@ -4768,51 +4976,32 @@ mod tests {
                 "",
             )
             .unwrap();
-        assert!(details.root().children.iter().any(|node| {
-            node.id.as_str() == "detail-pinned-variant"
-                && node.accessible_label == "Default version · stream"
-        }));
-        pinned.go(Route::Home);
-        assert_eq!(
-            pinned.action(&ShellAction::Activate),
-            Some(Effect::Launch(LaunchRequest {
-                item_id: "many-stream".into()
-            }))
+        assert!(
+            !details
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "detail-pinned-variant")
         );
+        pinned.go(Route::Home);
+        assert_eq!(pinned.action(&ShellAction::Activate), None);
+        assert_eq!(pinned.route(), Route::VariantChooser);
 
         snapshot.items[0].variants[1].availability = Availability::NeedsNetwork {
             reason: "offline".into(),
         };
         let mut fallback = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
         fallback.authority_snapshot(false);
-        assert_eq!(fallback.action(&ShellAction::Activate), None);
-        assert_eq!(fallback.route(), Route::VariantChooser);
-        let scene = fallback
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 1280.0,
-                    logical_height: 720.0,
-                    scale: 1.0,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        let note = scene
-            .root()
-            .children
-            .iter()
-            .find(|node| node.id.as_str() == "chooser-note")
-            .unwrap();
         assert_eq!(
-            note.accessible_label,
-            "Default unavailable — choose a version"
+            fallback.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "many-native".into()
+            }))
         );
     }
 
     #[test]
-    fn chooser_default_affordance_pins_and_unpins_the_focused_ready_variant() {
+    fn chooser_favorite_action_never_persists_a_variant_default() {
         let mut core = fixture_core(vec![item(
             "many",
             "Many Moons",
@@ -4824,17 +5013,9 @@ mod tests {
         core.action(&ShellAction::Activate);
         assert_eq!(
             core.action(&ShellAction::Custom("Favorite".into())),
-            Some(Effect::SetPinnedVariant {
+            Some(Effect::ToggleFavorite {
                 item_id: "many".into(),
-                variant_id: Some("native".into()),
-            })
-        );
-        core.pinned_variant_committed("many", Some("native".into()));
-        assert_eq!(
-            core.action(&ShellAction::Custom("Favorite".into())),
-            Some(Effect::SetPinnedVariant {
-                item_id: "many".into(),
-                variant_id: None,
+                favorite: true,
             })
         );
     }
@@ -4955,10 +5136,8 @@ mod tests {
             .collect();
         let mut core = fixture_core(items);
         core.go(Route::Library);
-        // Search plus three filter chips precede the deterministic item index space.
-        for _ in 0..484 {
-            core.action(&ShellAction::Move(AxisMove::Down));
-        }
+        // Search plus four filter chips precede the deterministic item index space.
+        core.focus = 5 + 480;
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -5263,11 +5442,11 @@ mod tests {
         core.go(Route::Library);
         core.focus = 2;
         core.action(&ShellAction::Activate);
-        assert_eq!(core.library_items, vec![0]);
+        assert_eq!(core.library_items, vec![1, 0]);
         core.set_search_query("ridge");
         assert_eq!(core.search_result_ids(), vec!["ridge"]);
         core.set_search_query("tides");
-        assert!(core.search_result_ids().is_empty());
+        assert_eq!(core.search_result_ids(), vec!["tides"]);
 
         core.selected_item = Some(1);
         core.go(Route::Details);
@@ -5298,9 +5477,8 @@ mod tests {
             .expect("known playtime anatomy");
         assert_eq!(played.accessible_label, "Played ~3h 20m");
         for id in [
-            "detail-badge-0",
-            "detail-badge-1",
-            "detail-badge-2",
+            "detail-cover",
+            "detail-provenance",
             "detail-availability-reason",
         ] {
             assert!(

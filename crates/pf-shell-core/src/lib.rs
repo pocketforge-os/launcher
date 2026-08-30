@@ -2843,13 +2843,20 @@ impl ShellCore {
                     )
                 },
             );
+            let compact = library_geometry(w).columns < 6;
+            let cover_left = 48.0;
+            let cover_top = 112.0;
+            let cover_width = if compact { 240.0 } else { 320.0 };
+            let cover_height = if compact { 321.0 } else { 428.0 };
+            let detail_column_left = cover_left + cover_width + 32.0;
+            let detail_column_width = w - detail_column_left - 48.0;
             out.push(node(
                 "detail-provenance",
                 Role::Text,
                 &provenance,
-                400.0,
+                detail_column_left,
                 112.0,
-                w - 448.0,
+                detail_column_width,
                 30.0,
                 "--color-text-secondary",
             ));
@@ -2857,9 +2864,9 @@ impl ShellCore {
                 "detail-title",
                 Role::Heading,
                 &item.title,
-                400.0,
+                detail_column_left,
                 148.0,
-                w - 448.0,
+                detail_column_width,
                 64.0,
                 "--color-surface-canvas",
             ));
@@ -2867,14 +2874,21 @@ impl ShellCore {
                 "detail-cover",
                 Role::Group,
                 &format!("Cover for {}", item.title),
-                48.0,
-                112.0,
-                320.0,
-                428.0,
+                cover_left,
+                cover_top,
+                cover_width,
+                cover_height,
                 "--color-surface-raised",
             )
             .with_elevation(Elevation::Elev2);
-            cover.children = art_nodes(item, "detail-art", 48.0, 112.0, 320.0, false);
+            cover.children = art_nodes(
+                item,
+                "detail-art",
+                cover_left,
+                cover_top,
+                cover_width,
+                false,
+            );
             out.push(cover);
             let detail_availability = best_availability(item);
             let availability = if matches!(detail_availability, Availability::Ready) {
@@ -2889,9 +2903,9 @@ impl ShellCore {
                 "detail-availability-reason",
                 Role::Text,
                 &availability,
-                400.0,
+                detail_column_left,
                 218.0,
-                w - 448.0,
+                detail_column_width,
                 38.0,
                 if matches!(detail_availability, Availability::Ready) {
                     "--color-text-primary"
@@ -2907,40 +2921,15 @@ impl ShellCore {
                     "detail-ways-heading",
                     Role::Heading,
                     "WAYS TO PLAY",
-                    400.0,
+                    detail_column_left,
                     270.0,
-                    w - 448.0,
+                    detail_column_width,
                     28.0,
                     "--color-text-muted",
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
             let ready = self.ready_variants(item_index);
-            if let Some(playtime) = self.playtime.get(&item.id).copied() {
-                out.push(
-                    node(
-                        "detail-time-played-heading",
-                        Role::Heading,
-                        "TIME PLAYED",
-                        400.0,
-                        540.0,
-                        180.0,
-                        22.0,
-                        "--color-text-muted",
-                    )
-                    .with_type_role(TypeRole::Eyebrow),
-                );
-                out.push(node(
-                    "detail-playtime",
-                    Role::Text,
-                    &format_playtime(playtime),
-                    400.0,
-                    566.0,
-                    220.0,
-                    28.0,
-                    "--color-text-primary",
-                ));
-            }
             let variant_row_height = 54.0;
             let variant_row_gap = 7.0;
             let variant_rows_top = 302.0;
@@ -2987,10 +2976,10 @@ impl ShellCore {
                             Role::Text
                         },
                         &variant_label,
-                        400.0,
+                        detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
-                        w - 448.0,
+                        detail_column_width,
                         variant_row_height,
                         if focused {
                             "--state-focused-ring"
@@ -3015,11 +3004,11 @@ impl ShellCore {
                             "+{} more ways to play",
                             item.variants.len() - visible_detail_variants
                         ),
-                        400.0,
+                        detail_column_left,
                         variant_rows_top
                             + visible_detail_variants as f32
                                 * (variant_row_height + variant_row_gap),
-                        w - 448.0,
+                        detail_column_width,
                         28.0,
                         "--color-text-muted",
                     ));
@@ -3089,96 +3078,138 @@ impl ShellCore {
                     row.action = Some(NodeAction::Activate);
                     out.push(row);
                 }
-            } else if !ready.is_empty() {
-                let variants_bottom = variant_rows_top
-                    + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
-                    + if item.variants.len() > visible_detail_variants {
-                        35.0
-                    } else {
-                        0.0
-                    };
-                let compact = library_geometry(w).columns < 6;
-                let button_left = if compact { 48.0 } else { 400.0 };
-                let button_area_width = if compact { w - 96.0 } else { w - 448.0 };
-                let button_gap = 16.0;
-                let button_width = (button_area_width - button_gap) / 2.0;
-                let play_focus = self.detail_play_focus().unwrap_or(0);
-                let mut open = node(
-                    "detail-open",
-                    Role::Button,
-                    if ready.len() == 1 {
-                        "▶ Play"
-                    } else {
-                        "Choose how to play"
-                    },
-                    button_left,
-                    variants_bottom.max(430.0),
-                    button_width,
-                    54.0,
-                    if self.focus == play_focus {
-                        "--state-focused-ring"
-                    } else {
-                        "--state-rest-surface"
-                    },
-                );
-                open.state.focused = self.focus == play_focus;
-                open.action = Some(NodeAction::Activate);
-                out.push(open);
-                let pin_label = if item.favorite {
-                    "★ Unpin"
-                } else {
-                    "★ Pin to favorites"
-                };
-                let mut pin = node(
-                    "detail-pin",
-                    Role::Button,
-                    pin_label,
-                    button_left + button_width + button_gap,
-                    variants_bottom.max(430.0),
-                    button_width,
-                    54.0,
-                    if self.focus == self.detail_pin_focus() {
-                        "--state-focused-ring"
-                    } else {
-                        "--state-rest-surface"
-                    },
-                );
-                pin.state.focused = self.focus == self.detail_pin_focus();
-                pin.action = Some(NodeAction::Activate);
-                out.push(pin);
             } else {
-                let mut unavailable = node(
-                    "detail-unavailable",
-                    Role::Text,
-                    "No launch action is available",
-                    400.0,
-                    510.0,
-                    w - 448.0,
-                    60.0,
-                    "--state-unavailable-text",
-                );
-                unavailable.state.unavailable = true;
-                out.push(unavailable);
-                let compact = library_geometry(w).columns < 6;
-                let button_left = if compact { 48.0 } else { 400.0 };
-                let button_width = if compact { w - 96.0 } else { w - 448.0 };
-                let mut pin = node(
-                    "detail-pin",
-                    Role::Button,
-                    if item.favorite {
+                let actions_bottom = if let Some(_ready_variant) = ready.first() {
+                    let variants_bottom = variant_rows_top
+                        + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
+                        + if item.variants.len() > visible_detail_variants {
+                            35.0
+                        } else {
+                            0.0
+                        };
+                    let button_gap = 16.0;
+                    let stack_buttons = compact && detail_column_width < 336.0;
+                    let button_width = if stack_buttons {
+                        detail_column_width
+                    } else {
+                        (detail_column_width - button_gap) / 2.0
+                    };
+                    let buttons_top = variants_bottom.max(430.0);
+                    let play_focus = self.detail_play_focus().unwrap_or(0);
+                    let mut open = node(
+                        "detail-open",
+                        Role::Button,
+                        if ready.len() == 1 {
+                            "▶ Play"
+                        } else {
+                            "Choose how to play"
+                        },
+                        detail_column_left,
+                        buttons_top,
+                        button_width,
+                        54.0,
+                        if self.focus == play_focus {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
+                    );
+                    open.state.focused = self.focus == play_focus;
+                    open.action = Some(NodeAction::Activate);
+                    out.push(open);
+                    let pin_label = if item.favorite {
                         "★ Unpin"
                     } else {
                         "★ Pin to favorites"
-                    },
-                    button_left,
-                    580.0,
-                    button_width,
-                    54.0,
-                    "--state-focused-ring",
-                );
-                pin.state.focused = true;
-                pin.action = Some(NodeAction::Activate);
-                out.push(pin);
+                    };
+                    let mut pin = node(
+                        "detail-pin",
+                        Role::Button,
+                        pin_label,
+                        if stack_buttons {
+                            detail_column_left
+                        } else {
+                            detail_column_left + button_width + button_gap
+                        },
+                        if stack_buttons {
+                            buttons_top + 54.0 + button_gap
+                        } else {
+                            buttons_top
+                        },
+                        button_width,
+                        54.0,
+                        if self.focus == self.detail_pin_focus() {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
+                    );
+                    pin.state.focused = self.focus == self.detail_pin_focus();
+                    pin.action = Some(NodeAction::Activate);
+                    out.push(pin);
+                    buttons_top + if stack_buttons { 124.0 } else { 54.0 }
+                } else {
+                    let mut unavailable = node(
+                        "detail-unavailable",
+                        Role::Text,
+                        "No launch action is available",
+                        detail_column_left,
+                        510.0,
+                        detail_column_width,
+                        60.0,
+                        "--state-unavailable-text",
+                    );
+                    unavailable.state.unavailable = true;
+                    out.push(unavailable);
+                    let mut pin = node(
+                        "detail-pin",
+                        Role::Button,
+                        if item.favorite {
+                            "★ Unpin"
+                        } else {
+                            "★ Pin to favorites"
+                        },
+                        detail_column_left,
+                        580.0,
+                        detail_column_width,
+                        54.0,
+                        "--state-focused-ring",
+                    );
+                    pin.state.focused = true;
+                    pin.action = Some(NodeAction::Activate);
+                    out.push(pin);
+                    634.0
+                };
+                if let Some(playtime) = self.playtime.get(&item.id).copied() {
+                    let facts_top = if compact {
+                        actions_bottom + 16.0
+                    } else {
+                        540.0
+                    };
+                    out.push(
+                        node(
+                            "detail-time-played-heading",
+                            Role::Heading,
+                            "TIME PLAYED",
+                            detail_column_left,
+                            facts_top,
+                            detail_column_width,
+                            22.0,
+                            "--color-text-muted",
+                        )
+                        .with_type_role(TypeRole::Eyebrow),
+                    );
+                    out.push(node(
+                        "detail-playtime",
+                        Role::Text,
+                        &format_playtime(playtime),
+                        detail_column_left,
+                        facts_top + 26.0,
+                        detail_column_width,
+                        28.0,
+                        "--color-text-primary",
+                    ));
+                }
             }
         } else if self.route == Route::Settings {
             self.settings_nodes(out, w);
@@ -5927,7 +5958,14 @@ mod tests {
     }
 
     #[test]
-    fn details_controls_stay_inside_supported_surface_widths() {
+    fn details_nodes_stay_in_surface_and_clear_of_cover_at_supported_widths() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
         let mut core = fixture_core(vec![item(
             "game",
             "Game",
@@ -5935,6 +5973,15 @@ mod tests {
         )]);
         core.selected_item = Some(0);
         core.go(Route::Details);
+        let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        core.load_history(&[history_entry(
+            "game",
+            Some(started_at),
+            Some((
+                started_at + Duration::from_secs(120),
+                EndPrecision::Observed,
+            )),
+        )]);
 
         for width in [640.0, 1024.0, 1280.0] {
             let scene = core
@@ -5949,17 +5996,37 @@ mod tests {
                     "",
                 )
                 .unwrap();
-            for control in scene
+            let cover = scene
                 .root()
                 .children
                 .iter()
-                .filter(|node| node.id.as_str().starts_with("detail-") && node.action.is_some())
+                .find(|node| node.id.as_str() == "detail-cover")
+                .unwrap();
+            for detail in scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("detail-"))
             {
-                assert!(control.bounds.x >= 0.0, "{}", control.id.as_str());
+                assert!(detail.bounds.x >= 0.0, "{}", detail.id.as_str());
+                assert!(detail.bounds.y >= 0.0, "{}", detail.id.as_str());
                 assert!(
-                    control.bounds.x + control.bounds.width <= width,
-                    "{} overflows {width}",
-                    control.id.as_str()
+                    detail.bounds.x + detail.bounds.width <= width,
+                    "{} overflows width {width}",
+                    detail.id.as_str()
+                );
+                assert!(
+                    detail.bounds.y + detail.bounds.height <= 720.0,
+                    "{} overflows height at width {width}",
+                    detail.id.as_str()
+                );
+                assert!(
+                    detail.id.as_str() == "detail-cover"
+                        || !intersects(detail.bounds, cover.bounds),
+                    "{} {:?} intersects cover {:?} at width {width}",
+                    detail.id.as_str(),
+                    detail.bounds,
+                    cover.bounds
                 );
             }
         }

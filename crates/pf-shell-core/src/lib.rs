@@ -2859,18 +2859,13 @@ impl ShellCore {
                     &format!("item-{}", item.id),
                     Role::Button,
                     &card_label,
-                    x,
-                    382.0,
-                    card_width,
-                    220.0,
-                    state_token(availability, i == self.focus),
+                    x + 8.0,
+                    390.0,
+                    card_width - 16.0,
+                    158.0,
+                    "--color-surface-canvas",
                 );
                 n.action = Some(NodeAction::Activate);
-                n.state.focused = i == self.focus;
-                n.state.disabled = !item
-                    .variants
-                    .iter()
-                    .any(|variant| matches!(variant.availability, Availability::Ready));
                 n.children = art_nodes(
                     item,
                     "home-card",
@@ -2880,6 +2875,15 @@ impl ShellCore {
                     158.0,
                     i == self.focus,
                 );
+                if i == self.focus
+                    && let Some(art) = n
+                        .children
+                        .iter_mut()
+                        .find(|child| child.id.as_str() == format!("home-card-art-{}", item.id))
+                {
+                    art.style_token = "--state-focused-ring".into();
+                    art.state.focused = true;
+                }
                 add_unavailable_card_cues(
                     &mut n.children,
                     item,
@@ -4733,9 +4737,7 @@ fn procedural_art_nodes(
     let home = context == "home-card";
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
-    let kind_y = if home {
-        y + 166.0
-    } else if favorite {
+    let kind_y = if favorite {
         y + 8.0
     } else if detail {
         y + art_height - 68.0
@@ -4743,7 +4745,7 @@ fn procedural_art_nodes(
         y + 142.0
     };
     let label_y = if home {
-        y + 210.0
+        y + 166.0
     } else if favorite {
         y + 32.0
     } else if detail {
@@ -4826,7 +4828,7 @@ fn procedural_art_nodes(
         )
         .with_type_role(TypeRole::Plate),
     ];
-    if let Some(edition) = edition {
+    if let Some(edition) = edition.filter(|_| !home) {
         nodes.push(
             node(
                 &format!("{context}-plate-{id}"),
@@ -4877,7 +4879,7 @@ fn art_nodes(
         let favorite = context == "favorite-card";
         let detail = context == "detail-art";
         let label_y = if home {
-            y + 210.0
+            y + 166.0
         } else if favorite {
             y + 32.0
         } else {
@@ -4969,18 +4971,20 @@ fn add_unavailable_card_cues(
         )
         .with_type_role(TypeRole::Caption),
     );
+    let reason = format!(
+        "⊘ {}",
+        availability_text(availability, &Presentation::Ready)
+    );
+    let reason_lines = (label_text_width(&reason) / width).ceil().max(1.0);
     nodes.push(
         node(
             &format!("{context}-reason-{}", item.id),
             Role::Text,
-            &format!(
-                "⊘ {}",
-                availability_text(availability, &Presentation::Ready)
-            ),
+            &reason,
             x,
-            if home { y + 238.0 } else { y + 204.0 },
+            if home { y + 194.0 } else { y + 204.0 },
             width,
-            28.0,
+            8.0 + 20.0 * reason_lines,
             "--color-text-muted",
         )
         .with_type_role(TypeRole::Caption),
@@ -8264,9 +8268,9 @@ mod tests {
                     "missing Home card anatomy node {node_id}"
                 );
             }
-            assert_eq!(
-                find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
-                Some(TypeRole::Eyebrow)
+            assert!(
+                find(scene.root(), &format!("home-card-plate-{id}")).is_none(),
+                "Home cards must not paint an edition plate below their art"
             );
             assert_eq!(
                 find(scene.root(), &format!("home-card-title-{id}"))
@@ -8444,7 +8448,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "initial", "plate", "title"] {
+        for part in ["art", "initial", "title"] {
             assert!(
                 favorite
                     .children
@@ -8452,6 +8456,13 @@ mod tests {
                     .any(|node| node.id.as_str() == format!("home-card-{part}-ridge"))
             );
         }
+        assert!(
+            favorite
+                .children
+                .iter()
+                .all(|node| node.id.as_str() != "home-card-plate-ridge"),
+            "the Home label must sit directly on the canvas"
+        );
         snapshot.user_projection.favorite_item_ids.clear();
         let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
             .scene(metrics, "")
@@ -8728,6 +8739,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn home_cards_focus_only_the_art_and_setup_caption_fits_above_footer() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let reason = "Content pack not installed";
+        let mut core = fixture_core(vec![item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "stream",
+                "setup-app",
+                Availability::NeedsSetup {
+                    reason: reason.into(),
+                },
+            )],
+        )]);
+        core.focus = 0;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let card = find(scene.root(), "item-setup").unwrap();
+        let art = find(scene.root(), "home-card-art-setup").unwrap();
+        let caption = find(scene.root(), "home-card-reason-setup").unwrap();
+        let footer = find(scene.root(), "prompt-bar").unwrap();
+
+        assert_eq!(card.style_token, "--color-surface-canvas");
+        assert_eq!(card.bounds, art.bounds);
+        assert_eq!(scene.default_focus(), &art.id);
+        assert_eq!(art.style_token, "--state-focused-ring");
+        assert_eq!(
+            find(scene.root(), scene.default_focus().as_str())
+                .unwrap()
+                .bounds,
+            art.bounds,
+            "the focus ring must use the art bounds"
+        );
+        assert!(find(scene.root(), "home-card-plate-setup").is_none());
+        assert_eq!(
+            find(scene.root(), "home-card-veil-setup").unwrap().bounds,
+            art.bounds,
+            "the unavailable tint is confined to the art"
+        );
+        assert_eq!(
+            caption.accessible_label,
+            format!("⊘ Finish setup — {reason}")
+        );
+        assert!(caption.bounds.height > 28.0, "the caption must wrap");
+        assert!(caption.bounds.y + caption.bounds.height <= footer.bounds.y);
     }
 
     #[test]

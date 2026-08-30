@@ -205,6 +205,8 @@ enum NetworkFlow {
 
 #[derive(Clone, Copy)]
 enum SystemRow {
+    TimeUnavailable,
+    TransferUnavailable,
     Timezone,
     Ntp,
     ManualTime,
@@ -532,6 +534,12 @@ impl ShellCore {
 
     fn system_rows(&self) -> Vec<SystemRow> {
         let mut rows = Vec::new();
+        if self.time_state.is_err() {
+            rows.push(SystemRow::TimeUnavailable);
+        }
+        if self.transfer_services.is_err() {
+            rows.push(SystemRow::TransferUnavailable);
+        }
         if self.time_state.is_ok() {
             rows.push(SystemRow::Timezone);
         }
@@ -1296,12 +1304,14 @@ impl ShellCore {
                 }
                 SettingsRoom::Controls => Some(Effect::ResetRemaps),
                 SettingsRoom::Network => {
+                    self.wifi_networks.get(self.focus)?;
                     self.selected_wifi = Some(self.focus);
                     self.network_flow = NetworkFlow::Credential;
                     self.wifi_credential = WifiCredential::new(Vec::new());
                     None
                 }
                 SettingsRoom::System => match self.system_rows().get(self.focus).copied()? {
+                    SystemRow::TimeUnavailable | SystemRow::TransferUnavailable => None,
                     SystemRow::Timezone => {
                         let current = self.time_state.as_ref().ok()?.timezone.as_str();
                         let next = TIMEZONES
@@ -2447,19 +2457,26 @@ impl ShellCore {
                         .collect()
                 }
             }
-            SettingsRoom::System if self.system_rows().is_empty() => vec![(
-                self.time_state
-                    .as_ref()
-                    .err()
-                    .cloned()
-                    .or_else(|| self.transfer_services.as_ref().err().cloned())
-                    .unwrap_or_else(|| "System controls unavailable".into()),
-                false,
-            )],
             SettingsRoom::System => self
                 .system_rows()
                 .into_iter()
                 .map(|row| match row {
+                    SystemRow::TimeUnavailable => (
+                        self.time_state
+                            .as_ref()
+                            .err()
+                            .cloned()
+                            .unwrap_or_else(|| "Time status unavailable".into()),
+                        false,
+                    ),
+                    SystemRow::TransferUnavailable => (
+                        self.transfer_services
+                            .as_ref()
+                            .err()
+                            .cloned()
+                            .unwrap_or_else(|| "Transfer unavailable".into()),
+                        false,
+                    ),
                     SystemRow::Timezone => (
                         self.time_state.as_ref().map_or_else(Clone::clone, |state| {
                             format!("Timezone · {}", state.timezone)

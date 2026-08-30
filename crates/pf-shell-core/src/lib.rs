@@ -57,13 +57,15 @@ fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
 }
 
 fn ready_variant_label(variant: &Variant) -> String {
+    let identity = humanize_identifier(&variant.id);
     match ready_variant_capability(variant) {
-        ReadyVariantCapability::Native => "Installed on this device".to_owned(),
-        ReadyVariantCapability::Stream => "Stream from your PC".to_owned(),
-        ReadyVariantCapability::Unknown if variant.provenance.runtime_family.is_empty() => {
-            humanize_identifier(&variant.id)
-        }
-        ReadyVariantCapability::Unknown => humanize_identifier(&variant.provenance.runtime_family),
+        ReadyVariantCapability::Native => format!("{identity} · Installed on this device"),
+        ReadyVariantCapability::Stream => format!("{identity} · Stream from your PC"),
+        ReadyVariantCapability::Unknown if variant.provenance.runtime_family.is_empty() => identity,
+        ReadyVariantCapability::Unknown => format!(
+            "{identity} · {}",
+            humanize_identifier(&variant.provenance.runtime_family)
+        ),
     }
 }
 
@@ -7518,9 +7520,54 @@ mod tests {
         let stream_label = &node_by_id(scene.root(), "detail-variant-1-name")
             .unwrap()
             .accessible_label;
-        assert_eq!(native_label, "Installed on this device");
-        assert_eq!(stream_label, "Stream from your PC");
+        assert_eq!(native_label, "Native · Installed on this device");
+        assert_eq!(stream_label, "Stream · Stream from your PC");
         assert_ne!(native_label, stream_label);
+    }
+
+    #[test]
+    fn ready_variants_within_the_same_capability_family_have_distinct_labels() {
+        let standard = variant("standard-edition", "many-standard", Availability::Ready);
+        let deluxe = variant("deluxe-edition", "many-deluxe", Availability::Ready);
+        let mut core = fixture_core(vec![item("many", "Many Moons", vec![standard, deluxe])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let standard_label = &node_by_id(scene.root(), "detail-variant-0-name")
+            .unwrap()
+            .accessible_label;
+        let deluxe_label = &node_by_id(scene.root(), "detail-variant-1-name")
+            .unwrap()
+            .accessible_label;
+
+        assert_eq!(
+            standard_label,
+            "Standard edition · Installed on this device"
+        );
+        assert_eq!(deluxe_label, "Deluxe edition · Installed on this device");
+        assert_ne!(standard_label, deluxe_label);
+    }
+
+    #[test]
+    fn single_ready_variant_label_reads_as_a_natural_capability_phrase() {
+        let native = variant("native", "only-native", Availability::Ready);
+
+        assert_eq!(
+            ready_variant_label(&native),
+            "Native · Installed on this device"
+        );
     }
 
     #[test]

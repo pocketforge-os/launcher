@@ -2520,10 +2520,13 @@ impl ShellCore {
                 "--color-surface-canvas",
             ));
             for (i, &item_index) in self.library_items.iter().enumerate() {
-                let item = &self.items[item_index];
-                let availability = best_availability(item);
                 let column = i % geometry.columns;
                 let row = i / geometry.columns;
+                if row < first_visible_row || row >= first_visible_row + visible_rows {
+                    continue;
+                }
+                let item = &self.items[item_index];
+                let availability = best_availability(item);
                 let card_label = if item.has_real_art() {
                     String::new()
                 } else {
@@ -5835,6 +5838,110 @@ mod tests {
         assert!(focused.bounds.y >= 0.0);
         assert!(focused.bounds.y + focused.bounds.height <= metrics.logical_height);
         assert_eq!(focused.id.as_str(), "library-item-title-480");
+    }
+
+    #[test]
+    fn compact_library_emits_only_the_focused_visible_row() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5 + 7;
+        let metrics = SurfaceMetrics {
+            logical_width: 640.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        let geometry = library_geometry(metrics.logical_width);
+        let cards = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-item-"))
+            .collect::<Vec<_>>();
+        let toolbar_bottom = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-filter-"))
+            .map(|node| node.bounds.y + node.bounds.height)
+            .fold(0.0_f32, f32::max);
+
+        assert!(cards.iter().all(|card| card.bounds.y >= geometry.card_top));
+        assert!(
+            cards.iter().all(|card| card.bounds.y >= toolbar_bottom),
+            "visible cards must not overlap the filter toolbar"
+        );
+        assert!(
+            cards.len() <= geometry.columns,
+            "only one row fits at 640x720"
+        );
+        assert!(
+            cards
+                .iter()
+                .any(|card| card.id.as_str() == "library-item-item-7" && card.state.focused),
+            "the focused card must remain in the emitted row"
+        );
+    }
+
+    #[test]
+    fn desktop_library_emits_every_card_in_the_first_row() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let emitted_ids = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-item-"))
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            emitted_ids,
+            (0..6)
+                .map(|index| format!("library-item-item-{index}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

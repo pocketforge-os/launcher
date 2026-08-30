@@ -17,3 +17,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Install Wayland keyboard dependency
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+      - run: cargo test -p pf-shell --features wayland --locked
+      - run: cargo clippy -p pf-shell --features wayland --all-targets -- -D warnings

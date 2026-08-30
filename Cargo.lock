@@ -33,6 +33,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "bitvec"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
+dependencies = [
+ "funty",
+ "radium",
+ "tap",
+ "wyz",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -62,10 +74,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc"
+version = "1.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ad534f4357a5264cce5019c989cf66a4f0dc4e0d1b1d15f8aacec0ff7360273"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cosmic-text"
@@ -154,6 +182,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -176,6 +210,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "evdev"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b686663ba7f08d92880ff6ba22170f1df4e83629341cba34cf82cd65ebea99"
+dependencies = [
+ "bitvec",
+ "cfg-if",
+ "libc",
+ "nix",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,6 +235,12 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "flate2"
@@ -232,6 +284,12 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "funty"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "generic-array"
@@ -278,9 +336,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libm"
@@ -336,6 +394,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -357,7 +427,7 @@ dependencies = [
 [[package]]
 name = "pf-framehost"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "libc",
  "pf-ports",
@@ -366,9 +436,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-framehost-wayland"
+version = "0.0.1"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
+dependencies = [
+ "libc",
+ "pf-ports",
+ "pf-render",
+ "pf-scene",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "xkbcommon",
+]
+
+[[package]]
 name = "pf-input-map"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-ports",
  "pf-scene",
@@ -379,7 +464,7 @@ dependencies = [
 [[package]]
 name = "pf-ports"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-scene",
 ]
@@ -387,7 +472,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "serde",
  "serde_json",
@@ -396,7 +481,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs-port"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-ports",
  "pf-prefs",
@@ -405,7 +490,7 @@ dependencies = [
 [[package]]
 name = "pf-render"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "cosmic-text",
  "pf-scene",
@@ -416,12 +501,12 @@ dependencies = [
 [[package]]
 name = "pf-scene"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 
 [[package]]
 name = "pf-session-authority"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-ports",
  "pf-wire",
@@ -432,7 +517,7 @@ dependencies = [
 [[package]]
 name = "pf-session-client"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-ports",
  "pf-session-authority",
@@ -445,9 +530,11 @@ dependencies = [
 name = "pf-shell"
 version = "0.1.0"
 dependencies = [
+ "evdev",
  "libc",
  "pf-catalog",
  "pf-framehost",
+ "pf-framehost-wayland",
  "pf-input-map",
  "pf-ports",
  "pf-prefs",
@@ -481,7 +568,7 @@ dependencies = [
 [[package]]
 name = "pf-theme"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
 dependencies = [
  "pf-scene",
  "roxmltree",
@@ -492,7 +579,13 @@ dependencies = [
 [[package]]
 name = "pf-wire"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7#b84b6cccb2c1ce6e8cbeeaab6c5fe3ae54bb18e7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=5aaa9d1#5aaa9d167a940c25f8ab4c83610de1699952672b"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "png"
@@ -517,6 +610,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -530,6 +632,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "radium"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rangemap"
@@ -679,6 +787,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -745,6 +859,12 @@ checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "tap"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
@@ -932,6 +1052,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "wayland-backend"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38a91b4eaddff87b1cd1074985e3713da4af2c49742d1b356b2c01670a67a078"
+dependencies = [
+ "cc",
+ "downcast-rs",
+ "rustix",
+ "smallvec",
+ "wayland-sys",
+]
+
+[[package]]
+name = "wayland-client"
+version = "0.31.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c66a47e840dc20793f2264eb4b3e4ecb4b75d91c0dd4af04b456128e0bdd449d"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustix",
+ "wayland-backend",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols"
+version = "0.32.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efa790ed75fbfd71283bd2521a1cfdc022aabcc28bdcff00851f9e4ae88d9901"
+dependencies = [
+ "bitflags 2.13.1",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-scanner"
+version = "0.31.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
+dependencies = [
+ "proc-macro2",
+ "quick-xml",
+ "quote",
+]
+
+[[package]]
+name = "wayland-sys"
+version = "0.31.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8eab23fefc9e41f8e841df4a9c707e8a8c4ed26e944ef69297184de2785e3be"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -979,6 +1156,32 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+
+[[package]]
+name = "wyz"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
+dependencies = [
+ "tap",
+]
+
+[[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
+
+[[package]]
+name = "xkeysym"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "yazi"

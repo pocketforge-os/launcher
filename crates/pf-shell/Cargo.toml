@@ -6,10 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+evdev = "0.13.2"
 libc = "0.2.175"
 pf-catalog = { path = "../pf-catalog" }
 pf-shell-core = { path = "../pf-shell-core" }
 pf-framehost.workspace = true
+pf-framehost-wayland = { workspace = true, optional = true }
 pf-input-map.workspace = true
 pf-prefs.workspace = true
 pf-prefs-port.workspace = true
@@ -24,6 +26,9 @@ png = "0.17.16"
 serde_json = "1.0.143"
 sha2 = "0.10.9"
 rustix = { version = "1.1.4", features = ["event"] }
+
+[features]
+wayland = ["dep:pf-framehost-wayland", "pf-framehost-wayland/keyboard"]
 
 [dev-dependencies]
 tempfile = "3.21.0"

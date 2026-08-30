@@ -3228,8 +3228,11 @@ impl ShellCore {
         let row_gap = 12.0;
         let rows_top = 174.0;
         let rows_bottom = h - PROMPTS_AREA_HEIGHT - 16.0;
-        let capacity =
-            (((rows_bottom - rows_top + row_gap) / (row_height + row_gap)).floor() as usize).max(1);
+        let visible_rows = ((rows_bottom - rows_top + row_gap) / (row_height + row_gap))
+            .floor()
+            .max(0.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let capacity = (visible_rows as usize).max(1);
         let first = self
             .focus
             .saturating_sub(capacity.saturating_sub(1))

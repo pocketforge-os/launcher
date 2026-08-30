@@ -17,7 +17,7 @@ use pf_ports::{
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::{RasterFrame, RenderNote};
-use pf_scene::{Insets, Orientation, SurfaceMetrics};
+use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
@@ -597,6 +597,24 @@ fn emit_f10_evidence(
     emit(host, &mut core, footer, out, "search")?;
     core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "details")?;
+
+    let mut unavailable_snapshot = snapshot.clone();
+    let unavailable_item = unavailable_snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.id == "glass-harbor")
+        .ok_or("unavailable details fixture item missing")?;
+    unavailable_item
+        .variants
+        .retain(|variant| !matches!(variant.availability, pf_catalog::Availability::Ready));
+    let mut unavailable = fixture_core(&unavailable_snapshot, theme, false);
+    unavailable.authority_snapshot(false);
+    unavailable.action(&ShellAction::Custom("Room.next".into()));
+    for _ in 0..8 {
+        unavailable.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    }
+    unavailable.action(&ShellAction::Activate);
+    emit(host, &mut unavailable, footer, out, "details-unavailable")?;
 
     let mut chooser_snapshot = snapshot.clone();
     let item = chooser_snapshot
@@ -1801,8 +1819,14 @@ fn emit(
     out: &Path,
     name: &str,
 ) -> Result<(), String> {
-    present(host, core, prompt)?;
-    let frame = host.frame().ok_or("frame missing")?;
+    let scene = core
+        .scene(host.metrics(), prompt)
+        .ok_or("shell has no frame")?;
+    present_scene(host, core, prompt, &scene)?;
+    let frame = host.frame().ok_or("frame missing")?.clone();
+    if env::var_os("PF_RASTER_INK_GUARD").is_some() {
+        assert_raster_text_legible(&scene, host.metrics(), core.theme_base(), core.text_scale())?;
+    }
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
@@ -1815,6 +1839,216 @@ fn emit(
         .map_err(|e| e.to_string())?;
     println!("{}  {}", hex(&Sha256::digest(&frame.rgba)), path.display());
     Ok(())
+}
+
+fn fails_raster_text_floor(
+    node: &Node,
+    ink_pixels: usize,
+    rendered_ratio: f64,
+    floor: f64,
+) -> bool {
+    ink_pixels == 0 || (!node.state.disabled && rendered_ratio < floor)
+}
+
+fn core_ink_low_tail(samples: &[Option<(f64, f64)>]) -> Option<f64> {
+    let mut ratios = Vec::new();
+    for &(ratio, coverage) in samples.iter().flatten() {
+        if coverage >= 0.8 {
+            ratios.push(ratio);
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    ratios.get(ratios.len().saturating_sub(1) / 10).copied()
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+fn assert_raster_text_legible(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale: u16,
+) -> Result<(), String> {
+    fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
+        if &node.id == target {
+            node.accessible_label.clear();
+            return;
+        }
+        for child in &mut node.children {
+            suppress_text(child, target);
+        }
+    }
+    fn luminance(color: [u8; 3]) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color[0]) + 0.7152 * channel(color[1]) + 0.0722 * channel(color[2])
+    }
+    fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let (light, dark) = if luminance(a) >= luminance(b) {
+            (luminance(a), luminance(b))
+        } else {
+            (luminance(b), luminance(a))
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+    fn rgb(value: &str) -> [u8; 3] {
+        [1, 3, 5].map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+    }
+    fn coverage(ink: [u8; 3], background: [u8; 3], foreground: [u8; 3]) -> f64 {
+        let mut projection = 0.0;
+        let mut magnitude = 0.0;
+        for channel in 0..3 {
+            let direction = f64::from(foreground[channel]) - f64::from(background[channel]);
+            projection += (f64::from(ink[channel]) - f64::from(background[channel])) * direction;
+            magnitude += direction * direction;
+        }
+        if magnitude == 0.0 {
+            0.0
+        } else {
+            (projection / magnitude).clamp(0.0, 1.0)
+        }
+    }
+    fn visit(
+        node: &Node,
+        frame: &RasterFrame,
+        scene: &pf_scene::Scene,
+        render: &impl Fn(&pf_scene::Scene) -> Result<RasterFrame, String>,
+        base: pf_theme::Base,
+        floor: f64,
+        failures: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if matches!(node.role, Role::Text | Role::Heading)
+            && !node.accessible_label.trim().is_empty()
+        {
+            let mut root = scene.root().clone();
+            suppress_text(&mut root, &node.id);
+            let suppressed_scene = pf_scene::Scene::new(root, scene.default_focus().clone())
+                .map_err(|error| error.to_string())?;
+            let suppressed = render(&suppressed_scene)?;
+            if (frame.width, frame.height) != (suppressed.width, suppressed.height) {
+                return Err("raster guard frame dimensions changed between paired renders".into());
+            }
+            let left = node.bounds.x.max(0.0) as u32;
+            let top = node.bounds.y.max(0.0) as u32;
+            let right = (node.bounds.x + node.bounds.width).ceil().max(0.0) as u32;
+            let bottom = (node.bounds.y + node.bounds.height).ceil().max(0.0) as u32;
+            let mut ink_pixels = 0_usize;
+            let sample_width = right.min(frame.width).saturating_sub(left) as usize;
+            let sample_height = bottom.min(frame.height).saturating_sub(top) as usize;
+            let mut samples = vec![None; sample_width * sample_height];
+            let text_token = if node.state.disabled {
+                "--state-disabled-text"
+            } else if node.state.unavailable {
+                "--state-unavailable-text"
+            } else if node.state.focused {
+                "--state-focused-text"
+            } else {
+                "--state-rest-text"
+            };
+            let foreground = rgb(pf_theme::flagship().resolve(base, text_token).unwrap());
+            for y in top..bottom.min(frame.height) {
+                for x in left..right.min(frame.width) {
+                    let offset = ((y * frame.width + x) * 4) as usize;
+                    let ink = &frame.rgba[offset..offset + 3];
+                    let background = &suppressed.rgba[offset..offset + 3];
+                    if ink != background {
+                        ink_pixels += 1;
+                        let sample = (y - top) as usize * sample_width + (x - left) as usize;
+                        let ink = [ink[0], ink[1], ink[2]];
+                        let background = [background[0], background[1], background[2]];
+                        samples[sample] = Some((
+                            contrast(ink, background),
+                            coverage(ink, background, foreground),
+                        ));
+                    }
+                }
+            }
+            let occluded = if ink_pixels == 0 {
+                // A node that paints in isolation but has no per-node diff in the route
+                // is covered by later content, not an inkless glyph. A genuinely
+                // inkless node also has no isolated diff.
+                let isolated_scene = pf_scene::Scene::new(node.clone(), node.id.clone())
+                    .map_err(|error| error.to_string())?;
+                let isolated = render(&isolated_scene)?;
+                let mut isolated_root = node.clone();
+                suppress_text(&mut isolated_root, &node.id);
+                let isolated_suppressed_scene =
+                    pf_scene::Scene::new(isolated_root, node.id.clone())
+                        .map_err(|error| error.to_string())?;
+                let isolated_suppressed = render(&isolated_suppressed_scene)?;
+                isolated.rgba != isolated_suppressed.rgba
+            } else {
+                false
+            };
+            let rendered_ratio = core_ink_low_tail(&samples).unwrap_or_default();
+            // High coverage structurally removes the anti-aliased fringe. The low
+            // decile then requires the glyph body, rather than a high-contrast
+            // minority, to clear the rendered contrast floor. Every sample comes
+            // from the rendered and text-suppressed rasters, never tokens.
+            // Disabled text has no available action and is exempt from the text
+            // contrast floor, but it must still produce visible raster ink.
+            if occluded {
+                failures.push(format!(
+                    "{} ({:?}, {:?}): occluded-by-later-paint, ink_pixels=0",
+                    node.id.as_str(),
+                    node.accessible_label,
+                    node.bounds,
+                ));
+            } else if fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
+                failures.push(format!(
+                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}, required={floor:.1}",
+                    node.id.as_str(),
+                    node.accessible_label,
+                    node.bounds,
+                ));
+            }
+        }
+        for child in &node.children {
+            visit(child, frame, scene, render, base, floor, failures)?;
+        }
+        Ok(())
+    }
+
+    let render = |scene: &pf_scene::Scene| -> Result<RasterFrame, String> {
+        let mut host = OffscreenHost::new(metrics);
+        host.set_theme_base(base);
+        host.set_text_scale(f32::from(text_scale) / 100.0)
+            .map_err(|error| format!("render: {error:?}"))?;
+        host.present(scene).map_err(|error| error.to_string())?;
+        host.frame()
+            .cloned()
+            .ok_or("raster guard frame missing".into())
+    };
+    let frame = render(scene)?;
+    let mut failures = Vec::new();
+    let floor = if base == pf_theme::Base::HighContrast {
+        7.0
+    } else {
+        4.5
+    };
+    visit(
+        scene.root(),
+        &frame,
+        scene,
+        &render,
+        base,
+        floor,
+        &mut failures,
+    )?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("raster ink guard failed:\n{}", failures.join("\n")))
+    }
 }
 
 fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
@@ -1957,6 +2191,160 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    fn contrast_probe(state: fn(&mut Node)) -> Node {
+        let mut label = Node::new(
+            pf_scene::NodeId::new("contrast-probe-label").unwrap(),
+            Role::Text,
+            "Low contrast",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
+            "--state-rest-text",
+        );
+        state(&mut label);
+        label
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_a_sub_floor_text_pair() {
+        let label = contrast_probe(|_| {});
+        assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
+        assert!(fails_raster_text_floor(&label, 1, 6.9, 7.0));
+    }
+
+    fn synthetic_ink(
+        width: usize,
+        height: usize,
+        ratio: impl Fn(usize) -> f64,
+    ) -> Vec<Option<(f64, f64)>> {
+        let mut samples = vec![None; width * height];
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                samples[y * width + x] = Some((ratio(x), 1.0));
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_mixed_background_core_ink() {
+        let samples = synthetic_ink(12, 7, |x| if x < 6 { 5.0 } else { 4.0 });
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio < 4.5, "low-tail core contrast was {ratio}");
+    }
+
+    #[test]
+    fn raster_ink_guard_accepts_uniform_passing_core_with_aa_fringe() {
+        let mut samples = synthetic_ink(12, 7, |_| 5.0);
+        for x in 1..11 {
+            samples[12 + x] = Some((1.1, 0.3));
+            samples[5 * 12 + x] = Some((1.1, 0.3));
+        }
+        for y in 1..6 {
+            samples[y * 12 + 1] = Some((1.1, 0.3));
+            samples[y * 12 + 10] = Some((1.1, 0.3));
+        }
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio >= 4.5, "AA fringe lowered core contrast to {ratio}");
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_uniform_sub_floor_core_ink() {
+        let samples = synthetic_ink(12, 7, |_| 4.0);
+        let ratio = core_ink_low_tail(&samples).unwrap();
+        assert!(ratio < 4.5, "sub-floor core contrast was {ratio}");
+    }
+
+    #[test]
+    fn raster_ink_guard_exempts_disabled_text_from_the_floor() {
+        let label = contrast_probe(|node| node.state.disabled = true);
+        assert!(!fails_raster_text_floor(&label, 1, 4.0, 4.5));
+        assert!(fails_raster_text_floor(&label, 0, 4.0, 4.5));
+    }
+
+    #[test]
+    fn raster_ink_guard_does_not_exempt_unavailable_text() {
+        let label = contrast_probe(|node| node.state.unavailable = true);
+        assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
+    }
+
+    #[test]
+    fn raster_ink_guard_attributes_overlapping_ink_to_each_text_node() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root_id = pf_scene::NodeId::new("visible-overlap-label").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Text,
+            "Visible ink",
+            bounds,
+            "--state-rest-text",
+        )
+        .with_children(vec![Node::new(
+            pf_scene::NodeId::new("inkless-overlap-label").unwrap(),
+            Role::Text,
+            "\u{200d}",
+            bounds,
+            "--state-rest-text",
+        )]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("inkless-overlap-label") && failure.contains("ink_pixels=0"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_text_fully_occluded_by_later_fill() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root_id = pf_scene::NodeId::new("occlusion-probe").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("occluded-label").unwrap(),
+                Role::Text,
+                "Fully covered",
+                bounds,
+                "--color-surface-canvas",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("later-fill").unwrap(),
+                Role::Group,
+                "",
+                bounds,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("occluded-label") && failure.contains("occluded-by-later-paint"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
 
     struct TextScaleHost {
         inner: OffscreenHost,

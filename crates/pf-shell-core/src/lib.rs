@@ -2558,7 +2558,7 @@ impl ShellCore {
                         16.0,
                         width,
                         26.0,
-                        "--state-rest-text",
+                        "--color-surface-raised",
                     )
                     .with_type_role(TypeRole::Caption),
                 );
@@ -2754,7 +2754,10 @@ impl ShellCore {
             },
             Route::Quick => unreachable!(),
         };
-        if self.route != Route::Settings {
+        if !matches!(
+            self.route,
+            Route::Settings | Route::Library | Route::Details
+        ) {
             out.push(
                 node(
                     "route-heading",
@@ -2764,7 +2767,7 @@ impl ShellCore {
                     112.0,
                     500.0,
                     48.0,
-                    "--color-text-primary",
+                    "--color-surface-canvas",
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
@@ -3008,8 +3011,8 @@ impl ShellCore {
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
-                chip.children.push(
-                    node(
+                chip.children.push({
+                    let mut label_node = node(
                         &format!("library-filter-{index}-label"),
                         Role::Text,
                         &label,
@@ -3019,17 +3022,15 @@ impl ShellCore {
                             - CHIP_HORIZONTAL_PADDING
                             - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_width),
                         26.0,
-                        if focused {
-                            "--color-text-inverse"
-                        } else {
-                            "--state-rest-text"
-                        },
+                        chip.style_token.as_str(),
                     )
-                    .with_type_role(TypeRole::Label),
-                );
+                    .with_type_role(TypeRole::Label);
+                    label_node.state.focused = focused;
+                    label_node
+                });
                 if let Some(count) = count {
-                    chip.children.push(
-                        node(
+                    chip.children.push({
+                        let mut count_node = node(
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
@@ -3037,14 +3038,12 @@ impl ShellCore {
                             chip.bounds.y + 5.0,
                             count_width,
                             26.0,
-                            if focused {
-                                "--color-text-inverse"
-                            } else {
-                                "--color-text-muted"
-                            },
+                            chip.style_token.as_str(),
                         )
-                        .with_type_role(TypeRole::Label),
-                    );
+                        .with_type_role(TypeRole::Label);
+                        count_node.state.focused = focused;
+                        count_node
+                    });
                 }
                 out.push(chip);
                 if active {
@@ -3132,10 +3131,10 @@ impl ShellCore {
                         Role::Text,
                         &item.title,
                         card.bounds.x,
-                        card.bounds.y + 154.0,
+                        card.bounds.y + 178.0,
                         geometry.card_width,
                         34.0,
-                        "--color-text-primary",
+                        "--color-surface-canvas",
                     )
                     .with_type_role(TypeRole::Label),
                 );
@@ -3166,7 +3165,7 @@ impl ShellCore {
                 165.0,
                 w - 96.0,
                 54.0,
-                "--state-rest-text",
+                "--color-surface-canvas",
             ));
             if self.search_results.is_empty() {
                 out.push(node(
@@ -3242,7 +3241,7 @@ impl ShellCore {
                 112.0,
                 detail_column_width,
                 30.0,
-                "--color-text-secondary",
+                "--color-surface-canvas",
             ));
             out.push(node(
                 "detail-title",
@@ -3304,11 +3303,7 @@ impl ShellCore {
                 218.0,
                 detail_column_width,
                 30.0,
-                if matches!(detail_availability, Availability::Ready) {
-                    "--color-text-primary"
-                } else {
-                    "--state-unavailable-text"
-                },
+                "--color-surface-canvas",
             );
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
@@ -3340,7 +3335,7 @@ impl ShellCore {
                     252.0,
                     detail_column_width,
                     42.0,
-                    "--color-text-secondary",
+                    "--color-surface-canvas",
                 ));
             }
             out.push(
@@ -3352,7 +3347,7 @@ impl ShellCore {
                     294.0,
                     detail_column_width,
                     28.0,
-                    "--color-text-muted",
+                    "--color-surface-canvas",
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
@@ -3511,7 +3506,7 @@ impl ShellCore {
                     235.0,
                     chooser_width,
                     40.0,
-                    "--color-text-secondary",
+                    "--color-surface-canvas",
                 ));
                 out.push(node(
                     "chooser-scroll-region",
@@ -3666,7 +3661,7 @@ impl ShellCore {
                             flow_top,
                             detail_column_width,
                             22.0,
-                            "--color-text-muted",
+                            "--color-surface-canvas",
                         )
                         .with_type_role(TypeRole::Eyebrow),
                     );
@@ -3678,7 +3673,7 @@ impl ShellCore {
                         flow_top + 26.0,
                         detail_column_width,
                         28.0,
-                        "--color-text-primary",
+                        "--color-surface-canvas",
                     ));
                     flow_top += block_height + block_gap;
                 }
@@ -3716,7 +3711,7 @@ impl ShellCore {
                                 flow_top,
                                 fact_width - 8.0,
                                 22.0,
-                                "--color-text-muted",
+                                "--color-surface-canvas",
                             )
                             .with_type_role(TypeRole::Eyebrow),
                         );
@@ -3728,7 +3723,7 @@ impl ShellCore {
                             flow_top + 26.0,
                             fact_width - 8.0,
                             28.0,
-                            "--color-text-primary",
+                            "--color-surface-canvas",
                         ));
                     }
                 }
@@ -3799,16 +3794,14 @@ impl ShellCore {
                     50.0,
                     if focused {
                         "--state-focused-ring"
-                    } else if selected {
-                        "--state-selected-accent"
                     } else {
-                        "--state-rest-surface"
+                        "--color-surface-raised"
                     },
                 );
                 nav.state.focused = focused;
                 nav.state.selected = selected;
                 nav.action = Some(NodeAction::Activate);
-                nav.children.push(node(
+                let mut nav_label = node(
                     &format!("settings-nav-{}-label", name.to_ascii_lowercase()),
                     Role::Text,
                     &format!("{} {name}", if selected { "▌" } else { " " }),
@@ -3816,12 +3809,14 @@ impl ShellCore {
                     nav.bounds.y + 10.0,
                     nav.bounds.width - 24.0,
                     30.0,
-                    if focused || selected {
+                    if focused {
                         "--color-text-inverse"
                     } else {
-                        "--state-rest-text"
+                        "--color-surface-raised"
                     },
-                ));
+                );
+                nav_label.state.focused = focused;
+                nav.children.push(nav_label);
                 out.push(nav);
             }
             if portrait && !self.settings_in_rows {
@@ -3846,7 +3841,7 @@ impl ShellCore {
             112.0,
             content_width,
             48.0,
-            "--color-text-primary",
+            "--color-surface-canvas",
         ));
         if portrait {
             out.push(node(
@@ -3857,7 +3852,7 @@ impl ShellCore {
                 82.0,
                 content_width,
                 28.0,
-                "--color-text-secondary",
+                "--color-surface-canvas",
             ));
         }
 
@@ -3914,16 +3909,18 @@ impl ShellCore {
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
             }
-            let text_token = if focused {
-                "--color-text-inverse"
+            let row_surface = if focused {
+                "--state-focused-ring"
             } else if interactive {
-                "--state-rest-text"
+                "--state-rest-surface"
             } else {
-                "--color-text-secondary"
+                "--state-disabled-border"
             };
             let lines = row.label.lines().collect::<Vec<_>>();
+            let mut fills = Vec::new();
+            let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
-                scene_row.children.push(node(
+                let mut label = node(
                     &format!("settings-row-{}-line-{line_index}", row.id),
                     Role::Text,
                     line,
@@ -3931,8 +3928,11 @@ impl ShellCore {
                     scene_row.bounds.y + 7.0 + line_index as f32 * 25.0,
                     content_width - 150.0,
                     24.0,
-                    text_token,
-                ));
+                    row_surface,
+                );
+                label.state.focused = focused;
+                label.state.disabled = !interactive;
+                text.push(label);
             }
             if row.id == "accessibility-textScale" {
                 let selected_value = lines
@@ -3942,7 +3942,7 @@ impl ShellCore {
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
                     let x = content_left + content_width - 240.0 + segment as f32 * 72.0;
-                    scene_row.children.push(node(
+                    fills.push(node(
                         &format!("settings-text-scale-segment-{value}"),
                         Role::Group,
                         "",
@@ -3951,12 +3951,12 @@ impl ShellCore {
                         68.0,
                         34.0,
                         if selected {
-                            "--state-selected-accent"
+                            "--color-surface-raised"
                         } else {
                             "--color-surface-sunken"
                         },
                     ));
-                    scene_row.children.push(node(
+                    let mut value_node = node(
                         &format!("settings-text-scale-value-{value}"),
                         Role::Text,
                         value,
@@ -3965,11 +3965,14 @@ impl ShellCore {
                         56.0,
                         26.0,
                         if selected {
-                            "--color-text-inverse"
+                            "--color-surface-raised"
                         } else {
-                            "--color-text-primary"
+                            "--color-surface-sunken"
                         },
-                    ));
+                    );
+                    value_node.state.focused = focused;
+                    value_node.state.selected = selected;
+                    text.push(value_node);
                 }
             } else if row.id.starts_with("accessibility-")
                 && lines
@@ -3978,7 +3981,7 @@ impl ShellCore {
             {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
                 let control_left = content_left + content_width - 128.0;
-                scene_row.children.push(node(
+                let mut state_node = node(
                     &format!("settings-toggle-{}-state", row.id),
                     Role::Text,
                     if on { "ON" } else { "OFF" },
@@ -3986,9 +3989,11 @@ impl ShellCore {
                     scene_row.bounds.y + 24.0,
                     38.0,
                     26.0,
-                    text_token,
-                ));
-                scene_row.children.push(node(
+                    row_surface,
+                );
+                state_node.state.focused = focused;
+                text.push(state_node);
+                fills.push(node(
                     &format!("settings-toggle-{}-track", row.id),
                     Role::Group,
                     "",
@@ -4002,7 +4007,7 @@ impl ShellCore {
                         "--color-surface-sunken"
                     },
                 ));
-                scene_row.children.push(node(
+                fills.push(node(
                     &format!("settings-toggle-{}-knob", row.id),
                     Role::Group,
                     "",
@@ -4017,7 +4022,7 @@ impl ShellCore {
                     },
                 ));
             } else if let Some(control) = lines.get(2) {
-                scene_row.children.push(node(
+                let mut control_node = node(
                     &format!("settings-row-{}-control", row.id),
                     Role::Text,
                     control,
@@ -4025,9 +4030,14 @@ impl ShellCore {
                     scene_row.bounds.y + 24.0,
                     104.0,
                     26.0,
-                    text_token,
-                ));
+                    row_surface,
+                );
+                control_node.state.focused = focused;
+                control_node.state.disabled = !interactive;
+                text.push(control_node);
             }
+            scene_row.children.extend(fills);
+            scene_row.children.extend(text);
             out.push(scene_row);
         }
     }
@@ -4381,7 +4391,7 @@ impl ShellCore {
             54.0,
             680.0,
             56.0,
-            "--state-rest-text",
+            "--color-surface-scrim",
         ));
         out.push(node(
             "first-run-copy",
@@ -4391,7 +4401,7 @@ impl ShellCore {
             112.0,
             680.0,
             48.0,
-            "--color-text-secondary",
+            "--color-surface-scrim",
         ));
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
@@ -4421,7 +4431,7 @@ impl ShellCore {
             470.0,
             680.0,
             48.0,
-            "--color-text-secondary",
+            "--color-surface-canvas",
         ));
         let mut continue_node = node(
             "continue",
@@ -4510,7 +4520,7 @@ impl ShellCore {
             232.0,
             352.0,
             34.0,
-            "--state-rest-text",
+            "--color-surface-scrim",
         ));
         let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
         if let Some(index) = self.sleep_row() {
@@ -4594,7 +4604,7 @@ impl ShellCore {
             h - 110.0,
             352.0,
             60.0,
-            "--color-text-secondary",
+            "--color-surface-scrim",
         ));
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
@@ -4774,7 +4784,7 @@ fn procedural_art_nodes(
             if favorite { y + 4.0 } else { y },
             art_width,
             if favorite { 28.0 } else { 60.0 },
-            token,
+            "--color-surface-raised",
         ),
         node(
             &format!("{context}-initial-{id}"),
@@ -4788,7 +4798,7 @@ fn procedural_art_nodes(
             if favorite { y + 30.0 } else { y + 72.0 },
             if favorite { 24.0 } else { width * 0.46 },
             if favorite { 28.0 } else { 58.0 },
-            token,
+            "--color-surface-raised",
         )
         .with_type_role(TypeRole::Plate),
     ];
@@ -4802,7 +4812,7 @@ fn procedural_art_nodes(
                 kind_y,
                 if favorite { width - 72.0 } else { width - 24.0 },
                 if favorite { 20.0 } else { 24.0 },
-                token,
+                "--color-surface-raised",
             )
             .with_type_role(TypeRole::Eyebrow),
         );
@@ -4873,7 +4883,7 @@ fn art_nodes(
                 label_y,
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                "--color-text-primary",
+                "--color-surface-canvas",
             )
             .with_type_role(TypeRole::Label),
         ];
@@ -5026,15 +5036,34 @@ fn sentence_kind(kind: &AppKind) -> &'static str {
     }
 }
 fn humanize_identifier(value: &str) -> String {
-    let words = value
+    let colon_chain = value.contains(':');
+    let identity = value
+        .split(':')
+        .nth(usize::from(colon_chain))
+        .unwrap_or(value);
+    let words = identity
         .split(['-', '_', '.', '/'])
         .filter(|word| !word.is_empty())
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ");
-    let mut chars = words.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().collect::<String>() + chars.as_str()
-    })
+    if colon_chain {
+        words
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().collect::<String>() + chars.as_str()
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        let mut chars = words.chars();
+        chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        })
+    }
 }
 fn descriptor_file(variant: &Variant) -> String {
     variant
@@ -5831,26 +5860,15 @@ mod tests {
             });
 
             let scene = settings_scene(&core);
-            let selected_segments = ["100%", "150%", "200%"]
-                .into_iter()
-                .filter(|value| {
-                    find(
-                        scene.root(),
-                        &format!("settings-text-scale-segment-{value}"),
-                    )
-                    .is_some_and(|node| node.style_token == "--state-selected-accent")
-                })
-                .collect::<Vec<_>>();
-            let inverse_labels = ["100%", "150%", "200%"]
+            let selected_labels = ["100%", "150%", "200%"]
                 .into_iter()
                 .filter(|value| {
                     find(scene.root(), &format!("settings-text-scale-value-{value}"))
-                        .is_some_and(|node| node.style_token == "--color-text-inverse")
+                        .is_some_and(|node| node.state.selected)
                 })
                 .collect::<Vec<_>>();
 
-            assert_eq!(selected_segments, [effective]);
-            assert_eq!(inverse_labels, [effective]);
+            assert_eq!(selected_labels, [effective]);
         }
     }
 
@@ -7561,6 +7579,20 @@ mod tests {
     }
 
     #[test]
+    fn colon_chained_variant_identity_becomes_a_human_name() {
+        let mut chained = variant(
+            "Installed applications:drift loop:pocketforge native",
+            "drift-loop",
+            Availability::Ready,
+        );
+        chained.provenance.runtime_family = "pocketforge/native".into();
+        let label = ready_variant_label(&chained);
+        assert_eq!(label, "Drift Loop · Installed on this device");
+        assert!(!label.contains(':'));
+        assert!(!label.starts_with("Installed applications"));
+    }
+
+    #[test]
     fn single_ready_variant_label_reads_as_a_natural_capability_phrase() {
         let native = variant("native", "only-native", Availability::Ready);
 
@@ -8757,12 +8789,8 @@ mod tests {
         core.go(Route::Library);
         core.focus = 3;
         let library = core.scene(metrics, "").unwrap();
-        assert_eq!(
-            find(library.root(), "library-filter-2-label")
-                .unwrap()
-                .style_token,
-            "--color-text-inverse"
-        );
+        let chip_label = find(library.root(), "library-filter-2-label").unwrap();
+        assert_eq!(chip_label.style_token, "--state-focused-ring");
 
         core.selected_item = Some(0);
         core.go(Route::Details);
@@ -8773,11 +8801,9 @@ mod tests {
             "detail-description",
             "detail-ways-heading",
         ] {
-            assert!(
-                find(details.root(), id)
-                    .unwrap()
-                    .style_token
-                    .starts_with("--color-text")
+            assert_eq!(
+                find(details.root(), id).unwrap().style_token,
+                "--color-surface-canvas"
             );
         }
         assert_eq!(
@@ -8793,13 +8819,20 @@ mod tests {
             find(settings.root(), "settings-section-title")
                 .unwrap()
                 .style_token,
-            "--color-text-primary"
+            "--color-surface-canvas"
         );
         assert_eq!(
             find(settings.root(), "settings-nav-accessibility-label")
                 .unwrap()
                 .style_token,
             "--color-text-inverse"
+        );
+        assert!(
+            find(settings.root(), "settings-nav-accessibility")
+                .unwrap()
+                .state
+                .focused,
+            "the navigation label must declare the surface painted by its focused parent"
         );
     }
 
@@ -8841,7 +8874,7 @@ mod tests {
             let label = &children[label_index];
             assert_eq!(border.style_token, "--color-border-strong");
             assert_eq!(fill.style_token, "--color-surface-raised");
-            assert_eq!(label.style_token, "--state-rest-text");
+            assert_eq!(label.style_token, "--color-surface-raised");
             assert!((fill.bounds.x - border.bounds.x - 2.0).abs() < f32::EPSILON);
             assert!((fill.bounds.y - border.bounds.y - 2.0).abs() < f32::EPSILON);
             assert!((border.bounds.width - fill.bounds.width - 4.0).abs() < f32::EPSILON);
@@ -8851,6 +8884,53 @@ mod tests {
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
                     && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
             );
+        }
+    }
+
+    #[test]
+    fn component_fills_never_paint_over_overlapping_text() {
+        fn overlaps(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+        fn assert_order(node: &Node) {
+            if node.id.as_str() != "quiet-console" {
+                for (index, text) in node.children.iter().enumerate().filter(|(_, child)| {
+                    matches!(child.role, Role::Text | Role::Heading)
+                        && !child.accessible_label.trim().is_empty()
+                }) {
+                    for fill in &node.children[index + 1..] {
+                        assert!(
+                            fill.role != Role::Group || !overlaps(text.bounds, fill.bounds),
+                            "component {} paints fill {} over text {}",
+                            node.id.as_str(),
+                            fill.id.as_str(),
+                            text.id.as_str()
+                        );
+                    }
+                }
+            }
+            for child in &node.children {
+                assert_order(child);
+            }
+        }
+
+        let mut core = core();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [Route::Home, Route::Library, Route::Details, Route::Settings] {
+            core.go(route);
+            if route == Route::Details {
+                core.selected_item = Some(0);
+            }
+            assert_order(core.scene(metrics, "").unwrap().root());
         }
     }
 

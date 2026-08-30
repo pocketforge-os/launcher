@@ -93,7 +93,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "9ca038f67d1dce725041bcb5fd9243233e18f49ced7ae05a3d38b3891c2592d1  ",
         "0c516c3fb29948950fdf1ca31d24db27f72f7ec9c5db5ad88c1ce4278c282862  ",
         "da2c7c1430ef38cf1c5dcabfbadab665ca659e7434deb95a2229f88570404c67  ",
-        "df2c08d5ee7a172634f3f0ca80f7620472f06e0900720fbd81c4158cd8dddb41  ",
+        "1fa80507146be4bdc4846f9dfb2dbfa87870eb2c7104fe5df723b6a954fe1874  ",
         "afed935e11e9ea10dd19d594f7a18afff9f1bc48b67b27bb654c7a31e1a5c88e  ",
         "603739b294e684636e2284d414c34b59622bfe0bf407ab849669e880c8c0e2ac  ",
         "3a36ad0a0f3dc2406b31f638fec4c919050d61c3f46206529746181c756f31d3  ",
@@ -135,16 +135,16 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("21143d6b3c7d3b41e4a547d9eca4fe61c30f5a787b7067157ab918e978b457d6  ")
+        transcript.contains("1f76c758137df0549de88f9ec8dc609286e36bf02a1eb281ba6dbcd798a401f9  ")
     );
     assert!(
-        transcript.contains("656f8a2983bddbe1b26b60e60b220159e2d31c19478cca0c39db9d36161944bd  ")
+        transcript.contains("a48a59fc8dfbfcc9b6c60a536e821436dee8e022c30ce9d23dbc14a6b71b0fcf  ")
     );
     assert!(
-        transcript.contains("089450b31a6775abc698ae7d551fee216ca466dd773bf5b1857b9bad9187e55e  ")
+        transcript.contains("b644d2f41c1a41ce3c6cab1137f7ef424139d4bbc4166ea6a489108b54dd727b  ")
     );
     assert!(
-        transcript.contains("4ff2774d1a072a601dadc125d95896c62f83e2a1df359f1826d72994ec294fc5  ")
+        transcript.contains("b81a8e71b781d0db8f278fb6f17770ff1575a4114fa8c240381cdc35e3dd371c  ")
     );
     assert!(
         transcript.contains("833eac731dbb4830284f238e544c8d3178c12ed2fde18d45d8a4c33975330392  ")

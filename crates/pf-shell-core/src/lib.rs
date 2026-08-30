@@ -520,6 +520,7 @@ enum SettingsRowAction {
 struct SettingsSceneRow {
     id: String,
     label: String,
+    accessible_label: String,
     action: Option<SettingsRowAction>,
 }
 
@@ -2210,6 +2211,7 @@ impl ShellCore {
         let disabled = |id: &str, label: String| SettingsSceneRow {
             id: id.into(),
             label,
+            accessible_label: String::new(),
             action: None,
         };
         match self.settings_room {
@@ -2235,6 +2237,17 @@ impl ShellCore {
                     };
                     SettingsSceneRow {
                         id: format!("accessibility-{}", row.key),
+                        accessible_label: match &row.effective {
+                            PreferenceValue::Bool(value) => {
+                                format!("{} · {}", row.label, if *value { "ON" } else { "OFF" })
+                            }
+                            PreferenceValue::Text(value) => {
+                                format!("{} · {value}", row.label)
+                            }
+                            PreferenceValue::Integer(value) => {
+                                format!("{} · {value}", row.label)
+                            }
+                        },
                         label: if row.interactive {
                             format!("{}\n{consequence}\n{control}", row.label)
                         } else {
@@ -2287,6 +2300,10 @@ impl ShellCore {
             }
             SettingsRoom::Display => vec![SettingsSceneRow {
                 id: "display-appearance".into(),
+                accessible_label: format!(
+                    "Appearance · {}",
+                    if self.appearance_day { "Day" } else { "Dusk" }
+                ),
                 label: format!(
                     "Appearance\nChanges the room palette; High Contrast composes over it\nDusk / Day · {}",
                     if self.appearance_day { "Day" } else { "Dusk" }
@@ -2334,6 +2351,7 @@ impl ShellCore {
                     rows.push(SettingsSceneRow {
                         id: "system-recovery".into(),
                         label: "Recovery\nOpen the independent recovery entry\n›".into(),
+                        accessible_label: "Recovery".into(),
                         action: Some(SettingsRowAction::Recovery),
                     });
                 }
@@ -2974,7 +2992,7 @@ impl ShellCore {
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
-                    "",
+                    &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
                     chip_x,
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
@@ -3071,7 +3089,11 @@ impl ShellCore {
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
-                    "",
+                    &format!(
+                        "{} · {}",
+                        item.title,
+                        availability_text(availability, &self.presentation)
+                    ),
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
@@ -3291,27 +3313,34 @@ impl ShellCore {
             out.push(availability_node);
             let description = if item.tags.is_empty() {
                 match ready_variant.map(ready_variant_capability) {
-                    Some(ReadyVariantCapability::Native) => {
-                        format!("{} is ready from the installed catalog.", item.title)
+                    Some(ReadyVariantCapability::Native) => Some(format!(
+                        "{} is ready from the installed catalog.",
+                        item.title
+                    )),
+                    Some(ReadyVariantCapability::Stream | ReadyVariantCapability::Unknown) => {
+                        Some(format!("{} is ready to play.", item.title))
                     }
-                    Some(ReadyVariantCapability::Stream | ReadyVariantCapability::Unknown)
-                    | None => {
-                        format!("{} is ready to play.", item.title)
-                    }
+                    None => None,
                 }
             } else {
-                format!("{} · {}", sentence_kind(&item.kind), item.tags.join(" · "))
+                Some(format!(
+                    "{} · {}",
+                    sentence_kind(&item.kind),
+                    item.tags.join(" · ")
+                ))
             };
-            out.push(node(
-                "detail-description",
-                Role::Text,
-                &description,
-                detail_column_left,
-                252.0,
-                detail_column_width,
-                42.0,
-                "--color-text-secondary",
-            ));
+            if let Some(description) = description {
+                out.push(node(
+                    "detail-description",
+                    Role::Text,
+                    &description,
+                    detail_column_left,
+                    252.0,
+                    detail_column_width,
+                    42.0,
+                    "--color-text-secondary",
+                ));
+            }
             out.push(
                 node(
                     "detail-ways-heading",
@@ -3761,7 +3790,7 @@ impl ShellCore {
                 let mut nav = node(
                     &format!("settings-nav-{}", name.to_ascii_lowercase()),
                     Role::Button,
-                    "",
+                    name,
                     nav_left,
                     nav_top + index as f32 * 62.0,
                     nav_width - 32.0,
@@ -3865,7 +3894,7 @@ impl ShellCore {
                 } else {
                     Role::Text
                 },
-                "",
+                &row.accessible_label,
                 content_left,
                 rows_top + (index - first) as f32 * (row_height + row_gap),
                 content_width,
@@ -6942,6 +6971,46 @@ mod tests {
     }
 
     #[test]
+    fn details_without_a_ready_variant_omit_readiness_copy() {
+        let mut unavailable = item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "standard-edition",
+                "setup-app",
+                Availability::NeedsSetup {
+                    reason: "choose a profile once".into(),
+                },
+            )],
+        );
+        unavailable.tags.clear();
+        let mut core = fixture_core(vec![unavailable]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(
+            node_by_id(scene.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .contains("choose a profile once")
+        );
+        assert!(node_by_id(scene.root(), "detail-description").is_none());
+        assert!(!format!("{scene:?}").contains("ready to play"));
+    }
+
+    #[test]
     fn details_facts_come_from_a_ready_variant_and_stay_above_the_footer() {
         let mut unavailable = variant(
             "setup",
@@ -7685,15 +7754,22 @@ mod tests {
     }
 
     #[test]
-    fn emitted_routes_never_make_structural_groups_actionable() {
-        fn assert_no_actionable_group(node: &Node) {
+    fn emitted_routes_keep_actions_named_and_off_structural_groups() {
+        fn assert_action_contract(node: &Node) {
             assert!(
                 node.role != Role::Group || node.action.is_none(),
                 "structural group {} must not carry an action",
                 node.id.as_str()
             );
+            if node.action.is_some() {
+                assert!(
+                    !node.accessible_label.trim().is_empty(),
+                    "actionable node {} must have an accessible label",
+                    node.id.as_str()
+                );
+            }
             for child in &node.children {
-                assert_no_actionable_group(child);
+                assert_action_contract(child);
             }
         }
 
@@ -7724,7 +7800,21 @@ mod tests {
         ] {
             core.go(route);
             let scene = core.scene(metrics, "").unwrap();
-            assert_no_actionable_group(scene.root());
+            assert_action_contract(scene.root());
+        }
+
+        core.recovery_available = true;
+        for room in [
+            SettingsRoom::Accessibility,
+            SettingsRoom::Display,
+            SettingsRoom::Controls,
+            SettingsRoom::Network,
+            SettingsRoom::System,
+        ] {
+            core.settings_room = room;
+            core.settings_in_rows = true;
+            let scene = core.scene(metrics, "").unwrap();
+            assert_action_contract(scene.root());
         }
     }
 

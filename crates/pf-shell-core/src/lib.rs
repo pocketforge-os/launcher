@@ -2709,40 +2709,82 @@ impl ShellCore {
                 );
             }
             let ready = self.ready_variants(item_index);
-            for (variant_index, variant) in item.variants.iter().enumerate() {
-                if item.variants.len() < 2 {
-                    break;
+            let variant_row_height = 48.0;
+            let variant_row_gap = 7.0;
+            let variant_rows_top = 378.0 + detail_offset;
+            let detail_variant_capacity = 2;
+            let visible_detail_variants = item.variants.len().min(detail_variant_capacity);
+            if self.route == Route::Details {
+                for (variant_index, variant) in item
+                    .variants
+                    .iter()
+                    .take(visible_detail_variants)
+                    .enumerate()
+                {
+                    if item.variants.len() < 2 {
+                        break;
+                    }
+                    let variant_label = if matches!(variant.availability, Availability::Ready) {
+                        format!("{} · Ready", humanize_identifier(&variant.id))
+                    } else if variant_index == 0 && ready.is_empty() {
+                        format!(
+                            "{} · See availability above",
+                            humanize_identifier(&variant.id)
+                        )
+                    } else {
+                        format!(
+                            "{} · {}",
+                            humanize_identifier(&variant.id),
+                            availability_text(&variant.availability, &self.presentation)
+                        )
+                    };
+                    let mut variant_node = node(
+                        &format!("detail-variant-{variant_index}"),
+                        Role::Text,
+                        &variant_label,
+                        400.0,
+                        variant_rows_top
+                            + variant_index as f32 * (variant_row_height + variant_row_gap),
+                        w - 448.0,
+                        variant_row_height,
+                        state_token(&variant.availability, false),
+                    );
+                    variant_node.state.unavailable =
+                        !matches!(variant.availability, Availability::Ready);
+                    variant_node.state.selected = variant_index == 0;
+                    out.push(variant_node);
                 }
-                let variant_label = if matches!(variant.availability, Availability::Ready) {
-                    format!("{} · Ready", humanize_identifier(&variant.id))
-                } else if variant_index == 0 && ready.is_empty() {
-                    format!(
-                        "{} · See availability above",
-                        humanize_identifier(&variant.id)
-                    )
-                } else {
-                    format!(
-                        "{} · {}",
-                        humanize_identifier(&variant.id),
-                        availability_text(&variant.availability, &self.presentation)
-                    )
-                };
-                let mut variant_node = node(
-                    &format!("detail-variant-{variant_index}"),
-                    Role::Text,
-                    &variant_label,
-                    400.0,
-                    378.0 + detail_offset + variant_index as f32 * 55.0,
-                    w - 448.0,
-                    48.0,
-                    state_token(&variant.availability, false),
-                );
-                variant_node.state.unavailable =
-                    !matches!(variant.availability, Availability::Ready);
-                variant_node.state.selected = variant_index == 0;
-                out.push(variant_node);
+                if item.variants.len() > visible_detail_variants {
+                    out.push(node(
+                        "detail-variant-fold",
+                        Role::Text,
+                        &format!(
+                            "+{} more ways to play",
+                            item.variants.len() - visible_detail_variants
+                        ),
+                        400.0,
+                        variant_rows_top
+                            + visible_detail_variants as f32
+                                * (variant_row_height + variant_row_gap),
+                        w - 448.0,
+                        28.0,
+                        "--color-text-muted",
+                    ));
+                }
             }
             if self.route == Route::VariantChooser {
+                // The chooser replaces the Details panel instead of painting another
+                // interactive stack over it.
+                out.retain(|node| !node.id.as_str().starts_with("detail-"));
+                let chooser_top = 300.0;
+                let chooser_row_height = 54.0;
+                let chooser_row_gap = 10.0;
+                let chooser_capacity = 5;
+                let chooser_start = self
+                    .focus
+                    .saturating_add(1)
+                    .saturating_sub(chooser_capacity)
+                    .min(ready.len().saturating_sub(chooser_capacity));
                 out.push(node(
                     "chooser-note",
                     Role::Text,
@@ -2753,16 +2795,34 @@ impl ShellCore {
                     40.0,
                     "--color-text-secondary",
                 ));
-                for (choice, &variant_index) in ready.iter().enumerate() {
+                out.push(node(
+                    "chooser-scroll-region",
+                    Role::Group,
+                    "",
+                    360.0,
+                    chooser_top,
+                    w - 720.0,
+                    chooser_capacity as f32 * chooser_row_height
+                        + chooser_capacity.saturating_sub(1) as f32 * chooser_row_gap,
+                    "--color-surface-canvas",
+                ));
+                for (choice, &variant_index) in ready
+                    .iter()
+                    .enumerate()
+                    .skip(chooser_start)
+                    .take(chooser_capacity)
+                {
                     let variant = &item.variants[variant_index];
                     let mut row = node(
                         &format!("chooser-{}", variant.id),
                         Role::Button,
                         &format!("{} · Ready", humanize_identifier(&variant.id)),
                         360.0,
-                        300.0 + choice as f32 * 64.0,
+                        chooser_top
+                            + (choice - chooser_start) as f32
+                                * (chooser_row_height + chooser_row_gap),
                         w - 720.0,
-                        54.0,
+                        chooser_row_height,
                         if self.focus == choice {
                             "--state-focused-ring"
                         } else {
@@ -2774,6 +2834,17 @@ impl ShellCore {
                     out.push(row);
                 }
             } else if !ready.is_empty() {
+                let variants_bottom = if item.variants.len() < 2 {
+                    variant_rows_top
+                } else {
+                    variant_rows_top
+                        + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
+                        + if item.variants.len() > visible_detail_variants {
+                            28.0 + variant_row_gap
+                        } else {
+                            0.0
+                        }
+                };
                 let mut open = node(
                     "detail-open",
                     Role::Button,
@@ -2783,7 +2854,7 @@ impl ShellCore {
                         "Choose how to play"
                     },
                     400.0,
-                    510.0,
+                    variants_bottom.max(510.0),
                     360.0,
                     54.0,
                     "--state-focused-ring",
@@ -6161,6 +6232,75 @@ mod tests {
                 .iter()
                 .all(|node| node.id.as_str() != "favorites-label")
         );
+    }
+
+    #[test]
+    fn detail_and_variant_chooser_rows_stack_without_overlap() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn assert_no_overlap(scene: &Scene) {
+            let nodes: Vec<_> = scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| {
+                    (node.id.as_str().starts_with("detail-") && node.id.as_str() != "detail-cover")
+                        || node.id.as_str().starts_with("chooser-")
+                })
+                .filter(|node| node.id.as_str() != "chooser-scroll-region")
+                .collect();
+            for (index, node) in nodes.iter().enumerate() {
+                for other in &nodes[index + 1..] {
+                    assert!(
+                        !intersects(node.bounds, other.bounds),
+                        "{} {:?} intersects {} {:?}",
+                        node.id.as_str(),
+                        node.bounds,
+                        other.id.as_str(),
+                        other.bounds
+                    );
+                }
+            }
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for variant_count in [2, 3, 12] {
+            let variants = (0..variant_count)
+                .map(|index| {
+                    variant(
+                        &format!("variant-{index}"),
+                        &format!("game-{index}"),
+                        Availability::Ready,
+                    )
+                })
+                .collect();
+            let mut core = fixture_core(vec![item("game", "Many Moons", variants)]);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            assert_no_overlap(&core.scene(metrics, "").unwrap());
+
+            core.go(Route::VariantChooser);
+            for focus in 0..variant_count {
+                core.focus = focus;
+                let scene = core.scene(metrics, "").unwrap();
+                assert_no_overlap(&scene);
+                assert!(
+                    scene.root().children.iter().any(|node| node.state.focused),
+                    "chooser focus {focus} of {variant_count} must remain visible"
+                );
+            }
+        }
     }
 
     fn quick_scene(core: &ShellCore) -> Scene {

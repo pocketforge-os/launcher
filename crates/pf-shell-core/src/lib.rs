@@ -2938,10 +2938,15 @@ impl ShellCore {
         ));
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
+            let value = match &row.effective {
+                PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
+                PreferenceValue::Text(value) => value.clone(),
+                PreferenceValue::Integer(value) => value.to_string(),
+            };
             let mut n = node(
                 &format!("comfort-{i}"),
                 Role::Button,
-                row.label,
+                &format!("{} · {value}", row.label),
                 w / 2.0 - 340.0,
                 180.0 + i as f32 * 64.0,
                 680.0,
@@ -4053,6 +4058,24 @@ mod tests {
             None,
             "Back cannot abandon first run"
         );
+    }
+
+    #[test]
+    fn first_run_rows_show_current_values_and_redraw_after_toggle() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), false).unwrap();
+        let before = format!("{:?}", settings_scene(&core));
+        assert!(before.contains("Reduce motion · Off"));
+
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("reduceMotion".into()),
+            effective: PreferenceValue::Bool(true),
+            stored: PreferenceValue::Bool(true),
+            applied: true,
+        });
+        let after = format!("{:?}", settings_scene(&core));
+        assert!(after.contains("Reduce motion · On"));
+        assert!(!after.contains("Reduce motion · Off"));
     }
     #[test]
     fn back_restores_route_focus_and_one_owner() {

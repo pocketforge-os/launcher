@@ -48,7 +48,7 @@ const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -88,6 +88,7 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         (Key::Left, _) => "Move.left",
         (Key::Right, _) => "Move.right",
         (Key::Enter, _) => "Activate",
+        (_, 0x20) => "Start",
         (Key::Escape, _) | (_, 0xff08) => "Back",
         (_, 0xff09) | (Key::Char('f' | 'F'), _) => "Quick",
         (Key::Char('s' | 'S'), _) => "SafeReturn",
@@ -102,6 +103,7 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
             "Move.left" => ShellAction::Move(pf_scene::AxisMove::Left),
             "Move.right" => ShellAction::Move(pf_scene::AxisMove::Right),
             "Activate" => ShellAction::Activate,
+            "Start" => ShellAction::Custom("Start".into()),
             "Back" => ShellAction::Back,
             "Quick" => ShellAction::Custom("Favorite".into()),
             "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
@@ -1748,6 +1750,7 @@ mod durable_tests {
                 ShellAction::Move(pf_scene::AxisMove::Right),
             ),
             (Key::Enter, 0xff0d, ShellAction::Activate),
+            (Key::Char(' '), 0x20, ShellAction::Custom("Start".into())),
             (Key::Escape, 0xff1b, ShellAction::Back),
             (Key::Other(0xff08), 0xff08, ShellAction::Back),
             (
@@ -1792,6 +1795,31 @@ mod durable_tests {
             effective_keyboard_action(&without_quick, Key::Char('f'), u32::from('f')),
             None
         );
+
+        let mut remapped_contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        for mapping in remapped_contract["effective_map"].as_array_mut().unwrap() {
+            match mapping["action"].as_str().unwrap() {
+                "Start" => mapping["binding"]["controls"] = serde_json::json!(["r1"]),
+                "Move.right" => mapping["binding"]["controls"] = serde_json::json!(["start"]),
+                _ => {}
+            }
+        }
+        let remapped_contract = DeviceContract::parse_json(&remapped_contract.to_string()).unwrap();
+        let remapped = EffectiveMap::load(remapped_contract, &MemoryStore::default()).unwrap();
+        assert_eq!(
+            effective_keyboard_action(&remapped, Key::Char(' '), 0x20),
+            Some(ShellAction::Custom("Start".into()))
+        );
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        core.reset_first_run();
+        let start = effective_keyboard_action(&map, Key::Char(' '), 0x20).unwrap();
+        assert_eq!(core.action(&start), Some(Effect::CompleteFirstRun));
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
     }
 
     #[cfg(feature = "wayland")]

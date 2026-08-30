@@ -8,8 +8,10 @@
     {"position":"north","printed_label":"Y","input_code":"BTN_NORTH","fallback_glyph":{"source":"pocketforge","id":"pf-face-north"}},
     {"position":"l2","printed_label":"↑","input_code":"KEY_UP","fallback_glyph":{"source":"pocketforge","id":"pf-up"}},
     {"position":"l1","printed_label":"←","input_code":"KEY_LEFT","fallback_glyph":{"source":"pocketforge","id":"pf-left"}},
-    {"position":"start","printed_label":"↓","input_code":"KEY_DOWN","fallback_glyph":{"source":"pocketforge","id":"pf-down"}},
-    {"position":"select","printed_label":"→","input_code":"KEY_RIGHT","fallback_glyph":{"source":"pocketforge","id":"pf-right"}}
+    {"position":"r2","printed_label":"↓","input_code":"KEY_DOWN","fallback_glyph":{"source":"pocketforge","id":"pf-down"}},
+    {"position":"r1","printed_label":"→","input_code":"KEY_RIGHT","fallback_glyph":{"source":"pocketforge","id":"pf-right"}},
+    {"position":"select","printed_label":"SELECT","input_code":"BTN_SELECT","fallback_glyph":{"source":"pocketforge","id":"pf-select"}},
+    {"position":"start","printed_label":"START","input_code":"BTN_START","fallback_glyph":{"source":"pocketforge","id":"pf-start"}}
   ],
   "effective_map": [
     {"context":"global","action":"Activate","binding":{"shape":"single_press","controls":["east"]}},
@@ -17,8 +19,9 @@
     {"context":"shell","action":"Quick","binding":{"shape":"single_press","controls":["west"]}},
     {"context":"global","action":"SafeReturn","binding":{"shape":"single_press","controls":["guide"]}},
     {"context":"shell","action":"Move.up","binding":{"shape":"single_press","controls":["l2"]}},
-    {"context":"shell","action":"Move.down","binding":{"shape":"single_press","controls":["start"]}},
+    {"context":"shell","action":"Move.down","binding":{"shape":"single_press","controls":["r2"]}},
     {"context":"shell","action":"Move.left","binding":{"shape":"single_press","controls":["l1"]}},
-    {"context":"shell","action":"Move.right","binding":{"shape":"single_press","controls":["select"]}}
+    {"context":"shell","action":"Move.right","binding":{"shape":"single_press","controls":["r1"]}},
+    {"context":"global","action":"Start","binding":{"shape":"single_press","controls":["start"]}}
   ]
 }

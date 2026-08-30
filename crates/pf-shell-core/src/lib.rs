@@ -2623,10 +2623,9 @@ impl ShellCore {
             footer.to_owned()
         };
         let footer = match self.route {
-            Route::Home => self
-                .focused_item_index()
-                .and_then(|item| {
-                    self.binding_prompt(
+            Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
+                let mut prompts = self
+                    .binding_prompt(
                         "Activate",
                         if self.ready_variants(item).is_empty() {
                             "Details"
@@ -2634,8 +2633,16 @@ impl ShellCore {
                             "Open"
                         },
                     )
-                })
-                .unwrap_or_default(),
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let global_prompts = supplied_footer
+                    .split_once("     ")
+                    .map_or(supplied_footer.as_str(), |(_, global)| global);
+                if !global_prompts.is_empty() {
+                    prompts.push(global_prompts.to_owned());
+                }
+                prompts.join("     ")
+            }),
             Route::Library => (self.focus >= 5)
                 .then(|| self.binding_prompt("Activate", "Details"))
                 .flatten()
@@ -8894,6 +8901,7 @@ mod tests {
                 binding: "A".into(),
             }]
         };
+        let supplied_footer = "A  Open     PF  Safe Return · button below the d-pad\u{1f}X";
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -8902,13 +8910,41 @@ mod tests {
             orientation: pf_scene::Orientation::Landscape,
         };
 
-        let mut core = fixture_core(vec![item(
-            "ready",
-            "Ready Game",
-            vec![variant("native", "ready-app", Availability::Ready)],
-        )]);
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("native", "ready-app", Availability::Ready)],
+            ),
+            item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant(
+                    "stream",
+                    "unavailable-app",
+                    Availability::NeedsNetwork {
+                        reason: "connect to Wi-Fi".into(),
+                    },
+                )],
+            ),
+            item(
+                "setup",
+                "Setup Game",
+                vec![variant(
+                    "setup",
+                    "setup-app",
+                    Availability::NeedsSetup {
+                        reason: "choose a profile".into(),
+                    },
+                )],
+            ),
+        ]);
+        core.items[2].favorite = true;
         core.set_control_bindings(bindings());
-        assert_eq!(prompt(&core.scene(metrics, "").unwrap()), "A Open");
+        assert_eq!(
+            prompt(&core.scene(metrics, supplied_footer).unwrap()),
+            "A Open     PF  Safe Return · button below the d-pad     X  Favorite"
+        );
         assert_eq!(
             core.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {
@@ -8916,25 +8952,19 @@ mod tests {
             }))
         );
 
-        for availability in [
-            Availability::NeedsNetwork {
-                reason: "connect to Wi-Fi".into(),
-            },
-            Availability::NeedsSetup {
-                reason: "choose a profile".into(),
-            },
-        ] {
-            let mut core = fixture_core(vec![item(
-                "unavailable",
-                "Unavailable Game",
-                vec![variant("stream", "unavailable-app", availability)],
-            )]);
-            core.set_control_bindings(bindings());
-            assert_eq!(prompt(&core.scene(metrics, "").unwrap()), "A Details");
+        for (focus, favorite_label) in [(1, "Favorite"), (2, "Unfavorite")] {
+            core.go(Route::Home);
+            core.focus = focus;
+            assert_eq!(
+                prompt(&core.scene(metrics, supplied_footer).unwrap()),
+                format!(
+                    "A Details     PF  Safe Return · button below the d-pad     X  {favorite_label}"
+                )
+            );
             assert_eq!(core.action(&ShellAction::Activate), None);
             assert_eq!(
                 (core.route(), core.selected_item),
-                (Route::Details, Some(0))
+                (Route::Details, Some(focus))
             );
         }
     }

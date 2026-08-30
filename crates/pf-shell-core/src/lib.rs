@@ -1220,6 +1220,13 @@ impl ShellCore {
     pub fn session_status(&self) -> Option<&str> {
         self.session_status.as_deref()
     }
+    #[must_use]
+    pub const fn session_active(&self) -> bool {
+        matches!(
+            self.presentation,
+            Presentation::Starting | Presentation::Running
+        )
+    }
     pub fn session_backend_unavailable_at_boot(&mut self) {
         self.bump_revision();
         self.authority_unavailable = true;

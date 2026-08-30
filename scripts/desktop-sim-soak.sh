@@ -15,11 +15,16 @@ fi
 step="initialization"
 work_dir=""
 authority_pid=""
+supervisor_pid=""
 
 cleanup() {
     if [ -n "$authority_pid" ]; then
         kill "$authority_pid" 2>/dev/null || true
         wait "$authority_pid" 2>/dev/null || true
+    fi
+    if [ -n "$supervisor_pid" ]; then
+        kill "$supervisor_pid" 2>/dev/null || true
+        wait "$supervisor_pid" 2>/dev/null || true
     fi
     if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
         find "$work_dir" -depth -delete
@@ -84,6 +89,12 @@ if [ "${PF_SOAK_KILL_AUTHORITY_AFTER_READY:-0}" = 1 ]; then
     wait "$authority_pid" 2>/dev/null || true
     authority_pid=""
 fi
+
+step="start-desktop-sim-supervisor"
+"$repo_dir/target/debug/pf-shell" \
+    --desktop-sim-supervise "$state_dir" --session-socket "$socket" \
+    >"$work_dir/supervisor.log" 2>&1 &
+supervisor_pid=$!
 
 step="launch-marker-return-cycle"
 timeout 20s "$repo_dir/target/debug/pf-shell" \

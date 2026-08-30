@@ -889,6 +889,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         };
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
+                request_safe_return_if_active(core, &session);
                 drive_socket_session(core, &mut session)?;
             }
             Some(Effect::Launch(request)) => match session.launch(request) {
@@ -1068,6 +1069,38 @@ fn observe_desktop_sim_return(socket: &Path, session_is_live: bool) -> Result<()
     Ok(())
 }
 
+fn tick_desktop_sim(socket: &Path) -> Result<(), String> {
+    use pf_session_authority::{RpcRequest, RpcResponse};
+
+    match authority_rpc(socket, &RpcRequest::Tick)? {
+        RpcResponse::Ok => Ok(()),
+        response => Err(format!(
+            "unexpected authority response to tick: {response:?}"
+        )),
+    }
+}
+
+fn authority_phase(authority_state: &Path) -> Result<pf_session_authority::Phase, String> {
+    let path = authority_state.join("authority.json");
+    let body = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice::<pf_session_authority::PersistedState>(&body)
+        .map(|state| state.phase)
+        .map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn marker_session_id(marker: &Path) -> Option<&str> {
+    marker.file_name()?.to_str()?.strip_suffix(".running")
+}
+
+fn phase_is_stopping_session(phase: &pf_session_authority::Phase, session_id: &str) -> bool {
+    matches!(
+        phase,
+        pf_session_authority::Phase::StoppingGracefully { session_id: active, .. }
+            | pf_session_authority::Phase::ForceStopping { session_id: active }
+            if active == session_id
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObservableAuthorityPhase {
     Idle,
@@ -1188,6 +1221,21 @@ fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(
     )?;
     let mut active_marker = marker;
     loop {
+        tick_desktop_sim(socket)?;
+        let phase = authority_phase(authority_state)?;
+        if let Some(path) = active_marker.as_ref() {
+            if marker_session_id(path)
+                .is_some_and(|session_id| phase_is_stopping_session(&phase, session_id))
+            {
+                match fs::remove_file(path) {
+                    Ok(()) => println!("SUPERVISOR stopped marker={}", path.display()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("remove stopped marker {}: {error}", path.display()));
+                    }
+                }
+            }
+        }
         let marker = desktop_sim_marker(authority_state)?;
         match (&active_marker, marker) {
             (None, Some(path)) => {
@@ -1255,10 +1303,21 @@ fn run_desktop_sim_script(
     observe_desktop_sim_running(socket)?;
     drive_socket_session(core, &mut session)?;
 
-    // The desktop preset's title is deliberately only a marker-backed stub. Script its clean
-    // exit, then feed the same supervisor observations used by the real authority lifecycle.
-    fs::remove_file(&marker).map_err(|error| format!("remove stub marker: {error}"))?;
-    observe_desktop_sim_return(socket, true)?;
+    if core.action(&ShellAction::Custom("SafeReturn".into())) != Some(Effect::SafeReturn) {
+        return Err("scripted safe return action was unavailable".into());
+    }
+    request_safe_return_if_active(core, &session);
+    let return_deadline = Instant::now() + Duration::from_secs(3);
+    while !matches!(
+        authority_phase(authority_state)?,
+        pf_session_authority::Phase::Idle
+    ) {
+        if Instant::now() >= return_deadline {
+            return Err("desktop-sim safe return did not reach Idle".into());
+        }
+        drive_socket_session(core, &mut session)?;
+        thread::sleep(Duration::from_millis(10));
+    }
     drive_socket_session(core, &mut session)?;
     present(host, core, footer)?;
     if initial_revision == redraw_state(core) {
@@ -1510,6 +1569,16 @@ fn drive_socket_session(
         }
     }
     Ok(())
+}
+
+fn request_safe_return_if_active(core: &mut ShellCore, session: &SessionClient<SocketTransport>) {
+    if !core.session_active() {
+        return;
+    }
+    match session.safe_return() {
+        Ok(()) => core.session_backend_reachable(),
+        Err(_) => core.session_backend_unavailable(),
+    }
 }
 
 fn refresh_history(core: &mut ShellCore, session: &mut SessionClient<SocketTransport>) {
@@ -1828,6 +1897,53 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn safe_return_active_session_sends_exactly_one_request() {
+        use std::os::unix::net::UnixListener;
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut stream).unwrap();
+            let request =
+                serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap();
+            assert!(matches!(
+                request,
+                pf_session_authority::RpcRequest::SafeReturn
+            ));
+            let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+            pf_wire::write_frame(&mut stream, &body).unwrap();
+        });
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "session-1".into(),
+        });
+        let session = SessionClient::new("test", SocketTransport::connect(&socket));
+
+        request_safe_return_if_active(&mut core, &session);
+
+        server.join().unwrap();
+        assert!(!core.authority_unavailable());
+    }
+
+    #[test]
+    fn safe_return_at_home_sends_nothing() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        let state = tempfile::tempdir().unwrap();
+        let nonexistent_socket = state.path().join("authority.sock");
+        let session = SessionClient::new("test", SocketTransport::connect(nonexistent_socket));
+
+        request_safe_return_if_active(&mut core, &session);
+
+        assert!(!core.authority_unavailable());
+    }
 
     fn unfinished_history(started: bool, ended: bool) -> pf_session_authority::HistoryEntry {
         pf_session_authority::HistoryEntry {

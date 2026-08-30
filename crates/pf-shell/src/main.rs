@@ -1872,12 +1872,13 @@ fn assert_raster_text_legible(
     base: pf_theme::Base,
     text_scale: u16,
 ) -> Result<(), String> {
-    fn suppress_text(node: &mut Node) {
-        if matches!(node.role, Role::Text | Role::Heading) {
+    fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
+        if &node.id == target {
             node.accessible_label.clear();
+            return;
         }
         for child in &mut node.children {
-            suppress_text(child);
+            suppress_text(child, target);
         }
     }
     fn luminance(color: [u8; 3]) -> f64 {
@@ -1919,14 +1920,23 @@ fn assert_raster_text_legible(
     fn visit(
         node: &Node,
         frame: &RasterFrame,
-        textless: &RasterFrame,
+        scene: &pf_scene::Scene,
+        render: &impl Fn(&pf_scene::Scene) -> Result<RasterFrame, String>,
         base: pf_theme::Base,
         floor: f64,
         failures: &mut Vec<String>,
-    ) {
+    ) -> Result<(), String> {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
         {
+            let mut root = scene.root().clone();
+            suppress_text(&mut root, &node.id);
+            let suppressed_scene = pf_scene::Scene::new(root, scene.default_focus().clone())
+                .map_err(|error| error.to_string())?;
+            let suppressed = render(&suppressed_scene)?;
+            if (frame.width, frame.height) != (suppressed.width, suppressed.height) {
+                return Err("raster guard frame dimensions changed between paired renders".into());
+            }
             let left = node.bounds.x.max(0.0) as u32;
             let top = node.bounds.y.max(0.0) as u32;
             let right = (node.bounds.x + node.bounds.width).ceil().max(0.0) as u32;
@@ -1949,7 +1959,7 @@ fn assert_raster_text_legible(
                 for x in left..right.min(frame.width) {
                     let offset = ((y * frame.width + x) * 4) as usize;
                     let ink = &frame.rgba[offset..offset + 3];
-                    let background = &textless.rgba[offset..offset + 3];
+                    let background = &suppressed.rgba[offset..offset + 3];
                     if ink != background {
                         ink_pixels += 1;
                         let sample = (y - top) as usize * sample_width + (x - left) as usize;
@@ -1962,6 +1972,23 @@ fn assert_raster_text_legible(
                     }
                 }
             }
+            let occluded = if ink_pixels == 0 {
+                // A node that paints in isolation but has no per-node diff in the route
+                // is covered by later content, not an inkless glyph. Keep it out of the
+                // visible-text guard; a genuinely inkless node also has no isolated diff.
+                let isolated_scene = pf_scene::Scene::new(node.clone(), node.id.clone())
+                    .map_err(|error| error.to_string())?;
+                let isolated = render(&isolated_scene)?;
+                let mut isolated_root = node.clone();
+                suppress_text(&mut isolated_root, &node.id);
+                let isolated_suppressed_scene =
+                    pf_scene::Scene::new(isolated_root, node.id.clone())
+                        .map_err(|error| error.to_string())?;
+                let isolated_suppressed = render(&isolated_suppressed_scene)?;
+                isolated.rgba != isolated_suppressed.rgba
+            } else {
+                false
+            };
             let rendered_ratio = core_ink_low_tail(&samples).unwrap_or_default();
             // High coverage structurally removes the anti-aliased fringe. The low
             // decile then requires the glyph body, rather than a high-contrast
@@ -1969,7 +1996,7 @@ fn assert_raster_text_legible(
             // from the rendered and text-suppressed rasters, never tokens.
             // Disabled text has no available action and is exempt from the text
             // contrast floor, but it must still produce visible raster ink.
-            if fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
+            if !occluded && fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
                 failures.push(format!(
                     "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}, required={floor:.1}",
                     node.id.as_str(),
@@ -1979,14 +2006,11 @@ fn assert_raster_text_legible(
             }
         }
         for child in &node.children {
-            visit(child, frame, textless, base, floor, failures);
+            visit(child, frame, scene, render, base, floor, failures)?;
         }
+        Ok(())
     }
 
-    let mut root = scene.root().clone();
-    suppress_text(&mut root);
-    let textless_scene = pf_scene::Scene::new(root, scene.default_focus().clone())
-        .map_err(|error| error.to_string())?;
     let render = |scene: &pf_scene::Scene| -> Result<RasterFrame, String> {
         let mut host = OffscreenHost::new(metrics);
         host.set_theme_base(base);
@@ -1998,18 +2022,21 @@ fn assert_raster_text_legible(
             .ok_or("raster guard frame missing".into())
     };
     let frame = render(scene)?;
-    let textless = render(&textless_scene)?;
-
-    if (frame.width, frame.height) != (textless.width, textless.height) {
-        return Err("raster guard frame dimensions changed between paired renders".into());
-    }
     let mut failures = Vec::new();
     let floor = if base == pf_theme::Base::HighContrast {
         7.0
     } else {
         4.5
     };
-    visit(scene.root(), &frame, &textless, base, floor, &mut failures);
+    visit(
+        scene.root(),
+        &frame,
+        scene,
+        &render,
+        base,
+        floor,
+        &mut failures,
+    )?;
     if failures.is_empty() {
         Ok(())
     } else {
@@ -2231,6 +2258,41 @@ mod durable_tests {
     fn raster_ink_guard_does_not_exempt_unavailable_text() {
         let label = contrast_probe(|node| node.state.unavailable = true);
         assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
+    }
+
+    #[test]
+    fn raster_ink_guard_attributes_overlapping_ink_to_each_text_node() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root_id = pf_scene::NodeId::new("visible-overlap-label").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Text,
+            "Visible ink",
+            bounds,
+            "--state-rest-text",
+        )
+        .with_children(vec![Node::new(
+            pf_scene::NodeId::new("inkless-overlap-label").unwrap(),
+            Role::Text,
+            "\u{200d}",
+            bounds,
+            "--state-rest-text",
+        )]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("inkless-overlap-label") && failure.contains("ink_pixels=0"),
+            "unexpected guard verdict: {failure}"
+        );
     }
 
     struct TextScaleHost {

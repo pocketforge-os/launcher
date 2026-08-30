@@ -2706,6 +2706,10 @@ impl ShellCore {
             )
             .with_type_role(TypeRole::Label),
         );
+        let radius_scale = f32::from(self.text_scale) / 100.0;
+        for child in &mut children {
+            apply_quiet_console_radius(child, radius_scale);
+        }
         let focus_id = children
             .iter()
             .find_map(focused_node_id)
@@ -4384,6 +4388,16 @@ impl ShellCore {
 
     fn first_run_nodes(&self, out: &mut Vec<Node>, w: f32) {
         out.push(node(
+            "first-run-panel",
+            Role::Group,
+            "",
+            w / 2.0 - 364.0,
+            32.0,
+            728.0,
+            584.0,
+            "--color-surface-scrim",
+        ));
+        out.push(node(
             "first-run-title",
             Role::Heading,
             "FIRST RUN · Make it comfortable",
@@ -4608,6 +4622,16 @@ impl ShellCore {
         ));
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+        out.push(node(
+            "receipt-panel",
+            Role::Group,
+            "",
+            152.0,
+            72.0,
+            w - 304.0,
+            552.0,
+            "--color-surface-raised",
+        ));
         out.push(node(
             "crash-eyebrow",
             Role::Text,
@@ -5096,6 +5120,70 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
+    const RADIUS_S: f32 = 6.0;
+    const RADIUS_M: f32 = 10.0;
+    const RADIUS_L: f32 = 16.0;
+    const RADIUS_PILL: f32 = 999.0;
+
+    let id = node.id.as_str();
+    let numeric_suffix = |prefix: &str| {
+        id.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let radius = if id.contains("keycap")
+        && (id.to_ascii_lowercase().contains("select") || id.to_ascii_lowercase().contains("start"))
+    {
+        Some(RADIUS_S)
+    } else if id.starts_with("room-keycap-")
+        || id == "attention"
+        || id.contains("status-dot")
+        || id.contains("-pip")
+        || id.contains("current-indicator")
+        || id.starts_with("room-") && id.ends_with("-underline")
+        || id.starts_with("settings-toggle-") && (id.ends_with("-track") || id.ends_with("-knob"))
+    {
+        Some(RADIUS_PILL)
+    } else if id.contains("press-marker") {
+        Some(RADIUS_S)
+    } else if id == "detail-cover"
+        || id.starts_with("detail-art-")
+        || id == "first-run-panel"
+        || id == "receipt-panel"
+    {
+        Some(RADIUS_L)
+    } else if id.starts_with("item-")
+        || id.starts_with("library-item-")
+        || id.starts_with("home-card-label-mask-")
+        || id.starts_with("home-card-art-")
+        || id.starts_with("home-card-plate-")
+        || id.starts_with("home-card-veil-")
+        || id.starts_with("library-card-label-mask-")
+        || id.starts_with("library-card-art-")
+        || id.starts_with("library-card-plate-")
+        || id.starts_with("library-card-veil-")
+        || id == "library-search"
+        || numeric_suffix("library-filter-")
+        || numeric_suffix("detail-variant-")
+        || id.starts_with("chooser-") && id != "chooser-note" && id != "chooser-scroll-region"
+        || id.starts_with("settings-nav-") && !id.ends_with("-label")
+        || id.starts_with("settings-row-") && !id.contains("-line-") && !id.ends_with("-control")
+        || id.starts_with("settings-text-scale-segment-")
+        || id.starts_with("comfort-")
+    {
+        Some(RADIUS_M)
+    } else {
+        None
+    };
+    if let Some(radius) = radius {
+        node.corner_radius = radius * scale;
+    }
+    for child in &mut node.children {
+        apply_quiet_console_radius(child, scale);
+    }
 }
 
 fn focused_node_id(node: &Node) -> Option<&Node> {
@@ -8883,6 +8971,119 @@ mod tests {
             assert!(
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
                     && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // Token multiplication is exact for these integer-valued f32s.
+    fn quiet_console_component_radii_follow_tokens_and_text_scale() {
+        fn find<'a>(node: &'a Node, id: &str) -> &'a Node {
+            if node.id.as_str() == id {
+                return node;
+            }
+            node.children
+                .iter()
+                .find_map(|child| {
+                    (child.id.as_str() == id)
+                        .then_some(child)
+                        .or_else(|| find_optional(child, id))
+                })
+                .unwrap_or_else(|| panic!("missing scene node {id}"))
+        }
+
+        fn find_optional<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id).then_some(node).or_else(|| {
+                node.children
+                    .iter()
+                    .find_map(|child| find_optional(child, id))
+            })
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        for (text_scale, multiplier) in [(100, 1.0), (200, 2.0)] {
+            let mut core = core();
+            core.text_scale = text_scale;
+
+            let home = core.scene(metrics, "").unwrap();
+            assert_eq!(
+                find(home.root(), "item-i0").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(home.root(), "home-card-art-i0").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(home.root(), "room-keycap-left").corner_radius,
+                999.0 * multiplier
+            );
+
+            core.go(Route::Library);
+            let library = core.scene(metrics, "").unwrap();
+            assert_eq!(
+                find(library.root(), "library-search").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(library.root(), "library-filter-0").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(library.root(), "library-item-i0").corner_radius,
+                10.0 * multiplier
+            );
+
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            let details = core.scene(metrics, "").unwrap();
+            assert_eq!(
+                find(details.root(), "detail-cover").corner_radius,
+                16.0 * multiplier
+            );
+            assert_eq!(
+                find(details.root(), "detail-variant-0").corner_radius,
+                10.0 * multiplier
+            );
+
+            core.load_preferences(&preferences(true), true).unwrap();
+            core.text_scale = text_scale;
+            core.go(Route::Settings);
+            let settings = settings_scene(&core);
+            assert_eq!(
+                find(settings.root(), "settings-nav-accessibility").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(settings.root(), "settings-row-accessibility-textScale").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(settings.root(), "settings-text-scale-segment-100%").corner_radius,
+                10.0 * multiplier
+            );
+            assert_eq!(
+                find(
+                    settings.root(),
+                    "settings-toggle-accessibility-highContrast-track"
+                )
+                .corner_radius,
+                999.0 * multiplier
+            );
+            assert_eq!(
+                find(
+                    settings.root(),
+                    "settings-toggle-accessibility-highContrast-knob"
+                )
+                .corner_radius,
+                999.0 * multiplier
             );
         }
     }

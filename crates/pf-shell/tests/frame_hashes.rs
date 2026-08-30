@@ -73,7 +73,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("ddbcb6a272918daceb3aaa7f7bb9e347a0191bd7ebd229892814399c37ce4d17  ")
     );
     assert!(
-        transcript.contains("945fbb288770a59408b10970e2925059a2f17ec5c912e28a6dd4354c4b929e9a  ")
+        transcript.contains("386de425da34d23814ef155b20adc33198b9170d14865298be102ca7fb0a56c9  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());

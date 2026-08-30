@@ -203,6 +203,170 @@ enum NetworkFlow {
     Credential,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemFlow {
+    Rows,
+    ManualTime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManualTimeField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+}
+
+impl ManualTimeField {
+    const ALL: [Self; 5] = [Self::Year, Self::Month, Self::Day, Self::Hour, Self::Minute];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ManualTimePicker {
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    field: usize,
+}
+
+impl ManualTimePicker {
+    const DEFAULT: Self = Self {
+        year: 2027,
+        month: 1,
+        day: 15,
+        hour: 8,
+        minute: 0,
+        field: 0,
+    };
+
+    fn from_system_time(time: SystemTime) -> Self {
+        let Ok(since_epoch) = time.duration_since(SystemTime::UNIX_EPOCH) else {
+            return Self::DEFAULT;
+        };
+        let Ok(days) = i64::try_from(since_epoch.as_secs() / 86_400) else {
+            return Self::DEFAULT;
+        };
+        let seconds = since_epoch.as_secs() % 86_400;
+        let (year, month, day) = civil_from_days(days);
+        if !(1970..=9999).contains(&year) {
+            return Self::DEFAULT;
+        }
+        Self {
+            year,
+            month,
+            day,
+            hour: (seconds / 3_600) as u8,
+            minute: ((seconds % 3_600) / 60) as u8,
+            field: 0,
+        }
+    }
+
+    fn adjust(&mut self, delta: i32) {
+        match ManualTimeField::ALL[self.field] {
+            ManualTimeField::Year => self.year = wrap_i32(self.year, delta, 1970, 9999),
+            ManualTimeField::Month => self.month = wrap_u8(self.month, delta, 1, 12),
+            ManualTimeField::Day => {
+                self.day = wrap_u8(self.day, delta, 1, days_in_month(self.year, self.month));
+                return;
+            }
+            ManualTimeField::Hour => self.hour = wrap_u8(self.hour, delta, 0, 23),
+            ManualTimeField::Minute => self.minute = wrap_u8(self.minute, delta, 0, 59),
+        }
+        self.day = self.day.min(days_in_month(self.year, self.month));
+    }
+
+    fn system_time(self) -> SystemTime {
+        let days = u64::try_from(days_from_civil(self.year, self.month, self.day))
+            .expect("picker years are at or after the Unix epoch");
+        let seconds = days * 86_400 + u64::from(self.hour) * 3_600 + u64::from(self.minute) * 60;
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    fn label(self) -> String {
+        let values = [
+            format!("{:04}", self.year),
+            format!("{:02}", self.month),
+            format!("{:02}", self.day),
+            format!("{:02}", self.hour),
+            format!("{:02}", self.minute),
+        ];
+        let marked = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if index == self.field {
+                    format!("[{value}]")
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "{}-{}-{} {}:{}",
+            marked[0], marked[1], marked[2], marked[3], marked[4]
+        )
+    }
+}
+
+fn wrap_i32(value: i32, delta: i32, min: i32, max: i32) -> i32 {
+    (value - min + delta).rem_euclid(max - min + 1) + min
+}
+
+fn wrap_u8(value: u8, delta: i32, min: u8, max: u8) -> u8 {
+    u8::try_from(wrap_i32(
+        i32::from(value),
+        delta,
+        i32::from(min),
+        i32::from(max),
+    ))
+    .expect("wrapped byte range remains a byte")
+}
+
+const fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+const fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+    let year = year - i32::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let shifted_month = i32::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i32::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    i64::from(era * 146_097 + day_of_era - 719_468)
+}
+
+fn civil_from_days(days: i64) -> (i32, u8, u8) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (
+        i32::try_from(year).expect("SystemTime calendar year fits i32"),
+        u8::try_from(month).expect("calendar month fits u8"),
+        u8::try_from(day).expect("calendar day fits u8"),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum SystemRow {
     TimeUnavailable,
@@ -304,6 +468,8 @@ pub struct ShellCore {
     selected_wifi: Option<usize>,
     wifi_credential: WifiCredential,
     network_status: Option<String>,
+    system_flow: SystemFlow,
+    manual_time_picker: ManualTimePicker,
     time_capabilities: Result<TimeCapabilities, String>,
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
@@ -408,6 +574,8 @@ impl ShellCore {
             selected_wifi: None,
             wifi_credential: WifiCredential::new(Vec::new()),
             network_status: None,
+            system_flow: SystemFlow::Rows,
+            manual_time_picker: ManualTimePicker::DEFAULT,
             time_capabilities: Err("Time controls unavailable".into()),
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
@@ -1167,6 +1335,39 @@ impl ShellCore {
                 _ => None,
             };
         }
+        if self.route == Route::Settings
+            && self.settings_room == SettingsRoom::System
+            && self.system_flow == SystemFlow::ManualTime
+        {
+            return match action {
+                ShellAction::Move(AxisMove::Left) => {
+                    self.manual_time_picker.field = self.manual_time_picker.field.saturating_sub(1);
+                    None
+                }
+                ShellAction::Move(AxisMove::Right) => {
+                    self.manual_time_picker.field =
+                        (self.manual_time_picker.field + 1).min(ManualTimeField::ALL.len() - 1);
+                    None
+                }
+                ShellAction::Move(AxisMove::Up) => {
+                    self.manual_time_picker.adjust(1);
+                    None
+                }
+                ShellAction::Move(AxisMove::Down) => {
+                    self.manual_time_picker.adjust(-1);
+                    None
+                }
+                ShellAction::Activate => {
+                    self.system_flow = SystemFlow::Rows;
+                    Some(Effect::SetManualTime(self.manual_time_picker.system_time()))
+                }
+                ShellAction::Back => {
+                    self.system_flow = SystemFlow::Rows;
+                    None
+                }
+                ShellAction::Custom(_) => None,
+            };
+        }
         if matches!(self.presentation, Presentation::Crash) {
             return match action {
                 ShellAction::Back => {
@@ -1323,9 +1524,16 @@ impl ShellCore {
                     SystemRow::Ntp => Some(Effect::SetNtp(
                         self.time_state.as_ref().ok()?.ntp_state != NtpState::Active,
                     )),
-                    SystemRow::ManualTime => Some(Effect::SetManualTime(
-                        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000),
-                    )),
+                    SystemRow::ManualTime => {
+                        self.manual_time_picker = self
+                            .time_state
+                            .as_ref()
+                            .map_or(ManualTimePicker::DEFAULT, |state| {
+                                ManualTimePicker::from_system_time(state.wall_clock)
+                            });
+                        self.system_flow = SystemFlow::ManualTime;
+                        None
+                    }
                     SystemRow::Transfer(service) => {
                         let enabled = self
                             .transfer_services
@@ -2310,6 +2518,43 @@ impl ShellCore {
     }
 
     fn settings_nodes(&self, out: &mut Vec<Node>, w: f32) {
+        if self.settings_room == SettingsRoom::System && self.system_flow == SystemFlow::ManualTime
+        {
+            out.push(node(
+                "manual-time-title",
+                Role::Heading,
+                "SET MANUAL TIME · UTC",
+                48.0,
+                72.0,
+                w - 96.0,
+                54.0,
+                "--state-rest-text",
+            ));
+            let mut fields = node(
+                "manual-time-fields",
+                Role::Button,
+                &self.manual_time_picker.label(),
+                48.0,
+                180.0,
+                w - 96.0,
+                74.0,
+                "--state-focused-ring",
+            );
+            fields.state.focused = true;
+            fields.action = Some(NodeAction::Activate);
+            out.push(fields);
+            out.push(node(
+                "manual-time-help",
+                Role::Text,
+                "← → field   ↑ ↓ value   Activate apply   Back cancel",
+                48.0,
+                280.0,
+                w - 96.0,
+                44.0,
+                "--color-text-secondary",
+            ));
+            return;
+        }
         if self.settings_room == SettingsRoom::Network
             && self.network_flow == NetworkFlow::Credential
         {
@@ -2498,7 +2743,20 @@ impl ShellCore {
                         ),
                         true,
                     ),
-                    SystemRow::ManualTime => ("Set time manually · 2027-01-15 08:00".into(), true),
+                    SystemRow::ManualTime => (
+                        format!(
+                            "Set time manually · {}",
+                            ManualTimePicker::from_system_time(
+                                self.time_state
+                                    .as_ref()
+                                    .expect("manual row requires time state")
+                                    .wall_clock
+                            )
+                            .label()
+                            .replace(['[', ']'], "")
+                        ),
+                        true,
+                    ),
                     SystemRow::Transfer(service) => {
                         let state = self.transfer_services.as_ref().ok().and_then(|states| {
                             states.iter().find(|state| state.service == service)
@@ -3581,6 +3839,106 @@ mod tests {
             core.action(&ShellAction::Activate),
             Some(Effect::ResetFirstRun)
         );
+    }
+
+    #[test]
+    fn manual_time_picker_navigates_wraps_clamps_composes_and_cancels() {
+        let (_, time, transfer) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_system(&time, &transfer);
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::System;
+        core.focus = 2;
+
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.system_flow, SystemFlow::ManualTime);
+        assert!(format!("{:?}", settings_scene(&core)).contains("manual-time-fields"));
+        assert_eq!(
+            core.manual_time_picker,
+            ManualTimePicker::from_system_time(SystemTime::UNIX_EPOCH)
+        );
+
+        core.manual_time_picker = ManualTimePicker {
+            year: 2024,
+            month: 2,
+            day: 29,
+            hour: 23,
+            minute: 59,
+            field: 0,
+        };
+        core.action(&ShellAction::Move(AxisMove::Right));
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.manual_time_picker.field, 2);
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.manual_time_picker.field, 1);
+
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            (core.manual_time_picker.month, core.manual_time_picker.day),
+            (1, 29)
+        );
+        core.manual_time_picker.month = 1;
+        core.manual_time_picker.day = 31;
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(
+            (core.manual_time_picker.month, core.manual_time_picker.day),
+            (2, 29)
+        );
+        core.manual_time_picker.field = 0;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            (core.manual_time_picker.year, core.manual_time_picker.day),
+            (2023, 28)
+        );
+
+        core.manual_time_picker = ManualTimePicker {
+            year: 2024,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            field: 1,
+        };
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.manual_time_picker.month, 12);
+        core.manual_time_picker.field = 3;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.manual_time_picker.hour, 23);
+        core.manual_time_picker.field = 4;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.manual_time_picker.minute, 59);
+        core.manual_time_picker.field = 2;
+        core.manual_time_picker.day = 1;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.manual_time_picker.day, 31);
+        core.manual_time_picker.field = 0;
+        core.manual_time_picker.year = 1970;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.manual_time_picker.year, 9999);
+
+        core.manual_time_picker = ManualTimePicker {
+            year: 2024,
+            month: 2,
+            day: 29,
+            hour: 12,
+            minute: 34,
+            field: 4,
+        };
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::SetManualTime(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_210_040)
+            ))
+        );
+        assert_eq!(core.system_flow, SystemFlow::Rows);
+
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(core.action(&ShellAction::Back), None);
+        assert_eq!(core.system_flow, SystemFlow::Rows);
+        assert_eq!(core.focus, 2);
+        assert!(format!("{:?}", settings_scene(&core)).contains("Set time manually"));
+        assert!(!format!("{:?}", settings_scene(&core)).contains("manual-time-fields"));
     }
 
     #[test]

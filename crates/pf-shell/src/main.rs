@@ -1,6 +1,6 @@
 use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
-use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore};
+use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
     FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost,
@@ -114,8 +114,28 @@ fn load_durable_map_or_shipped(
                 "pf-shell: remap store {} could not be loaded ({error:?}); using shipped controls",
                 path.display()
             );
-            EffectiveMap::load(contract, &MemoryStore::default())
-                .map_err(|fallback| format!("shipped input map: {fallback:?}"))
+            let shipped = EffectiveMap::load(contract, &MemoryStore::default())
+                .map_err(|fallback| format!("shipped input map: {fallback:?}"))?;
+            let digest = Sha256::digest(fs::read(path).unwrap_or_default());
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("remaps.json");
+            let quarantine =
+                path.with_file_name(format!("{file_name}.corrupt-{}", hex(&digest[..8])));
+            fs::rename(path, &quarantine).map_err(|quarantine_error| {
+                format!(
+                    "quarantine remap store {} as {}: {quarantine_error}",
+                    path.display(),
+                    quarantine.display()
+                )
+            })?;
+            JsonRemapStore::at(path)
+                .save(shipped.device_id(), shipped.mappings())
+                .map_err(|save_error| {
+                    format!("recover remap store {}: {save_error:?}", path.display())
+                })?;
+            Ok(shipped)
         }
     }
 }
@@ -1395,18 +1415,50 @@ mod durable_tests {
     }
 
     #[test]
-    fn corrupt_remap_file_falls_back_to_shipped_map() {
+    fn corrupt_remap_file_recovers_store_for_commit_and_reset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remaps.json");
         fs::write(&path, b"not json").unwrap();
         let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
 
-        let map = load_durable_map_or_shipped(contract, &path).unwrap();
+        let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
 
         assert!(
             control_bindings(&map)
                 .iter()
                 .any(|binding| { binding.action == "Activate" && binding.binding == "A" })
+        );
+        let quarantine = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("remaps.json.corrupt-")
+            })
+            .unwrap();
+        assert_eq!(fs::read(quarantine).unwrap(), b"not json");
+
+        let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
+        remap
+            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .unwrap();
+        remap.gamepad_action(&ShellAction::Activate).unwrap();
+        let committed = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
+        assert!(
+            control_bindings(&committed)
+                .iter()
+                .any(|binding| binding.action == "Activate" && binding.binding == "Y")
+        );
+
+        remap.reset_defaults().unwrap();
+        let reset = load_durable_map_or_shipped(contract, &path).unwrap();
+        assert!(
+            control_bindings(&reset)
+                .iter()
+                .any(|binding| binding.action == "Activate" && binding.binding == "A")
         );
     }
 }

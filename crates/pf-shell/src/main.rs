@@ -1550,7 +1550,7 @@ fn drive_socket_session(
                 core.session_backend_reachable();
                 core.session_event(&event);
                 if session.acknowledge_last().is_err() {
-                    core.session_backend_unavailable();
+                    session_backend_unavailable(core);
                     break;
                 }
                 if matches!(
@@ -1566,7 +1566,7 @@ fn drive_socket_session(
                 break;
             }
             Err(SessionError::BackendUnavailable) => {
-                core.session_backend_unavailable();
+                session_backend_unavailable(core);
                 break;
             }
             Err(error) => return Err(format!("session: {error:?}")),
@@ -1581,7 +1581,15 @@ fn request_safe_return_if_active(core: &mut ShellCore, session: &SessionClient<S
     }
     match session.safe_return() {
         Ok(()) => core.session_backend_reachable(),
-        Err(_) => core.session_backend_unavailable(),
+        Err(_) => core.active_session_backend_unavailable(),
+    }
+}
+
+fn session_backend_unavailable(core: &mut ShellCore) {
+    if core.session_active() {
+        core.active_session_backend_unavailable();
+    } else {
+        core.session_backend_unavailable();
     }
 }
 
@@ -1933,6 +1941,81 @@ mod durable_tests {
 
         server.join().unwrap();
         assert!(!core.authority_unavailable());
+    }
+
+    #[test]
+    fn safe_return_transient_failure_preserves_session_and_retries() {
+        use std::os::unix::net::UnixListener;
+
+        let state = tempfile::tempdir().unwrap();
+        let socket = state.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut failed_stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut failed_stream).unwrap();
+            let request =
+                serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap();
+            assert!(matches!(
+                request,
+                pf_session_authority::RpcRequest::SafeReturn
+            ));
+            drop(failed_stream);
+
+            let (mut succeeding_stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut succeeding_stream).unwrap();
+            let request =
+                serde_json::from_slice::<pf_session_authority::RpcRequest>(&body).unwrap();
+            assert!(matches!(
+                request,
+                pf_session_authority::RpcRequest::SafeReturn
+            ));
+            let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+            pf_wire::write_frame(&mut succeeding_stream, &body).unwrap();
+        });
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "session-1".into(),
+        });
+        let session = SessionClient::new("test", SocketTransport::connect(&socket));
+
+        request_safe_return_if_active(&mut core, &session);
+        assert!(core.session_active());
+        assert!(core.authority_unavailable());
+
+        request_safe_return_if_active(&mut core, &session);
+        server.join().unwrap();
+        assert!(core.session_active());
+        assert!(!core.authority_unavailable());
+
+        core.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "session-1".into(),
+        }));
+        assert!(!core.session_active());
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Returned);
+    }
+
+    #[test]
+    fn safe_return_backend_gone_keeps_active_session_retryable() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "session-1".into(),
+        });
+        let state = tempfile::tempdir().unwrap();
+        let nonexistent_socket = state.path().join("authority.sock");
+        let session = SessionClient::new("test", SocketTransport::connect(nonexistent_socket));
+
+        request_safe_return_if_active(&mut core, &session);
+        assert!(core.session_active());
+        let first_revision = core.revision();
+
+        request_safe_return_if_active(&mut core, &session);
+        assert!(core.session_active());
+        assert!(core.authority_unavailable());
+        assert!(core.revision() > first_revision);
     }
 
     #[test]

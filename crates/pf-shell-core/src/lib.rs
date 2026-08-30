@@ -1239,6 +1239,12 @@ impl ShellCore {
         self.session_status = Some("The session service isn't reachable".into());
         self.presentation = Presentation::Ready;
     }
+    pub fn active_session_backend_unavailable(&mut self) {
+        self.bump_revision();
+        self.authority_unavailable = true;
+        self.session_status =
+            Some("The session service isn't reachable; Safe Return can retry".into());
+    }
     pub fn session_backend_reachable(&mut self) {
         if self.authority_unavailable || self.session_status.is_some() {
             self.bump_revision();

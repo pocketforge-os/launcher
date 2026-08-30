@@ -64,16 +64,16 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("0c93216b0126acff1a6097034338defc86c73b242eaf54be79417fee8e2f3736  ")
     );
     assert!(
-        transcript.contains("adcc55c717383ace233142c224a884d76e38cdb0dc461dd29dae72df3354d919  ")
-    );
-    assert!(
-        transcript.contains("27b261e211a3c0be36f1548e743efec1094234046ee96779196d0cb435d7c2d8  ")
+        transcript.contains("89aff19d00e5c2de5c5e7a3d8c83bc0b5341df963e1b55c839a334db809db6b0  ")
     );
     assert!(
         transcript.contains("ddbcb6a272918daceb3aaa7f7bb9e347a0191bd7ebd229892814399c37ce4d17  ")
     );
     assert!(
         transcript.contains("386de425da34d23814ef155b20adc33198b9170d14865298be102ca7fb0a56c9  ")
+    );
+    assert!(
+        transcript.contains("56ca3935dd18cac7637771022b31cc0099415b1f4fa87bd4b02f9bd1a73927e9  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());

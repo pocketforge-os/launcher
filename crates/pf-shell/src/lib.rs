@@ -656,7 +656,7 @@ fn display_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        custom @ ("SafeReturn" | "Quick") => ShellAction::Custom(custom.into()),
+        custom @ ("SafeReturn" | "Quick" | "Start") => ShellAction::Custom(custom.into()),
         _ => return None,
     })
 }
@@ -669,7 +669,7 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        "SafeReturn" => ShellAction::Custom(name.into()),
+        "SafeReturn" | "Start" => ShellAction::Custom(name.into()),
         "Quick" => ShellAction::Custom("Favorite".into()),
         _ => return None,
     })
@@ -682,6 +682,8 @@ fn linux_key_code(name: &str) -> Option<u16> {
         "BTN_NORTH" => 307,
         "BTN_WEST" => 308,
         "BTN_MODE" => 316,
+        "BTN_SELECT" => 314,
+        "BTN_START" => 315,
         "KEY_UP" => 103,
         "KEY_DOWN" => 108,
         "KEY_LEFT" => 105,
@@ -810,6 +812,62 @@ mod tests {
     }
 
     #[test]
+    fn evdev_start_is_effective_map_gated_and_completes_first_run() {
+        let write_start_event = |path: &Path| {
+            let mut bytes = vec![0; std::mem::size_of::<libc::c_long>() * 2];
+            bytes.extend_from_slice(&1_u16.to_ne_bytes());
+            bytes.extend_from_slice(&315_u16.to_ne_bytes());
+            bytes.extend_from_slice(&1_i32.to_ne_bytes());
+            File::create(path).unwrap().write_all(&bytes).unwrap();
+        };
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("start-events");
+        write_start_event(&path);
+        let (mut source, _) = EvdevActionSource::open_with_map(&path, &contract, map).unwrap();
+        let deadline = Deadline(MonotonicTime::ZERO);
+        source.next_action(deadline).unwrap();
+        let ActionPoll::Event(ActionEvent::Action(action)) = source.next_action(deadline).unwrap()
+        else {
+            panic!("BTN_START must emit an action when Start is mapped")
+        };
+        assert_eq!(action, ShellAction::Custom("Start".into()));
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = pf_shell_core::ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        core.reset_first_run();
+        assert_eq!(
+            core.action(&action),
+            Some(pf_shell_core::Effect::CompleteFirstRun)
+        );
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+
+        let mut remapped_contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+        for mapping in remapped_contract["effective_map"].as_array_mut().unwrap() {
+            match mapping["action"].as_str().unwrap() {
+                "Start" => mapping["binding"]["controls"] = serde_json::json!(["r1"]),
+                "Move.right" => mapping["binding"]["controls"] = serde_json::json!(["start"]),
+                _ => {}
+            }
+        }
+        let remapped_contract = DeviceContract::parse_json(&remapped_contract.to_string()).unwrap();
+        let remapped_map =
+            EffectiveMap::load(remapped_contract.clone(), &MemoryStore::default()).unwrap();
+        let path = dir.path().join("remapped-start-events");
+        write_start_event(&path);
+        let (mut source, _) =
+            EvdevActionSource::open_with_map(path, &remapped_contract, remapped_map).unwrap();
+        source.next_action(deadline).unwrap();
+        assert_eq!(
+            source.next_action(deadline).unwrap(),
+            ActionPoll::Event(ActionEvent::Action(ShellAction::Move(AxisMove::Right)))
+        );
+    }
+
+    #[test]
     fn evdev_grab_policy_is_exclusive_by_default_with_debug_escape() {
         assert!(evdev_grab_enabled(false, true));
         assert!(!evdev_grab_enabled(true, true));
@@ -828,12 +886,9 @@ mod tests {
                 "Select + Start",
                 "Hold PF · the button below the d-pad (about 1s)",
                 "Select + Start, press twice",
-                "Double-tap PF · the button below the d-pad"
+                "Double-tap PF · the button below the d-pad",
+                "Hold Select + L1 + R1 · deliberately hard to press"
             ]
-        );
-        assert!(
-            labels.iter().all(|label| !label.contains("L1")),
-            "absent controls are not offered"
         );
     }
     #[test]

@@ -57,41 +57,32 @@ fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
 }
 
 fn ready_variant_label(variant: &Variant) -> String {
-    let runtime = variant.provenance.runtime_family.to_ascii_lowercase();
-    if runtime
-        .split(['/', '-', '_', '.'])
-        .any(|part| part == "stream")
-        || runtime.contains("streaming")
-    {
-        "Stream from your PC".to_owned()
-    } else if runtime
-        .split(['/', '-', '_', '.'])
-        .any(|part| part == "native")
-    {
-        "Installed on this device".to_owned()
-    } else if variant.provenance.runtime_family.is_empty() {
-        humanize_identifier(&variant.id)
-    } else {
-        humanize_identifier(&variant.provenance.runtime_family)
+    match ready_variant_capability(variant) {
+        ReadyVariantCapability::Native => "Installed on this device".to_owned(),
+        ReadyVariantCapability::Stream => "Stream from your PC".to_owned(),
+        ReadyVariantCapability::Unknown if variant.provenance.runtime_family.is_empty() => {
+            humanize_identifier(&variant.id)
+        }
+        ReadyVariantCapability::Unknown => humanize_identifier(&variant.provenance.runtime_family),
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OfflineCapability {
-    Supported,
-    Unsupported,
+enum ReadyVariantCapability {
+    Native,
+    Stream,
     Unknown,
 }
 
-fn offline_capability(variant: &Variant) -> OfflineCapability {
+fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
     let runtime = variant.provenance.runtime_family.to_ascii_lowercase();
     let families = runtime.split(['/', '-', '_', '.']);
     if families.clone().any(|part| part == "stream") || runtime.contains("streaming") {
-        OfflineCapability::Unsupported
+        ReadyVariantCapability::Stream
     } else if families.into_iter().any(|part| part == "native") {
-        OfflineCapability::Supported
+        ReadyVariantCapability::Native
     } else {
-        OfflineCapability::Unknown
+        ReadyVariantCapability::Unknown
     }
 }
 
@@ -3261,8 +3252,20 @@ impl ShellCore {
             );
             out.push(cover);
             let detail_availability = best_availability(item);
+            let ready_variant = item
+                .variants
+                .iter()
+                .find(|variant| matches!(variant.availability, Availability::Ready));
             let availability = if matches!(detail_availability, Availability::Ready) {
-                "● Ready · Installed on this device".to_owned()
+                match ready_variant.map(ready_variant_capability) {
+                    Some(ReadyVariantCapability::Native) => {
+                        "● Ready · Installed on this device".to_owned()
+                    }
+                    Some(ReadyVariantCapability::Stream) => {
+                        "● Ready · Stream from your PC".to_owned()
+                    }
+                    Some(ReadyVariantCapability::Unknown) | None => "● Ready".to_owned(),
+                }
             } else {
                 format!(
                     "⊘ {}",
@@ -3287,7 +3290,15 @@ impl ShellCore {
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
             let description = if item.tags.is_empty() {
-                format!("{} is ready from the installed catalog.", item.title)
+                match ready_variant.map(ready_variant_capability) {
+                    Some(ReadyVariantCapability::Native) => {
+                        format!("{} is ready from the installed catalog.", item.title)
+                    }
+                    Some(ReadyVariantCapability::Stream | ReadyVariantCapability::Unknown)
+                    | None => {
+                        format!("{} is ready to play.", item.title)
+                    }
+                }
             } else {
                 format!("{} · {}", sentence_kind(&item.kind), item.tags.join(" · "))
             };
@@ -3329,9 +3340,10 @@ impl ShellCore {
                 {
                     let (variant_name, variant_sub) =
                         if matches!(variant.availability, Availability::Ready) {
-                            let capability_copy = match offline_capability(variant) {
-                                OfflineCapability::Supported => " · works offline",
-                                OfflineCapability::Unsupported | OfflineCapability::Unknown => "",
+                            let capability_copy = match ready_variant_capability(variant) {
+                                ReadyVariantCapability::Native => " · works offline",
+                                ReadyVariantCapability::Stream
+                                | ReadyVariantCapability::Unknown => "",
                             };
                             (
                                 ready_variant_label(variant),
@@ -3645,22 +3657,20 @@ impl ShellCore {
                     .map(|&variant_index| &item.variants[variant_index])
                     .filter(|_| !compact && flow_top + block_height <= footer_top)
                 {
-                    let mut facts = vec![
-                        (
-                            "developer",
-                            "DEVELOPER",
-                            humanize_identifier(&variant.provenance.provider_id),
-                        ),
-                        (
+                    let mut facts = vec![(
+                        "developer",
+                        "DEVELOPER",
+                        humanize_identifier(&variant.provenance.provider_id),
+                    )];
+                    if ready_variant_capability(variant) == ReadyVariantCapability::Native {
+                        facts.push((
                             "installed",
                             "INSTALLED",
                             variant.provenance.app_version.as_deref().map_or_else(
                                 || "Current version".to_owned(),
                                 |version| format!("Version {version}"),
                             ),
-                        ),
-                    ];
-                    if offline_capability(variant) == OfflineCapability::Supported {
+                        ));
                         facts.push(("offline", "WORKS OFFLINE", "Yes".to_owned()));
                     }
                     let fact_width = detail_column_width / facts.len() as f32;
@@ -7077,6 +7087,12 @@ mod tests {
         }
 
         let native = details_for(variant("native", "game", Availability::Ready));
+        assert!(
+            node_by_id(native.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .contains("Installed on this device")
+        );
         assert!(node_by_id(native.root(), "detail-fact-offline").is_some());
         assert!(
             node_by_id(native.root(), "detail-variant-0-sub")
@@ -7088,6 +7104,24 @@ mod tests {
         let mut streaming = variant("stream", "game", Availability::Ready);
         streaming.provenance.runtime_family = "pocketforge/stream".into();
         let streaming = details_for(streaming);
+        let streaming_copy = [
+            node_by_id(streaming.root(), "detail-availability-reason")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+            node_by_id(streaming.root(), "detail-description")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+            node_by_id(streaming.root(), "detail-variant-0-name")
+                .unwrap()
+                .accessible_label
+                .as_str(),
+        ]
+        .join("\n");
+        assert!(streaming_copy.contains("Stream from your PC"));
+        assert!(!streaming_copy.to_ascii_lowercase().contains("install"));
+        assert!(node_by_id(streaming.root(), "detail-fact-installed").is_none());
         assert!(node_by_id(streaming.root(), "detail-fact-offline").is_none());
         assert!(
             !node_by_id(streaming.root(), "detail-variant-0-sub")

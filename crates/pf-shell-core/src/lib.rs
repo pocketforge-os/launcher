@@ -2029,8 +2029,9 @@ impl ShellCore {
                 16.0,
                 440.0,
                 32.0,
-                "--state-rest-text",
-            ),
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
             node(
                 "status-cluster",
                 Role::Text,
@@ -2043,8 +2044,9 @@ impl ShellCore {
                 16.0,
                 200.0,
                 32.0,
-                "--color-text-secondary",
-            ),
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Caption),
         ];
         if let Some(status) = self.session_status() {
             children.push(node(
@@ -2103,16 +2105,19 @@ impl ShellCore {
             PROMPTS_AREA_HEIGHT,
             "--color-surface-raised",
         ));
-        children.push(node(
-            "prompts",
-            Role::Text,
-            &footer,
-            w - 600.0,
-            h - PROMPTS_AREA_HEIGHT,
-            552.0,
-            32.0,
-            "--color-text-secondary",
-        ));
+        children.push(
+            node(
+                "prompts",
+                Role::Text,
+                &footer,
+                w - 600.0,
+                h - PROMPTS_AREA_HEIGHT,
+                552.0,
+                32.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
+        );
         let focus_id = children
             .iter()
             .find_map(focused_node_id)
@@ -2213,11 +2218,16 @@ impl ShellCore {
                     "--color-status-attention",
                 ));
             }
+            let ready_count = self
+                .items
+                .iter()
+                .filter(|item| matches!(best_availability(item), Availability::Ready))
+                .count();
             content.push(
                 node(
                     "home-shelf-label",
                     Role::Heading,
-                    "RECENT",
+                    &format!("READY NOW · {ready_count}"),
                     48.0,
                     344.0,
                     220.0,
@@ -2258,16 +2268,19 @@ impl ShellCore {
                     .any(|variant| matches!(variant.availability, Availability::Ready));
                 n.children = art_nodes(item, "home-card", x, 390.0, card_width, i == self.focus);
                 if item.favorite {
-                    n.children.push(node(
-                        &format!("favorite-pin-{}", item.id),
-                        Role::Text,
-                        "★ Favorite",
-                        x + 8.0,
-                        574.0,
-                        card_width - 16.0,
-                        20.0,
-                        "--state-selected-accent",
-                    ));
+                    n.children.push(
+                        node(
+                            &format!("favorite-pin-{}", item.id),
+                            Role::Text,
+                            "★",
+                            x + card_width - 28.0,
+                            398.0,
+                            20.0,
+                            20.0,
+                            "--color-surface-scrim",
+                        )
+                        .with_type_role(TypeRole::Caption),
+                    );
                 }
                 content.push(n);
             }
@@ -3445,7 +3458,8 @@ fn procedural_art_nodes(
             if favorite { 24.0 } else { width * 0.46 },
             if favorite { 28.0 } else { 58.0 },
             token,
-        ),
+        )
+        .with_type_role(TypeRole::Plate),
     ];
     if let Some(edition) = edition {
         nodes.push(
@@ -3459,7 +3473,7 @@ fn procedural_art_nodes(
                 if favorite { 20.0 } else { 24.0 },
                 token,
             )
-            .with_type_role(TypeRole::Plate),
+            .with_type_role(TypeRole::Eyebrow),
         );
     }
     nodes.push(
@@ -3530,9 +3544,9 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 kind_y,
                 if favorite { width - 72.0 } else { width - 24.0 },
                 if favorite { 20.0 } else { 24.0 },
-                "--state-rest-surface",
+                "--color-surface-scrim",
             )
-            .with_type_role(TypeRole::Plate),
+            .with_type_role(TypeRole::Eyebrow),
             node(
                 &format!("{context}-title-{}", item.id),
                 Role::Text,
@@ -5006,10 +5020,13 @@ mod tests {
             assert_eq!(find(scene.root(), id).map(|node| node.role), Some(role));
         }
         for (id, type_role) in [
+            ("rooms", TypeRole::Label),
+            ("status-cluster", TypeRole::Caption),
             ("route-heading", TypeRole::Eyebrow),
             ("hero-title", TypeRole::Hero),
             ("hero-status", TypeRole::Label),
             ("home-shelf-label", TypeRole::Eyebrow),
+            ("prompts", TypeRole::Label),
         ] {
             assert_eq!(
                 find(scene.root(), id).map(|node| node.type_role),
@@ -5043,6 +5060,10 @@ mod tests {
             }
             assert_eq!(
                 find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
+                Some(TypeRole::Eyebrow)
+            );
+            assert_eq!(
+                find(scene.root(), &format!("home-card-initial-{id}")).map(|node| node.type_role),
                 Some(TypeRole::Plate)
             );
             assert_eq!(
@@ -5051,6 +5072,78 @@ mod tests {
                 Some((TypeRole::Label, "--color-surface-canvas"))
             );
         }
+        assert_eq!(
+            find(scene.root(), "home-shelf-label").map(|node| node.accessible_label.as_str()),
+            Some("READY NOW · 2")
+        );
+    }
+
+    #[test]
+    fn chrome_text_uses_contrasting_bar_surfaces_in_dusk_and_high_contrast() {
+        fn luminance(hex: &str) -> f64 {
+            let channel = |offset| {
+                let value = u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap();
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+        }
+        fn contrast(a: &str, b: &str) -> f64 {
+            let (lighter, darker) = if luminance(a) >= luminance(b) {
+                (luminance(a), luminance(b))
+            } else {
+                (luminance(b), luminance(a))
+            };
+            (lighter + 0.05) / (darker + 0.05)
+        }
+
+        let theme = pf_theme::flagship();
+        for (base, floor) in [(Base::Dusk, 4.5), (Base::HighContrast, 7.0)] {
+            let text = theme.resolve(base, "--state-rest-text").unwrap();
+            let surface = theme.resolve(base, "--color-surface-raised").unwrap();
+            assert!(
+                contrast(text, surface) >= floor,
+                "{base:?} chrome contrast must clear {floor}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn fraunces_plate_role_is_reserved_for_edition_monograms() {
+        fn visit(node: &Node) {
+            if node.type_role == TypeRole::Plate {
+                assert!(
+                    node.id.as_str().contains("-initial-"),
+                    "Fraunces escaped the edition monogram: {}",
+                    node.id.as_str()
+                );
+            }
+            for child in &node.children {
+                visit(child);
+            }
+        }
+
+        let scene = fixture_core(vec![item(
+            "ridge",
+            "Ridgeline",
+            vec![variant("native", "ridge", Availability::Ready)],
+        )])
+        .scene(
+            SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            },
+            "A Open · B Back",
+        )
+        .unwrap();
+        visit(scene.root());
     }
 
     #[test]

@@ -539,12 +539,6 @@ struct Item {
     pinned_variant_id: Option<String>,
 }
 
-impl Item {
-    fn has_real_art(&self) -> bool {
-        self.art.is_some() && !self.art_failed
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtTreatment {
     CatalogArt,
@@ -2032,7 +2026,12 @@ impl ShellCore {
         let item = self.focused_item_index()?;
         let ready = self.ready_variants(item);
         match ready.len() {
-            0 => None,
+            0 => {
+                self.selected_item = Some(item);
+                self.remember_caller();
+                self.go(Route::Details);
+                None
+            }
             1 => self.launch_variant(item, ready[0]),
             _ => {
                 self.selected_item = Some(item);
@@ -2624,6 +2623,26 @@ impl ShellCore {
             footer.to_owned()
         };
         let footer = match self.route {
+            Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
+                let mut prompts = self
+                    .binding_prompt(
+                        "Activate",
+                        if self.ready_variants(item).is_empty() {
+                            "Details"
+                        } else {
+                            "Open"
+                        },
+                    )
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let global_prompts = supplied_footer
+                    .split_once("     ")
+                    .map_or(supplied_footer.as_str(), |(_, global)| global);
+                if !global_prompts.is_empty() {
+                    prompts.push(global_prompts.to_owned());
+                }
+                prompts.join("     ")
+            }),
             Route::Library => (self.focus >= 5)
                 .then(|| self.binding_prompt("Activate", "Details"))
                 .flatten()
@@ -2848,29 +2867,23 @@ impl ShellCore {
                 .min(136.0);
             for (i, item) in self.items.iter().take(HOME_SHELF_LIMIT).enumerate() {
                 let availability = best_availability(item);
-                let status = availability_text(availability, &self.presentation);
                 let x = 48.0 + i as f32 * (card_width + gap);
-                let card_label = if item.has_real_art() {
-                    String::new()
-                } else {
-                    format!("{} — {status}", item.title)
-                };
                 let mut n = node(
                     &format!("item-{}", item.id),
-                    Role::Button,
-                    &card_label,
-                    x,
-                    382.0,
-                    card_width,
-                    220.0,
-                    state_token(availability, i == self.focus),
+                    Role::ListItem,
+                    &item.title,
+                    x + 8.0,
+                    390.0,
+                    card_width - 16.0,
+                    158.0,
+                    if i == self.focus {
+                        "--state-focused-ring"
+                    } else {
+                        "--color-surface-canvas"
+                    },
                 );
                 n.action = Some(NodeAction::Activate);
                 n.state.focused = i == self.focus;
-                n.state.disabled = !item
-                    .variants
-                    .iter()
-                    .any(|variant| matches!(variant.availability, Availability::Ready));
                 n.children = art_nodes(
                     item,
                     "home-card",
@@ -2880,6 +2893,11 @@ impl ShellCore {
                     158.0,
                     i == self.focus,
                 );
+                let title = n
+                    .children
+                    .iter()
+                    .position(|child| child.id.as_str() == format!("home-card-title-{}", item.id))
+                    .map(|index| n.children.remove(index));
                 add_unavailable_card_cues(
                     &mut n.children,
                     item,
@@ -2888,6 +2906,7 @@ impl ShellCore {
                     x,
                     390.0,
                     card_width,
+                    Some(h - PROMPTS_AREA_HEIGHT),
                 );
                 if item.favorite {
                     n.children.push(
@@ -2905,6 +2924,9 @@ impl ShellCore {
                     );
                 }
                 content.push(n);
+                if let Some(title) = title {
+                    content.push(title);
+                }
             }
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
@@ -3126,6 +3148,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
+                    None,
                 );
                 card.children
                     .retain(|child| !child.id.as_str().contains("-title-"));
@@ -4733,9 +4756,7 @@ fn procedural_art_nodes(
     let home = context == "home-card";
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
-    let kind_y = if home {
-        y + 166.0
-    } else if favorite {
+    let kind_y = if favorite {
         y + 8.0
     } else if detail {
         y + art_height - 68.0
@@ -4743,7 +4764,7 @@ fn procedural_art_nodes(
         y + 142.0
     };
     let label_y = if home {
-        y + 210.0
+        y + 166.0
     } else if favorite {
         y + 32.0
     } else if detail {
@@ -4826,7 +4847,7 @@ fn procedural_art_nodes(
         )
         .with_type_role(TypeRole::Plate),
     ];
-    if let Some(edition) = edition {
+    if let Some(edition) = edition.filter(|_| !home) {
         nodes.push(
             node(
                 &format!("{context}-plate-{id}"),
@@ -4877,7 +4898,7 @@ fn art_nodes(
         let favorite = context == "favorite-card";
         let detail = context == "detail-art";
         let label_y = if home {
-            y + 210.0
+            y + 166.0
         } else if favorite {
             y + 32.0
         } else {
@@ -4933,6 +4954,7 @@ fn add_unavailable_card_cues(
     x: f32,
     y: f32,
     width: f32,
+    footer_top: Option<f32>,
 ) {
     if matches!(availability, Availability::Ready) {
         return;
@@ -4969,22 +4991,58 @@ fn add_unavailable_card_cues(
         )
         .with_type_role(TypeRole::Caption),
     );
+    let full_reason = format!(
+        "⊘ {}",
+        availability_text(availability, &Presentation::Ready)
+    );
+    let reason_y = if home { y + 194.0 } else { y + 204.0 };
+    let max_lines = footer_top.map(|footer_top| {
+        let available_height = footer_top - reason_y;
+        let mut lines = 1;
+        while 8.0 + 20.0 * (lines + 1) as f32 <= available_height {
+            lines += 1;
+        }
+        lines
+    });
+    let reason = max_lines.map_or_else(
+        || full_reason.clone(),
+        |max_lines| ellipsize_to_lines(&full_reason, width, max_lines),
+    );
+    let reason_lines = (label_text_width(&reason) / width).ceil().max(1.0);
     nodes.push(
         node(
             &format!("{context}-reason-{}", item.id),
             Role::Text,
-            &format!(
-                "⊘ {}",
-                availability_text(availability, &Presentation::Ready)
-            ),
+            &reason,
             x,
-            if home { y + 238.0 } else { y + 204.0 },
+            reason_y,
             width,
-            28.0,
+            8.0 + 20.0 * reason_lines,
             "--color-text-muted",
         )
         .with_type_role(TypeRole::Caption),
     );
+}
+
+fn ellipsize_to_lines(text: &str, width: f32, max_lines: usize) -> String {
+    let max_width = width * max_lines as f32;
+    if label_text_width(text) <= max_width {
+        return text.to_owned();
+    }
+
+    let mut truncated = String::new();
+    for character in text.chars() {
+        truncated.push(character);
+        if label_text_width(&truncated) + 8.0 > max_width {
+            truncated.pop();
+            break;
+        }
+    }
+    if let Some(word_end) = truncated.rfind(char::is_whitespace) {
+        truncated.truncate(word_end);
+    }
+    truncated.push('…');
+    truncated
 }
 
 #[cfg(test)]
@@ -7709,7 +7767,8 @@ mod tests {
             .unwrap()
         );
 
-        assert!(scene.contains("Not supported on this device — catalog item has no variants"));
+        assert!(scene.contains("Not supported on this device"));
+        assert!(scene.contains('…'));
         assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
@@ -7890,7 +7949,7 @@ mod tests {
                     | "home-card-initial-plate-id"
             )
         }));
-        assert!(card.accessible_label.is_empty());
+        assert_eq!(card.accessible_label, "Paper Comet");
         assert!(
             !card
                 .children
@@ -8264,9 +8323,9 @@ mod tests {
                     "missing Home card anatomy node {node_id}"
                 );
             }
-            assert_eq!(
-                find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
-                Some(TypeRole::Eyebrow)
+            assert!(
+                find(scene.root(), &format!("home-card-plate-{id}")).is_none(),
+                "Home cards must not paint an edition plate below their art"
             );
             assert_eq!(
                 find(scene.root(), &format!("home-card-title-{id}"))
@@ -8444,7 +8503,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "initial", "plate", "title"] {
+        for part in ["art", "initial"] {
             assert!(
                 favorite
                     .children
@@ -8452,6 +8511,20 @@ mod tests {
                     .any(|node| node.id.as_str() == format!("home-card-{part}-ridge"))
             );
         }
+        assert!(
+            home.root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-title-ridge"),
+            "the painted Home title is a sibling of its focus owner"
+        );
+        assert!(
+            favorite
+                .children
+                .iter()
+                .all(|node| node.id.as_str() != "home-card-plate-ridge"),
+            "the Home label must sit directly on the canvas"
+        );
         snapshot.user_projection.favorite_item_ids.clear();
         let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
             .scene(metrics, "")
@@ -8727,6 +8800,172 @@ mod tests {
                     "chooser focus {focus} of {variant_count} must remain visible"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn home_card_focus_owner_is_actionable_and_long_caption_fits_above_footer() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let reason = "Content pack not installed until a profile is selected and the optional compatibility files have finished downloading";
+        let mut core = fixture_core(vec![item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "stream",
+                "setup-app",
+                Availability::NeedsSetup {
+                    reason: reason.into(),
+                },
+            )],
+        )]);
+        core.focus = 0;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let card = find(scene.root(), "item-setup").unwrap();
+        let art = find(scene.root(), "home-card-art-setup").unwrap();
+        let caption = find(scene.root(), "home-card-reason-setup").unwrap();
+        let footer = find(scene.root(), "prompt-bar").unwrap();
+
+        assert_eq!(card.role, Role::ListItem);
+        assert_eq!(card.bounds, art.bounds);
+        assert_eq!(scene.default_focus(), &card.id);
+        assert!(card.action.is_some(), "the focus owner must be actionable");
+        assert!(
+            !card.accessible_label.trim().is_empty(),
+            "the focus owner must have an accessible label"
+        );
+        assert_eq!(card.style_token, "--state-focused-ring");
+        assert_eq!(
+            find(scene.root(), scene.default_focus().as_str())
+                .unwrap()
+                .bounds,
+            art.bounds,
+            "the focus ring must use the art bounds"
+        );
+        assert!(find(scene.root(), "home-card-plate-setup").is_none());
+        assert_eq!(
+            find(scene.root(), "home-card-veil-setup").unwrap().bounds,
+            art.bounds,
+            "the unavailable tint is confined to the art"
+        );
+        assert!(caption.accessible_label.ends_with('…'));
+        assert!(
+            caption.bounds.height > 48.0,
+            "the caption must wrap to three lines"
+        );
+        assert!(caption.bounds.y + caption.bounds.height <= footer.bounds.y);
+        assert!(
+            caption.bounds.y + caption.bounds.height < footer.bounds.y,
+            "the final line needs guard-visible breathing room above the footer"
+        );
+        assert!(
+            find(scene.root(), "home-card-title-setup").is_some_and(|title| {
+                scene.root().children.iter().any(|node| node.id == title.id)
+            }),
+            "the painted title must be a sibling of the art-bounded focus owner"
+        );
+    }
+
+    #[test]
+    fn home_activation_and_footer_match_each_cards_availability() {
+        fn prompt(scene: &Scene) -> &str {
+            scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == "prompts")
+                .map(|node| node.accessible_label.as_str())
+                .unwrap()
+        }
+
+        let bindings = || {
+            vec![ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            }]
+        };
+        let supplied_footer = "A  Open     PF  Safe Return · button below the d-pad\u{1f}X";
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("native", "ready-app", Availability::Ready)],
+            ),
+            item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant(
+                    "stream",
+                    "unavailable-app",
+                    Availability::NeedsNetwork {
+                        reason: "connect to Wi-Fi".into(),
+                    },
+                )],
+            ),
+            item(
+                "setup",
+                "Setup Game",
+                vec![variant(
+                    "setup",
+                    "setup-app",
+                    Availability::NeedsSetup {
+                        reason: "choose a profile".into(),
+                    },
+                )],
+            ),
+        ]);
+        core.items[2].favorite = true;
+        core.set_control_bindings(bindings());
+        assert_eq!(
+            prompt(&core.scene(metrics, supplied_footer).unwrap()),
+            "A Open     PF  Safe Return · button below the d-pad     X  Favorite"
+        );
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "ready-app".into(),
+            }))
+        );
+
+        for (focus, favorite_label) in [(1, "Favorite"), (2, "Unfavorite")] {
+            core.go(Route::Home);
+            core.focus = focus;
+            assert_eq!(
+                prompt(&core.scene(metrics, supplied_footer).unwrap()),
+                format!(
+                    "A Details     PF  Safe Return · button below the d-pad     X  {favorite_label}"
+                )
+            );
+            assert_eq!(core.action(&ShellAction::Activate), None);
+            assert_eq!(
+                (core.route(), core.selected_item),
+                (Route::Details, Some(focus))
+            );
         }
     }
 

@@ -2504,7 +2504,9 @@ impl ShellCore {
             let row_height = 292.0;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
-            while card_top + (visible_rows + 1) as f32 * row_height - 18.0 <= h {
+            while card_top + (visible_rows + 1) as f32 * row_height - 18.0
+                <= h - PROMPTS_AREA_HEIGHT
+            {
                 visible_rows += 1;
             }
             let focused_row = self.focus.saturating_sub(5) / geometry.columns;
@@ -5942,6 +5944,68 @@ mod tests {
                 .map(|index| format!("library-item-item-{index}"))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn tall_library_surfaces_fill_the_grid_without_overlapping_the_footer() {
+        let items = (0..48)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5;
+
+        for (width, height) in [(1280.0, 1080.0), (1024.0, 1200.0)] {
+            let metrics = SurfaceMetrics {
+                logical_width: width,
+                logical_height: height,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            };
+            let scene = core.scene(metrics, "").unwrap();
+            let geometry = library_geometry(width);
+            let grid_bottom = height - PROMPTS_AREA_HEIGHT;
+            let cards = scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("library-item-"))
+                .collect::<Vec<_>>();
+
+            assert!(
+                cards
+                    .iter()
+                    .all(|card| card.bounds.y + card.bounds.height <= grid_bottom),
+                "cards must remain above the footer at {width}x{height}"
+            );
+
+            let row_height = 292.0;
+            let mut expected_rows = 1;
+            while geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 <= grid_bottom
+            {
+                expected_rows += 1;
+            }
+            assert_eq!(
+                cards.len(),
+                expected_rows * geometry.columns,
+                "the maximum fitting rows must be emitted at {width}x{height}"
+            );
+            assert!(
+                geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 > grid_bottom,
+                "one more row must not fit at {width}x{height}"
+            );
+        }
     }
 
     #[test]

@@ -102,6 +102,12 @@ timeout 20s "$repo_dir/target/debug/pf-shell" \
     --authority-state-dir "$state_dir" --state-dir "$work_dir/shell-state" \
     >"$shell_log" 2>&1 || {
         sed -n '1,160p' "$shell_log" >&2
+        sed -n '1,160p' "$work_dir/supervisor.log" >&2
+        sed -n '1,160p' "$authority_log" >&2
+        if [ -f "$state_dir/authority.json" ]; then
+            sed -n '1,160p' "$state_dir/authority.json" >&2
+        fi
+        find "$state_dir/sessions" -maxdepth 1 -type f -print 2>/dev/null >&2 || true
         false
     }
 cat "$shell_log"

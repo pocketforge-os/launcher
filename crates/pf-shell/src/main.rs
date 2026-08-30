@@ -1080,11 +1080,15 @@ fn tick_desktop_sim(socket: &Path) -> Result<(), String> {
     }
 }
 
-fn authority_phase(authority_state: &Path) -> Result<pf_session_authority::Phase, String> {
+fn authority_phase(authority_state: &Path) -> Result<Option<pf_session_authority::Phase>, String> {
     let path = authority_state.join("authority.json");
-    let body = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let body = match fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
     serde_json::from_slice::<pf_session_authority::PersistedState>(&body)
-        .map(|state| state.phase)
+        .map(|state| Some(state.phase))
         .map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
@@ -1223,9 +1227,9 @@ fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(
     loop {
         tick_desktop_sim(socket)?;
         let phase = authority_phase(authority_state)?;
-        if let Some(path) = active_marker.as_ref() {
+        if let (Some(path), Some(phase)) = (active_marker.as_ref(), phase.as_ref()) {
             if marker_session_id(path)
-                .is_some_and(|session_id| phase_is_stopping_session(&phase, session_id))
+                .is_some_and(|session_id| phase_is_stopping_session(phase, session_id))
             {
                 match fs::remove_file(path) {
                     Ok(()) => println!("SUPERVISOR stopped marker={}", path.display()),
@@ -1309,8 +1313,8 @@ fn run_desktop_sim_script(
     request_safe_return_if_active(core, &session);
     let return_deadline = Instant::now() + Duration::from_secs(3);
     while !matches!(
-        authority_phase(authority_state)?,
-        pf_session_authority::Phase::Idle
+        authority_phase(authority_state)?.as_ref(),
+        Some(pf_session_authority::Phase::Idle)
     ) {
         if Instant::now() >= return_deadline {
             return Err("desktop-sim safe return did not reach Idle".into());

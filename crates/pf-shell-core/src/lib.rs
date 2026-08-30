@@ -1155,12 +1155,7 @@ impl ShellCore {
             .enumerate()
             .filter(|(_, item)| {
                 let haystack = format!("{} {}", item.title, item.tags.join(" ")).to_lowercase();
-                let filter_matches = match self.library_filter {
-                    LibraryFilter::Recent | LibraryFilter::Alphabetical => true,
-                    LibraryFilter::Games => matches!(item.kind, AppKind::Game),
-                    LibraryFilter::EverythingElse => !matches!(item.kind, AppKind::Game),
-                };
-                filter_matches && words.iter().all(|word| haystack.contains(word))
+                words.iter().all(|word| haystack.contains(word))
             })
             .map(|(index, _)| index)
             .collect();
@@ -2797,6 +2792,9 @@ impl ShellCore {
                 let chooser_row_height = 54.0;
                 let chooser_row_gap = 10.0;
                 let chooser_capacity = 5;
+                let chooser_compact = library_geometry(w).columns < 6;
+                let chooser_left = if chooser_compact { 48.0 } else { 360.0 };
+                let chooser_width = if chooser_compact { w - 96.0 } else { w - 720.0 };
                 let chooser_start = self
                     .focus
                     .saturating_add(1)
@@ -2806,9 +2804,9 @@ impl ShellCore {
                     "chooser-note",
                     Role::Text,
                     "Ready right now. Back leaves without opening anything.",
-                    360.0,
+                    chooser_left,
                     235.0,
-                    w - 720.0,
+                    chooser_width,
                     40.0,
                     "--color-text-secondary",
                 ));
@@ -2816,9 +2814,9 @@ impl ShellCore {
                     "chooser-scroll-region",
                     Role::Group,
                     "",
-                    360.0,
+                    chooser_left,
                     chooser_top,
-                    w - 720.0,
+                    chooser_width,
                     chooser_capacity as f32 * chooser_row_height
                         + chooser_capacity.saturating_sub(1) as f32 * chooser_row_gap,
                     "--color-surface-canvas",
@@ -2834,11 +2832,11 @@ impl ShellCore {
                         &format!("chooser-{}", variant.id),
                         Role::Button,
                         &format!("{} · Ready", humanize_identifier(&variant.id)),
-                        360.0,
+                        chooser_left,
                         chooser_top
                             + (choice - chooser_start) as f32
                                 * (chooser_row_height + chooser_row_gap),
-                        w - 720.0,
+                        chooser_width,
                         chooser_row_height,
                         if self.focus == choice {
                             "--state-focused-ring"
@@ -5440,6 +5438,38 @@ mod tests {
     }
 
     #[test]
+    fn search_ignores_the_active_library_filter() {
+        let mut tool = item(
+            "tool",
+            "Shared Lantern",
+            vec![variant("native", "tool", Availability::Ready)],
+        );
+        tool.kind = AppKind::System;
+        tool.tags.push("shared-alias".into());
+        let mut core = fixture_core(vec![
+            item(
+                "game",
+                "Shared Game",
+                vec![variant("native", "game", Availability::Ready)],
+            ),
+            tool,
+        ]);
+
+        core.go(Route::Library);
+        core.focus = 3;
+        core.action(&ShellAction::Activate);
+        assert_eq!(core.library_items, vec![0]);
+
+        core.focus = 0;
+        core.action(&ShellAction::Activate);
+        assert_eq!(core.route(), Route::Search);
+        core.set_search_query("");
+        assert_eq!(core.search_result_ids(), vec!["game", "tool"]);
+        core.set_search_query("shared-alias");
+        assert_eq!(core.search_result_ids(), vec!["tool"]);
+    }
+
+    #[test]
     fn details_hide_raw_provenance_and_show_one_setup_reason_with_runtime_cue() {
         fn visit(node: &Node, labels: &mut Vec<String>) {
             labels.push(node.accessible_label.clone());
@@ -6553,6 +6583,68 @@ mod tests {
                 assert!(
                     scene.root().children.iter().any(|node| node.state.focused),
                     "chooser focus {focus} of {variant_count} must remain visible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn variant_chooser_bounds_are_responsive_and_rows_remain_focusable() {
+        let variants = (0..3)
+            .map(|index| {
+                variant(
+                    &format!("variant-{index}"),
+                    &format!("game-{index}"),
+                    Availability::Ready,
+                )
+            })
+            .collect();
+        let mut core = fixture_core(vec![item("game", "Many Moons", variants)]);
+        core.selected_item = Some(0);
+        core.go(Route::VariantChooser);
+
+        for (surface_width, expected_left, expected_width) in
+            [(640.0, 48.0, 544.0), (1280.0, 360.0, 560.0)]
+        {
+            let metrics = SurfaceMetrics {
+                logical_width: surface_width,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            };
+            for focus in 0..3 {
+                core.focus = focus;
+                let scene = core.scene(metrics, "").unwrap();
+                let chooser_nodes = scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("chooser-"))
+                    .collect::<Vec<_>>();
+                assert_eq!(chooser_nodes.len(), 5);
+                for node in chooser_nodes {
+                    assert_eq!(node.bounds.x, expected_left, "{}", node.id.as_str());
+                    assert_eq!(node.bounds.width, expected_width, "{}", node.id.as_str());
+                    assert!(node.bounds.width > 0.0, "{}", node.id.as_str());
+                    assert!(node.bounds.x >= 0.0, "{}", node.id.as_str());
+                    assert!(
+                        node.bounds.x + node.bounds.width <= surface_width,
+                        "{}",
+                        node.id.as_str()
+                    );
+                    if node.id.as_str().starts_with("chooser-variant-") {
+                        assert_eq!(node.role, Role::Button);
+                        assert_eq!(node.action, Some(NodeAction::Activate));
+                    }
+                }
+                let focused_id = format!("chooser-variant-{focus}");
+                assert!(
+                    scene
+                        .root()
+                        .children
+                        .iter()
+                        .any(|node| { node.id.as_str() == focused_id && node.state.focused })
                 );
             }
         }

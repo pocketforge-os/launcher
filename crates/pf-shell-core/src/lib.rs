@@ -537,6 +537,7 @@ pub struct ShellCore {
     appearance_day: bool,
     settings_room: SettingsRoom,
     settings_in_rows: bool,
+    settings_row_focused: bool,
     settings_saved_focus: [usize; 5],
     display_preferences: Vec<DisplayPreference>,
     first_run_complete: bool,
@@ -675,6 +676,7 @@ impl ShellCore {
             appearance_day: false,
             settings_room: SettingsRoom::Accessibility,
             settings_in_rows: false,
+            settings_row_focused: false,
             settings_saved_focus: [0; 5],
             display_preferences: Vec::new(),
             first_run_complete: true,
@@ -1646,9 +1648,12 @@ impl ShellCore {
             }
             ShellAction::Back if self.route == Route::VariantChooser => self.go(Route::Details),
             ShellAction::Back if self.route == Route::Settings && self.settings_in_rows => {
-                self.settings_saved_focus[Self::settings_room_slot(self.settings_room)] =
-                    self.focus;
+                if self.settings_row_focused {
+                    self.settings_saved_focus[Self::settings_room_slot(self.settings_room)] =
+                        self.focus;
+                }
                 self.settings_in_rows = false;
+                self.settings_row_focused = false;
                 self.focus = self
                     .settings_rooms()
                     .iter()
@@ -1686,9 +1691,12 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Left)
                 if self.route == Route::Settings && self.settings_in_rows =>
             {
-                self.settings_saved_focus[Self::settings_room_slot(self.settings_room)] =
-                    self.focus;
+                if self.settings_row_focused {
+                    self.settings_saved_focus[Self::settings_room_slot(self.settings_room)] =
+                        self.focus;
+                }
                 self.settings_in_rows = false;
+                self.settings_row_focused = false;
                 self.focus = self
                     .settings_rooms()
                     .iter()
@@ -1815,6 +1823,9 @@ impl ShellCore {
 
     fn activate(&mut self) -> Option<Effect> {
         if self.route == Route::Settings {
+            if !self.settings_row_focused {
+                return None;
+            }
             return match self.settings_scene_rows().get(self.focus)?.action? {
                 SettingsRowAction::Preference(index) => self.preference_effect(index),
                 SettingsRowAction::Appearance => Some(Effect::ChangePreference(PreferenceChange {
@@ -2049,29 +2060,36 @@ impl ShellCore {
         }
         let rows = self.settings_scene_rows();
         let saved = self.settings_saved_focus[Self::settings_room_slot(self.settings_room)];
-        if let Some(index) = rows
+        self.settings_in_rows = true;
+        let row_focus = rows
             .iter()
             .enumerate()
             .filter(|(_, row)| row.action.is_some())
             .min_by_key(|(index, _)| index.abs_diff(saved))
-            .map(|(index, _)| index)
-        {
-            self.settings_in_rows = true;
+            .map(|(index, _)| index);
+        self.settings_row_focused = row_focus.is_some();
+        if let Some(index) = row_focus {
             self.focus = index;
+        } else {
+            self.focus = 0;
         }
     }
 
     fn move_settings_focus(&mut self, forward: bool) {
+        if !self.settings_row_focused {
+            return;
+        }
+        let focus = self.focus;
         let rows = self.settings_scene_rows();
         let next = if forward {
             rows.iter()
                 .enumerate()
-                .skip(self.focus + 1)
+                .skip(focus + 1)
                 .find(|(_, row)| row.action.is_some())
         } else {
             rows.iter()
                 .enumerate()
-                .take(self.focus)
+                .take(focus)
                 .rev()
                 .find(|(_, row)| row.action.is_some())
         };
@@ -3202,7 +3220,7 @@ impl ShellCore {
         ));
         for (index, row) in rows.drain(..).enumerate().skip(first).take(capacity) {
             let interactive = row.action.is_some();
-            let focused = self.settings_in_rows && self.focus == index && interactive;
+            let focused = self.settings_row_focused && self.focus == index && interactive;
             let mut row = node(
                 &format!("settings-row-{}", row.id),
                 if interactive {
@@ -4503,8 +4521,11 @@ mod tests {
             core.settings_in_rows = false;
 
             assert_eq!(core.action(&ShellAction::Activate), None);
-            assert!(!core.settings_in_rows, "disabled rows cannot receive focus");
-            core.settings_in_rows = true;
+            assert!(core.settings_in_rows, "disabled sections still open");
+            assert!(
+                !core.settings_row_focused,
+                "disabled rows cannot receive focus"
+            );
 
             let scene = format!("{:?}", settings_scene(&core));
             assert!(scene.contains("Current map:"));
@@ -4523,8 +4544,8 @@ mod tests {
         core.settings_room = SettingsRoom::System;
         core.settings_in_rows = false;
         assert_eq!(core.action(&ShellAction::Activate), None);
-        assert!(!core.settings_in_rows, "Licenses cannot receive focus");
-        core.settings_in_rows = true;
+        assert!(core.settings_in_rows, "System still opens without Recovery");
+        assert!(!core.settings_row_focused, "Licenses cannot receive focus");
         core.focus = 2;
         let scene = format!("{:?}", settings_scene(&core));
         assert!(scene.contains("settings-row-system-licenses"));
@@ -4581,6 +4602,62 @@ mod tests {
             "A Open · B Back",
         )
         .unwrap()
+    }
+
+    fn portrait_settings_scene(core: &ShellCore) -> Scene {
+        core.scene(
+            SurfaceMetrics {
+                logical_width: 480.,
+                logical_height: 800.,
+                scale: 1.,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Portrait,
+            },
+            "A Open · B Back",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn settings_section_visibility_is_independent_of_row_focus() {
+        let mut portrait = core();
+        portrait.go(Route::Settings);
+        portrait.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(portrait.settings_room, SettingsRoom::Controls);
+
+        portrait.action(&ShellAction::Activate);
+        assert!(portrait.settings_in_rows);
+        assert!(!portrait.settings_row_focused);
+        let section = format!("{:?}", portrait_settings_scene(&portrait));
+        assert!(section.contains("settings-row-controls-remap"));
+        assert!(section.contains("settings-row-controls-source"));
+        assert!(!section.contains("focused: true"));
+        assert_eq!(portrait.action(&ShellAction::Activate), None);
+
+        portrait.action(&ShellAction::Back);
+        assert!(!portrait.settings_in_rows);
+        assert_eq!(portrait.focus, 1, "section position is held on Back");
+        let nav = format!("{:?}", portrait_settings_scene(&portrait));
+        assert!(nav.contains("settings-nav-controls"));
+        assert!(!nav.contains("settings-row-controls-remap"));
+
+        let mut wide = core();
+        wide.go(Route::Settings);
+        wide.action(&ShellAction::Move(AxisMove::Down));
+        assert!(!wide.settings_in_rows);
+        let wide_scene = format!("{:?}", settings_scene(&wide));
+        assert!(wide_scene.contains("settings-row-controls-remap"));
+        assert!(wide_scene.contains("settings-row-controls-source"));
+
+        let mut focusable = core();
+        focusable
+            .load_preferences(&preferences(true), true)
+            .unwrap();
+        focusable.go(Route::Settings);
+        focusable.action(&ShellAction::Activate);
+        assert!(focusable.settings_in_rows);
+        assert!(focusable.settings_row_focused);
+        assert_eq!(focusable.focus, 0);
     }
 
     #[test]
@@ -5234,11 +5311,12 @@ mod tests {
         let mut c = core();
         c.go(Route::Settings);
         c.settings_room = SettingsRoom::System;
-        c.settings_in_rows = true;
         assert_eq!(c.focus_count(), 3);
         c.authority_snapshot(true);
         assert_eq!(c.focus_count(), 4);
-        c.focus = 3;
+        c.enter_settings_rows();
+        assert!(c.settings_row_focused);
+        assert_eq!(c.focus, 3);
         assert_eq!(
             c.action(&ShellAction::Activate),
             Some(Effect::EnterRecovery)

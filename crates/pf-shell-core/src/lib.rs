@@ -686,16 +686,28 @@ impl ShellCore {
 
     pub fn load_history(&mut self, entries: &[HistoryEntry]) {
         let playtime = derive_playtime(entries);
-        let mut recent_use = HashMap::<String, SystemTime>::new();
+        let mut target_recent_use = HashMap::<String, SystemTime>::new();
         for entry in entries {
             let Some(used_at) = entry.ended_at.map(|end| end.at).or(entry.started_at) else {
                 continue;
             };
-            recent_use
+            target_recent_use
                 .entry(entry.item_id.clone())
                 .and_modify(|latest| *latest = (*latest).max(used_at))
                 .or_insert(used_at);
         }
+        let recent_use = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.variants
+                    .iter()
+                    .filter_map(|variant| target_recent_use.get(&variant.launch_target.app_id))
+                    .max()
+                    .copied()
+                    .map(|used_at| (item.id.clone(), used_at))
+            })
+            .collect();
         if self.playtime != playtime || self.recent_use != recent_use {
             self.playtime = playtime;
             self.recent_use = recent_use;
@@ -5284,6 +5296,78 @@ mod tests {
         ]);
 
         assert_eq!(core.library_items, vec![2, 1, 0, 3]);
+    }
+
+    #[test]
+    fn library_recent_maps_non_default_variant_history_to_catalog_item() {
+        let mut core = fixture_core(vec![
+            item(
+                "multi-title",
+                "Multi Title",
+                vec![
+                    variant("default", "multi-default", Availability::Ready),
+                    variant("alternate", "multi-alternate", Availability::Ready),
+                ],
+            ),
+            item(
+                "single-title",
+                "Single Title",
+                vec![variant("default", "single-title", Availability::Ready)],
+            ),
+            item(
+                "unplayed-title",
+                "Unplayed Title",
+                vec![variant("default", "unplayed-title", Availability::Ready)],
+            ),
+        ]);
+        let epoch = SystemTime::UNIX_EPOCH;
+
+        core.load_history(&[
+            history_entry(
+                "multi-alternate",
+                Some(epoch + Duration::from_secs(200)),
+                None,
+            ),
+            history_entry("single-title", Some(epoch + Duration::from_secs(100)), None),
+        ]);
+
+        assert_eq!(core.library_items, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn library_recent_uses_newest_timestamp_across_variants() {
+        let mut core = fixture_core(vec![
+            item(
+                "comparison-title",
+                "Comparison Title",
+                vec![variant("default", "comparison", Availability::Ready)],
+            ),
+            item(
+                "multi-title",
+                "Multi Title",
+                vec![
+                    variant("default", "multi-default", Availability::Ready),
+                    variant("alternate", "multi-alternate", Availability::Ready),
+                ],
+            ),
+        ]);
+        let epoch = SystemTime::UNIX_EPOCH;
+
+        core.load_history(&[
+            history_entry(
+                "multi-default",
+                Some(epoch + Duration::from_secs(100)),
+                None,
+            ),
+            history_entry("comparison", Some(epoch + Duration::from_secs(200)), None),
+            history_entry(
+                "multi-alternate",
+                Some(epoch + Duration::from_secs(300)),
+                None,
+            ),
+        ]);
+
+        assert_eq!(core.library_items, vec![1, 0]);
     }
 
     #[test]

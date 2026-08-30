@@ -15,15 +15,15 @@ all = "warn"
 pedantic = "warn"
 
 [workspace.dependencies]
-pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0", features = ["keyboard"] }
-pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
-pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "b9d209b3f526a1d487b2d139d56f6ebae07197e0" }
+pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1", features = ["keyboard"] }
+pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
+pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }

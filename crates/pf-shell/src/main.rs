@@ -687,6 +687,26 @@ struct WaylandInteractiveInput {
     started: Instant,
 }
 
+trait WaylandInputHost {
+    fn is_closed(&self) -> bool;
+    fn repeat_info(&self) -> Option<RepeatInfo>;
+    fn poll_key_event(&mut self) -> Option<KeyEvent>;
+}
+
+impl WaylandInputHost for WaylandHost {
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+
+    fn repeat_info(&self) -> Option<RepeatInfo> {
+        self.repeat_info()
+    }
+
+    fn poll_key_event(&mut self) -> Option<KeyEvent> {
+        self.poll_key_event()
+    }
+}
+
 impl WaylandInteractiveInput {
     fn new(map: EffectiveMap) -> Self {
         Self {
@@ -698,12 +718,11 @@ impl WaylandInteractiveInput {
     }
 }
 
-impl InteractiveInput<WaylandHost> for WaylandInteractiveInput {
-    fn next_action(
-        &mut self,
-        host: &mut WaylandHost,
-        _deadline: Deadline,
-    ) -> Result<ActionPoll, String> {
+impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
+    fn next_action(&mut self, host: &mut H, _deadline: Deadline) -> Result<ActionPoll, String> {
+        if host.is_closed() {
+            return Ok(ActionPoll::Closed);
+        }
         let repeat_info = host.repeat_info().unwrap_or(RepeatInfo {
             rate: 25,
             delay_ms: 600,
@@ -1409,6 +1428,26 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    struct TestWaylandHost {
+        closed: bool,
+        events: VecDeque<KeyEvent>,
+        repeat_info: RepeatInfo,
+    }
+
+    impl WaylandInputHost for TestWaylandHost {
+        fn is_closed(&self) -> bool {
+            self.closed
+        }
+
+        fn repeat_info(&self) -> Option<RepeatInfo> {
+            Some(self.repeat_info)
+        }
+
+        fn poll_key_event(&mut self) -> Option<KeyEvent> {
+            self.events.pop_front()
+        }
+    }
+
     fn effective_map() -> EffectiveMap {
         let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
         EffectiveMap::load(contract, &MemoryStore::default()).unwrap()
@@ -1525,6 +1564,62 @@ mod durable_tests {
             info,
         );
         assert!(scheduler.due(Duration::from_secs(1), info).is_empty());
+    }
+
+    #[test]
+    fn closed_wayland_host_yields_closed() {
+        let mut input = WaylandInteractiveInput::new(effective_map());
+        let mut host = TestWaylandHost {
+            closed: true,
+            events: VecDeque::new(),
+            repeat_info: RepeatInfo {
+                rate: 10,
+                delay_ms: 300,
+            },
+        };
+
+        assert_eq!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .unwrap(),
+            ActionPoll::Closed
+        );
+    }
+
+    #[test]
+    fn synthetic_release_clears_wayland_direction_repeat() {
+        let info = RepeatInfo {
+            rate: 10,
+            delay_ms: 300,
+        };
+        let mut input = WaylandInteractiveInput::new(effective_map());
+        let mut host = TestWaylandHost {
+            closed: false,
+            events: VecDeque::from([key_event(1, 0xff52, KeyState::Pressed, Key::Up)]),
+            repeat_info: info,
+        };
+
+        assert!(matches!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .unwrap(),
+            ActionPoll::Event(ActionEvent::Action(ShellAction::Move(
+                pf_scene::AxisMove::Up
+            )))
+        ));
+
+        // Keyboard leave/seat loss/reconnect releases have the same KeyEvent shape as
+        // physical releases, so this must travel through the normal transition path.
+        host.events
+            .push_back(key_event(1, 0xff52, KeyState::Released, Key::Up));
+        input.started = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .unwrap(),
+            ActionPoll::DeadlineReached
+        );
+        assert!(input.repeat.due(Duration::from_secs(2), info).is_empty());
     }
 
     #[test]

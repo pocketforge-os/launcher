@@ -2090,24 +2090,22 @@ impl ShellCore {
             let item = &self.items[item_index];
             let has_playtime = self.playtime.contains_key(&item.id);
             let detail_offset = if has_playtime { 16.0 } else { 0.0 };
-            let provider = item.variants.first().map_or("No provider", |variant| {
-                variant.provenance.provider_id.as_str()
-            });
-            let descriptor = item
-                .variants
-                .first()
-                .map_or("No descriptor".to_owned(), |variant| {
-                    variant.launch_target.descriptor_path.display().to_string()
-                });
+            let first_variant = item.variants.first();
+            let provenance = first_variant.map_or_else(
+                || kind_text(&item.kind).to_owned(),
+                |variant| {
+                    format!(
+                        "{} · Provider {} · {}",
+                        kind_text(&item.kind),
+                        variant.provenance.provider_id,
+                        variant.launch_target.descriptor_path.display()
+                    )
+                },
+            );
             out.push(node(
                 "detail-provenance",
                 Role::Text,
-                &format!(
-                    "{} · Provider {} · {}",
-                    kind_text(&item.kind),
-                    provider,
-                    descriptor
-                ),
+                &provenance,
                 400.0,
                 165.0,
                 w - 448.0,
@@ -2149,39 +2147,39 @@ impl ShellCore {
                     "--state-rest-surface",
                 ));
             }
-            if let Some(variant) = item.variants.first() {
-                let availability = availability_text(&variant.availability, &self.presentation);
-                let state = availability.split(" — ").next().unwrap_or(&availability);
-                for (index, label) in [
-                    state.to_owned(),
+            let detail_availability = first_variant
+                .map_or_else(|| best_availability(item), |variant| &variant.availability);
+            let availability = availability_text(detail_availability, &self.presentation);
+            let state = availability.split(" — ").next().unwrap_or(&availability);
+            let mut badges = vec![state.to_owned()];
+            if let Some(variant) = first_variant {
+                badges.extend([
                     format!("Provider {}", variant.provenance.provider_id),
                     format!("Edition {}", variant.id),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    out.push(node(
-                        &format!("detail-badge-{index}"),
-                        Role::Text,
-                        &label,
-                        400.0 + index as f32 * 190.0,
-                        278.0 + detail_offset,
-                        174.0,
-                        36.0,
-                        state_token(&variant.availability, false),
-                    ));
-                }
+                ]);
+            }
+            for (index, label) in badges.into_iter().enumerate() {
                 out.push(node(
-                    "detail-availability-reason",
+                    &format!("detail-badge-{index}"),
                     Role::Text,
-                    &availability,
-                    400.0,
-                    320.0 + detail_offset,
-                    w - 448.0,
-                    38.0,
-                    "--color-text-secondary",
+                    &label,
+                    400.0 + index as f32 * 190.0,
+                    278.0 + detail_offset,
+                    174.0,
+                    36.0,
+                    state_token(detail_availability, false),
                 ));
             }
+            out.push(node(
+                "detail-availability-reason",
+                Role::Text,
+                &availability,
+                400.0,
+                320.0 + detail_offset,
+                w - 448.0,
+                38.0,
+                "--color-text-secondary",
+            ));
             for (variant_index, variant) in item.variants.iter().enumerate() {
                 out.push(node(
                     &format!("detail-variant-{variant_index}"),
@@ -3969,6 +3967,34 @@ mod tests {
 
         assert!(scene.contains("Not supported on this device — catalog item has no variants"));
         assert_eq!(core.action(&ShellAction::Activate), None);
+    }
+
+    #[test]
+    fn details_without_variants_renders_honest_unavailable_reason() {
+        let mut core = fixture_core(vec![item("empty", "Empty Orbit", vec![])]);
+        core.action(&ShellAction::Custom("Search".into()));
+        core.set_search_query("Empty Orbit");
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.route(), Route::Details);
+
+        let scene = format!(
+            "{:?}",
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                ""
+            )
+            .unwrap()
+        );
+
+        assert!(scene.contains("Not supported on this device — catalog item has no variants"));
+        assert!(!scene.contains("No provider"));
+        assert!(!scene.contains("No descriptor"));
     }
 
     #[test]

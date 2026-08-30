@@ -1841,6 +1841,15 @@ fn emit(
     Ok(())
 }
 
+fn fails_raster_text_floor(
+    node: &Node,
+    ink_pixels: usize,
+    rendered_ratio: f64,
+    floor: f64,
+) -> bool {
+    ink_pixels == 0 || (!node.state.disabled && rendered_ratio < floor)
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1879,7 +1888,13 @@ fn assert_raster_text_legible(
         };
         (light + 0.05) / (dark + 0.05)
     }
-    fn visit(node: &Node, frame: &RasterFrame, textless: &RasterFrame, failures: &mut Vec<String>) {
+    fn visit(
+        node: &Node,
+        frame: &RasterFrame,
+        textless: &RasterFrame,
+        floor: f64,
+        failures: &mut Vec<String>,
+    ) {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
         {
@@ -1908,13 +1923,14 @@ fn assert_raster_text_legible(
                 .get(ratios.len() * 9 / 10)
                 .copied()
                 .unwrap_or_default();
-            // Dusk's focused-on-ring pair is the least-contrasting intentional pair.
             // The upper decile samples the glyph body without letting its
             // anti-aliased fringe define the rendered contrast. Every sample comes
             // from the rendered and text-suppressed rasters, never tokens.
-            if ink_pixels == 0 || rendered_ratio < 1.1 {
+            // Disabled text has no available action and is exempt from the text
+            // contrast floor, but it must still produce visible raster ink.
+            if fails_raster_text_floor(node, ink_pixels, rendered_ratio, floor) {
                 failures.push(format!(
-                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}",
+                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}, required={floor:.1}",
                     node.id.as_str(),
                     node.accessible_label,
                     node.bounds,
@@ -1922,7 +1938,7 @@ fn assert_raster_text_legible(
             }
         }
         for child in &node.children {
-            visit(child, frame, textless, failures);
+            visit(child, frame, textless, floor, failures);
         }
     }
 
@@ -1947,7 +1963,12 @@ fn assert_raster_text_legible(
         return Err("raster guard frame dimensions changed between paired renders".into());
     }
     let mut failures = Vec::new();
-    visit(scene.root(), &frame, &textless, &mut failures);
+    let floor = if base == pf_theme::Base::HighContrast {
+        7.0
+    } else {
+        4.5
+    };
+    visit(scene.root(), &frame, &textless, floor, &mut failures);
     if failures.is_empty() {
         Ok(())
     } else {
@@ -2096,36 +2117,36 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
-    #[test]
-    fn raster_ink_guard_rejects_a_rendered_same_color_pair() {
-        let mut root = Node::new(
-            pf_scene::NodeId::new("contrast-probe").unwrap(),
-            Role::Button,
-            "",
-            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
-            "--state-rest-surface",
-        )
-        .with_action(pf_scene::NodeAction::Activate);
-        root.children.push(Node::new(
+    fn contrast_probe(state: fn(&mut Node)) -> Node {
+        let mut label = Node::new(
             pf_scene::NodeId::new("contrast-probe-label").unwrap(),
             Role::Text,
-            "Illegible",
+            "Low contrast",
             pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
             "--state-rest-text",
-        ));
-        let scene =
-            pf_scene::Scene::new(root, pf_scene::NodeId::new("contrast-probe").unwrap()).unwrap();
-        let metrics = SurfaceMetrics {
-            logical_width: 320.0,
-            logical_height: 120.0,
-            scale: 1.0,
-            safe_insets: Insets::default(),
-            orientation: Orientation::Landscape,
-        };
+        );
+        state(&mut label);
+        label
+    }
 
-        let error = assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100)
-            .expect_err("same-color rendered ink and background must fail the raster guard");
-        assert!(error.contains("contrast-probe-label"));
+    #[test]
+    fn raster_ink_guard_rejects_a_sub_floor_text_pair() {
+        let label = contrast_probe(|_| {});
+        assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
+        assert!(fails_raster_text_floor(&label, 1, 6.9, 7.0));
+    }
+
+    #[test]
+    fn raster_ink_guard_exempts_disabled_text_from_the_floor() {
+        let label = contrast_probe(|node| node.state.disabled = true);
+        assert!(!fails_raster_text_floor(&label, 1, 4.0, 4.5));
+        assert!(fails_raster_text_floor(&label, 0, 4.0, 4.5));
+    }
+
+    #[test]
+    fn raster_ink_guard_does_not_exempt_unavailable_text() {
+        let label = contrast_probe(|node| node.state.unavailable = true);
+        assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
     }
 
     struct TextScaleHost {

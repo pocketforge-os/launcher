@@ -3807,7 +3807,7 @@ impl ShellCore {
                     nav.bounds.width - 24.0,
                     30.0,
                     if focused {
-                        "--state-focused-ring"
+                        "--color-text-inverse"
                     } else {
                         "--color-surface-raised"
                     },
@@ -4781,7 +4781,7 @@ fn procedural_art_nodes(
             if favorite { y + 4.0 } else { y },
             art_width,
             if favorite { 28.0 } else { 60.0 },
-            token,
+            "--color-surface-raised",
         ),
         node(
             &format!("{context}-initial-{id}"),
@@ -4795,7 +4795,7 @@ fn procedural_art_nodes(
             if favorite { y + 30.0 } else { y + 72.0 },
             if favorite { 24.0 } else { width * 0.46 },
             if favorite { 28.0 } else { 58.0 },
-            token,
+            "--color-surface-raised",
         )
         .with_type_role(TypeRole::Plate),
     ];
@@ -4809,7 +4809,7 @@ fn procedural_art_nodes(
                 kind_y,
                 if favorite { width - 72.0 } else { width - 24.0 },
                 if favorite { 20.0 } else { 24.0 },
-                token,
+                "--color-surface-raised",
             )
             .with_type_role(TypeRole::Eyebrow),
         );
@@ -8822,7 +8822,7 @@ mod tests {
             find(settings.root(), "settings-nav-accessibility-label")
                 .unwrap()
                 .style_token,
-            "--state-focused-ring"
+            "--color-text-inverse"
         );
         assert!(
             find(settings.root(), "settings-nav-accessibility")

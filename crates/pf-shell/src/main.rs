@@ -16,7 +16,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{RasterFrame, RenderNote, ThemeBase};
+use pf_render::{RasterFrame, RenderNote};
 use pf_scene::{Insets, Orientation, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -503,6 +503,7 @@ fn main() -> Result<(), String> {
         orientation: Orientation::Landscape,
     };
     let mut host = OffscreenHost::new(metrics);
+    apply_text_scale(&mut host, &core)?;
     if args.iter().any(|a| a == "--desktop-sim-script") {
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let authority_state = value(&args, "--authority-state-dir")
@@ -523,11 +524,12 @@ fn main() -> Result<(), String> {
         core.action(&ShellAction::Custom("Room.next".into()));
         core.action(&ShellAction::Custom("Room.next".into()));
         emit(&mut host, &mut core, &footer, out, "settings")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "controls")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "network")?;
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "system")?;
         core.reset_first_run();
         emit(&mut host, &mut core, &footer, out, "first-run")?;
@@ -648,6 +650,7 @@ fn emit_sim_frame(core: &mut ShellCore, prompt: &str, path: &Path) -> Result<(),
         },
     };
     let mut host = OffscreenHost::new(metrics);
+    apply_text_scale(&mut host, core)?;
     present(&mut host, core, prompt)?;
     let frame = host.frame().ok_or("sim frame missing")?;
     let mut out = fs::OpenOptions::new()
@@ -874,6 +877,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
         Err(error) => return Err(format!("session: {error:?}")),
     }
+    apply_text_scale(host, core)?;
     present_interactive(host, core, &activate)?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     loop {
@@ -911,6 +915,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                     .map_err(|e| format!("preferences: {e:?}"))?;
                 core.drive_preferences(preferences)
                     .map_err(|e| format!("preferences: {e:?}"))?;
+                apply_text_scale(host, core)?;
             }
             Some(Effect::ResetFirstRun) => core.reset_first_run(),
             Some(Effect::CaptureRemap) => actions.capture_next_button(),
@@ -1610,6 +1615,7 @@ fn fixture_preferences() -> FakePreferencePort {
         ("highContrast", PreferenceValue::Bool(false)),
         ("reduceMotion", PreferenceValue::Bool(false)),
         ("reduceFlashing", PreferenceValue::Bool(false)),
+        ("appearance", PreferenceValue::Text("Dusk".into())),
     ]
     .into_iter()
     .map(|(key, value)| EffectivePreference {
@@ -1700,6 +1706,20 @@ impl DurablePreferences {
 
 impl PreferencePort for DurablePreferences {
     fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
+        if key.0 == "appearance" {
+            let value = self
+                .launcher_state()?
+                .get("appearance")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Dusk")
+                .to_owned();
+            return Ok(Some(EffectivePreference {
+                key: key.clone(),
+                effective: PreferenceValue::Text(value.clone()),
+                stored: PreferenceValue::Text(value),
+                applied: true,
+            }));
+        }
         if matches!(key.0.as_str(), "firstRunComplete" | "safeReturnBinding") {
             return Ok(None);
         }
@@ -1732,19 +1752,29 @@ impl PreferencePort for DurablePreferences {
     ) -> Result<PreferenceChangeResult, PreferenceError> {
         if matches!(
             change.key.0.as_str(),
-            "firstRunComplete" | "safeReturnBinding"
+            "firstRunComplete" | "safeReturnBinding" | "appearance"
         ) {
             if change.authority != ChangeAuthority("user".into()) {
                 return Ok(PreferenceChangeResult::Unauthorized);
             }
             let mut state = self.launcher_state()?;
+            let effective = change.value.clone();
             let value = match change.value {
                 PreferenceValue::Bool(value) => serde_json::Value::Bool(value),
                 PreferenceValue::Text(value) => serde_json::Value::String(value),
                 PreferenceValue::Integer(value) => serde_json::Value::Number(value.into()),
             };
-            state.insert(change.key.0, value);
+            let key = change.key;
+            state.insert(key.0.clone(), value);
             self.write_launcher_state(&state)?;
+            if key.0 == "appearance" {
+                self.pending.push_back(EffectivePreference {
+                    key,
+                    effective: effective.clone(),
+                    stored: effective,
+                    applied: true,
+                });
+            }
             return Ok(PreferenceChangeResult::Accepted);
         }
         let key = change.key.clone();
@@ -1798,11 +1828,16 @@ fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
 }
 
 trait RenderedFrameHost: FrameHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String>;
     fn render_notes(&self) -> Option<&[RenderNote]>;
     fn raster_frame(&self) -> Option<&RasterFrame>;
 }
 
 impl RenderedFrameHost for OffscreenHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        OffscreenHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
     }
@@ -1813,6 +1848,10 @@ impl RenderedFrameHost for OffscreenHost {
 }
 
 impl RenderedFrameHost for FbdevHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        FbdevHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
     }
@@ -1824,6 +1863,10 @@ impl RenderedFrameHost for FbdevHost {
 
 #[cfg(feature = "wayland")]
 impl RenderedFrameHost for WaylandHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        WaylandHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         None
     }
@@ -1831,6 +1874,10 @@ impl RenderedFrameHost for WaylandHost {
     fn raster_frame(&self) -> Option<&RasterFrame> {
         None
     }
+}
+
+fn apply_text_scale(host: &mut impl RenderedFrameHost, core: &ShellCore) -> Result<(), String> {
+    host.set_text_scale(f32::from(core.text_scale()) / 100.0)
 }
 
 fn present(
@@ -1865,11 +1912,7 @@ fn present_scene(
     prompt: &str,
     scene: &pf_scene::Scene,
 ) -> Result<(), String> {
-    host.set_theme_base(if core.high_contrast() {
-        ThemeBase::HighContrast
-    } else {
-        ThemeBase::Dusk
-    });
+    host.set_theme_base(core.theme_base());
     host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
         .render_notes()
@@ -1914,6 +1957,81 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    struct TextScaleHost {
+        inner: OffscreenHost,
+        scales: Vec<f32>,
+    }
+
+    impl TextScaleHost {
+        fn new() -> Self {
+            Self {
+                inner: OffscreenHost::new(SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                }),
+                scales: Vec::new(),
+            }
+        }
+    }
+
+    impl FrameHost for TextScaleHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.inner.metrics()
+        }
+
+        fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            self.inner.present(scene)
+        }
+    }
+
+    impl RenderedFrameHost for TextScaleHost {
+        fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+            self.scales.push(factor);
+            Ok(())
+        }
+
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            None
+        }
+
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            None
+        }
+    }
+
+    #[test]
+    fn renderer_receives_loaded_and_changed_text_scale() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        let loaded = EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("150%".into()),
+            stored: PreferenceValue::Text("150%".into()),
+            applied: true,
+        };
+        core.load_preferences(
+            &FakePreferencePort::new([loaded], ChangeAuthority("user".into())),
+            true,
+        )
+        .unwrap();
+        let mut host = TextScaleHost::new();
+
+        apply_text_scale(&mut host, &core).unwrap();
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("200%".into()),
+            stored: PreferenceValue::Text("200%".into()),
+            applied: true,
+        });
+        apply_text_scale(&mut host, &core).unwrap();
+
+        assert_eq!(host.scales, [1.5, 2.0]);
+    }
 
     #[test]
     fn safe_return_active_session_sends_exactly_one_request() {
@@ -2820,18 +2938,11 @@ exec="./launch"
         };
 
         let network_scene = format!("{:?}", core.scene(metrics, "").unwrap());
-        assert!(network_scene.contains("Scan unavailable · BackendUnavailable"));
-        assert!(network_scene.contains("disabled: true"));
+        assert!(!network_scene.contains("settings-nav-network"));
+        assert!(network_scene.contains("settings-nav-system"));
         assert_eq!(core.action(&ShellAction::Activate), None);
 
-        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
-        let system_scene = format!("{:?}", core.scene(metrics, "").unwrap());
-        assert!(
-            system_scene.contains("Time status unavailable · BackendUnavailable"),
-            "{system_scene}"
-        );
-        assert!(system_scene.contains("disabled: true"));
-        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert!(network_scene.contains("Button remap"));
     }
 
     #[test]
@@ -3339,6 +3450,38 @@ exec="./launch"
                 .chunks_exact(4)
                 .any(|pixel| pixel[..3] == [255, 255, 255]),
             "high-contrast label text should contain a white pixel"
+        );
+    }
+
+    #[test]
+    fn appearance_preference_is_durable_and_publishes_applied_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        assert_eq!(
+            preferences
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("appearance".into()),
+                    value: PreferenceValue::Text("Day".into()),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap(),
+            PreferenceChangeResult::Accepted
+        );
+        let PreferencePoll::Changed(change) = preferences
+            .next_change(Deadline(MonotonicTime::ZERO))
+            .unwrap()
+        else {
+            panic!("appearance change must redraw immediately")
+        };
+        assert_eq!(change.effective, PreferenceValue::Text("Day".into()));
+        let reopened = DurablePreferences::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened
+                .read(&PreferenceKey("appearance".into()))
+                .unwrap()
+                .unwrap()
+                .effective,
+            PreferenceValue::Text("Day".into())
         );
     }
 

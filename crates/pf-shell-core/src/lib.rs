@@ -3050,7 +3050,7 @@ impl ShellCore {
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
-                    "",
+                    &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
                     chip_x,
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
@@ -3137,7 +3137,7 @@ impl ShellCore {
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
-                    "",
+                    &item.title,
                     geometry.card_left
                         + column as f32 * (geometry.card_width + geometry.card_gap)
                         + 8.0,
@@ -3273,8 +3273,8 @@ impl ShellCore {
             let item = &self.items[item_index];
             let first_variant = item.variants.first();
             let provenance = first_variant.map_or_else(
-                || kind_text(&item.kind).to_owned(),
-                |_variant| format!("{} · Installed on this device", sentence_kind(&item.kind)),
+                || format!("{} · Source unavailable", sentence_kind(&item.kind)),
+                |variant| detail_provenance_text(&item.kind, variant),
             );
             let compact = library_geometry(w).columns < 6;
             let cover_left = 48.0;
@@ -3462,7 +3462,7 @@ impl ShellCore {
                         } else {
                             Role::Text
                         },
-                        "",
+                        &format!("{variant_name} · {variant_sub}"),
                         detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
@@ -3831,7 +3831,7 @@ impl ShellCore {
                 let mut nav = node(
                     &format!("settings-nav-{}", name.to_ascii_lowercase()),
                     Role::Button,
-                    "",
+                    name,
                     nav_left,
                     nav_top + index as f32 * 62.0,
                     nav_width - 32.0,
@@ -3935,7 +3935,7 @@ impl ShellCore {
                 } else {
                     Role::Text
                 },
-                "",
+                &row.accessible_label,
                 content_left,
                 rows_top + (index - first) as f32 * (row_height + row_gap),
                 content_width,
@@ -5211,6 +5211,23 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
         } => format!("Not supported — requires {required}; found {available}"),
     }
 }
+
+fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
+    let source = match &variant.availability {
+        Availability::Ready => match ready_variant_capability(variant) {
+            ReadyVariantCapability::Native => "Installed on this device",
+            ReadyVariantCapability::Stream => "Available over the network",
+            ReadyVariantCapability::Unknown => "Source availability unknown",
+        },
+        Availability::NeedsNetwork { .. } => "Network required",
+        Availability::NeedsSetup { .. } => "Setup required",
+        Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
+            "Source unavailable"
+        }
+    };
+    format!("{} · {source}", sentence_kind(kind))
+}
+
 fn best_availability(item: &Item) -> &Availability {
     static NO_VARIANTS: OnceLock<Availability> = OnceLock::new();
 
@@ -7138,6 +7155,65 @@ mod tests {
         let source = node_by_id(scene.root(), "detail-provenance").unwrap();
         assert_eq!(source.accessible_label, "Game · Installed on this device");
         assert!(!source.accessible_label.contains("app.toml"));
+    }
+
+    #[test]
+    fn details_source_copy_follows_variant_provenance_and_availability() {
+        let cases = [
+            (
+                "network",
+                Availability::NeedsNetwork {
+                    reason: "connect first".into(),
+                },
+                "native",
+                "Game · Network required",
+            ),
+            (
+                "setup",
+                Availability::NeedsSetup {
+                    reason: "choose a profile".into(),
+                },
+                "native",
+                "Game · Setup required",
+            ),
+            (
+                "stream",
+                Availability::Ready,
+                "pc-stream",
+                "Game · Available over the network",
+            ),
+            (
+                "unknown",
+                Availability::Ready,
+                "other-runtime",
+                "Game · Source availability unknown",
+            ),
+        ];
+        for (id, availability, runtime_family, expected) in cases {
+            let mut catalog_variant = variant(id, id, availability);
+            catalog_variant.provenance.runtime_family = runtime_family.into();
+            let mut core = fixture_core(vec![item(id, "Game", vec![catalog_variant])]);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let source = node_by_id(scene.root(), "detail-provenance").unwrap();
+            assert_eq!(source.accessible_label, expected, "case {id}");
+            assert!(
+                !source.accessible_label.contains("Installed on this device"),
+                "non-local case {id} made a false local claim"
+            );
+        }
     }
 
     #[test]
@@ -9662,7 +9738,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_components_do_not_emit_a_duplicate_container_label() {
+    fn every_action_in_evidence_scenes_has_an_accessible_label() {
         let mut core = core();
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
@@ -9671,24 +9747,17 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
-        for route in [Route::Library, Route::Details, Route::Settings] {
+        for route in [Route::Home, Route::Library, Route::Details, Route::Settings] {
             core.go(route);
             if route == Route::Details {
                 core.selected_item = Some(0);
             }
             let scene = core.scene(metrics, "").unwrap();
             fn check(node: &Node) {
-                let composite = node.id.as_str().starts_with("library-filter-")
-                    || node.id.as_str().starts_with("library-item-")
-                    || node.id.as_str().starts_with("settings-nav-")
-                        && !node.id.as_str().ends_with("-label")
-                    || node.id.as_str().starts_with("settings-row-")
-                        && !node.id.as_str().contains("-line-")
-                        && !node.id.as_str().ends_with("-control");
-                if composite && !node.children.is_empty() {
+                if node.action.is_some() {
                     assert!(
-                        node.accessible_label.is_empty(),
-                        "duplicate label on {}",
+                        !node.accessible_label.trim().is_empty(),
+                        "action has no accessible label on {}",
                         node.id.as_str()
                     );
                 }

@@ -48,6 +48,35 @@ struct LibraryGeometry {
     toolbar_columns: usize,
 }
 
+impl LibraryGeometry {
+    const TOOLBAR_ITEM_COUNT: usize = 4;
+
+    fn toolbar_rows(self) -> usize {
+        Self::TOOLBAR_ITEM_COUNT.div_ceil(self.toolbar_columns)
+    }
+
+    fn toolbar_row(self, item: usize) -> usize {
+        item / self.toolbar_columns
+    }
+
+    fn toolbar_column(self, item: usize) -> usize {
+        item % self.toolbar_columns
+    }
+
+    fn wrapped_toolbar(self) -> bool {
+        self.toolbar_rows() > 1
+    }
+
+    fn toolbar_to_grid_column(self, toolbar_column: usize) -> usize {
+        ((2 * toolbar_column + 1) * self.columns / (2 * self.toolbar_columns)).min(self.columns - 1)
+    }
+
+    fn grid_to_toolbar_column(self, grid_column: usize) -> usize {
+        ((2 * grid_column + 1) * self.toolbar_columns / (2 * self.columns))
+            .min(self.toolbar_columns - 1)
+    }
+}
+
 fn library_geometry(surface_width: f32) -> LibraryGeometry {
     let (columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
         (6, 4, 184.0)
@@ -1599,7 +1628,14 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Right)
                 if self.route == Route::Library && (1..=4).contains(&self.focus) =>
             {
-                self.focus = (self.focus + 1).min(4);
+                let geometry = library_geometry(self.library_surface_width.get());
+                let item = self.focus - 1;
+                if !geometry.wrapped_toolbar()
+                    || geometry.toolbar_column(item) + 1 < geometry.toolbar_columns
+                        && item + 1 < LibraryGeometry::TOOLBAR_ITEM_COUNT
+                {
+                    self.focus = (self.focus + 1).min(4);
+                }
             }
             ShellAction::Move(AxisMove::Right)
                 if self.route == Route::Library && self.focus >= 5 =>
@@ -1634,7 +1670,10 @@ impl ShellCore {
             ShellAction::Move(AxisMove::Left)
                 if self.route == Route::Library && (2..=4).contains(&self.focus) =>
             {
-                self.focus -= 1;
+                let geometry = library_geometry(self.library_surface_width.get());
+                if !geometry.wrapped_toolbar() || geometry.toolbar_column(self.focus - 1) > 0 {
+                    self.focus -= 1;
+                }
             }
             ShellAction::Move(AxisMove::Left)
                 if self.route == Route::Library && self.focus >= 5 =>
@@ -1646,10 +1685,25 @@ impl ShellCore {
             }
             ShellAction::Move(AxisMove::Down) if self.route == Route::Library && self.focus < 5 => {
                 if !self.library_items.is_empty() {
-                    self.focus = 5 + self
-                        .focus
-                        .saturating_sub(1)
-                        .min(self.library_items.len().saturating_sub(1));
+                    let geometry = library_geometry(self.library_surface_width.get());
+                    if geometry.wrapped_toolbar() && self.focus == 0 {
+                        self.focus = 1;
+                    } else if geometry.wrapped_toolbar()
+                        && self.focus - 1 + geometry.toolbar_columns
+                            < LibraryGeometry::TOOLBAR_ITEM_COUNT
+                    {
+                        self.focus += geometry.toolbar_columns;
+                    } else {
+                        let grid_column = if geometry.wrapped_toolbar() {
+                            geometry.toolbar_to_grid_column(
+                                geometry.toolbar_column(self.focus.saturating_sub(1)),
+                            )
+                        } else {
+                            self.focus.saturating_sub(1)
+                        };
+                        self.focus =
+                            5 + grid_column.min(self.library_items.len().saturating_sub(1));
+                    }
                 }
             }
             ShellAction::Move(AxisMove::Down)
@@ -1665,7 +1719,31 @@ impl ShellCore {
                 if self.focus - 5 >= columns {
                     self.focus -= columns;
                 } else {
-                    self.focus = (self.focus - 5).min(3) + 1;
+                    let geometry = library_geometry(self.library_surface_width.get());
+                    if geometry.wrapped_toolbar() {
+                        let toolbar_column =
+                            geometry.grid_to_toolbar_column((self.focus - 5) % columns);
+                        let toolbar_item = (geometry.toolbar_rows() - 1) * geometry.toolbar_columns
+                            + toolbar_column;
+                        self.focus = toolbar_item.min(LibraryGeometry::TOOLBAR_ITEM_COUNT - 1) + 1;
+                    } else {
+                        self.focus = (self.focus - 5).min(3) + 1;
+                    }
+                }
+            }
+            ShellAction::Move(AxisMove::Up)
+                if self.route == Route::Library && (1..=4).contains(&self.focus) =>
+            {
+                let geometry = library_geometry(self.library_surface_width.get());
+                let item = self.focus - 1;
+                if geometry.wrapped_toolbar() {
+                    if geometry.toolbar_row(item) > 0 {
+                        self.focus -= geometry.toolbar_columns;
+                    } else {
+                        self.focus = 0;
+                    }
+                } else {
+                    self.focus = self.focus.saturating_sub(1);
                 }
             }
             ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
@@ -2446,16 +2524,18 @@ impl ShellCore {
                 );
                 out.push(card);
             }
-            out.push(node(
-                "library-fold-fade",
-                Role::Group,
-                "More titles below",
-                48.0,
-                h - PROMPTS_AREA_HEIGHT - 32.0,
-                w - 96.0,
-                32.0,
-                "--color-surface-scrim",
-            ));
+            if self.library_items.len() > visible_rows * geometry.columns {
+                out.push(node(
+                    "library-fold-fade",
+                    Role::Group,
+                    "More titles below",
+                    48.0,
+                    h - PROMPTS_AREA_HEIGHT - 32.0,
+                    w - 96.0,
+                    32.0,
+                    "--color-surface-scrim",
+                ));
+            }
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -4843,6 +4923,164 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn library_wrapped_toolbar_navigation_matches_rendered_rows_and_columns() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.scene(
+            SurfaceMetrics {
+                logical_width: 640.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            },
+            "",
+        )
+        .unwrap();
+
+        core.focus = 1;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            core.focus, 3,
+            "first chip moves to the chip rendered below it"
+        );
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(core.focus, 1);
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(core.focus, 0, "top toolbar row returns to search");
+
+        core.focus = 2;
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            core.focus, 2,
+            "right edge of the first rendered row is hard"
+        );
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 4);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 7, "right chip enters the rightmost grid column");
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(
+            core.focus, 4,
+            "right grid column returns to the lower-right chip"
+        );
+
+        core.focus = 3;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 5, "left chip enters the leftmost grid column");
+        core.action(&ShellAction::Move(AxisMove::Up));
+        assert_eq!(
+            core.focus, 3,
+            "left grid column returns to the lower-left chip"
+        );
+    }
+
+    #[test]
+    fn library_fold_only_appears_when_content_exceeds_visible_capacity() {
+        let scene_for_count = |count| {
+            let items = (0..count)
+                .map(|index| {
+                    item(
+                        &format!("item-{index}"),
+                        &format!("Item {index}"),
+                        vec![variant(
+                            "native",
+                            &format!("app-{index}"),
+                            Availability::Ready,
+                        )],
+                    )
+                })
+                .collect();
+            let mut core = fixture_core(items);
+            core.go(Route::Library);
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap()
+        };
+        let has_fold = |scene: &Scene| {
+            scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "library-fold-fade")
+        };
+
+        assert!(!has_fold(&scene_for_count(3)));
+        assert!(has_fold(&scene_for_count(4)));
+
+        let items = (0..4)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.scene(
+            SurfaceMetrics {
+                logical_width: 640.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Default::default(),
+                orientation: pf_scene::Orientation::Landscape,
+            },
+            "",
+        )
+        .unwrap();
+        core.focus = 5;
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus, 8, "content below the fold is navigable");
+        let scrolled = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let focused = scrolled
+            .root()
+            .children
+            .iter()
+            .find(|node| node.state.focused)
+            .expect("focused item below the initial fold");
+        assert_eq!(focused.id.as_str(), "library-item-item-3");
+        assert!((focused.bounds.y - library_geometry(640.0).card_top).abs() < f32::EPSILON);
     }
 
     #[test]

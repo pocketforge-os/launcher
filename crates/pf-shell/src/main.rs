@@ -2,14 +2,15 @@ use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
-    ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
-    FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost,
-    IdlePolicy, LaunchResult, MonotonicTime, NetworkPort, NetworkState, NtpState,
-    ObservedSessionState, PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult,
-    PreferenceChange, PreferenceChangeResult, PreferenceError, PreferenceKey, PreferencePoll,
-    PreferencePort, PreferenceValue, SessionError, SessionEvent, SessionPoll, SessionPort,
-    ShellAction, Support, TerminalReceipt, TimeCapabilities, TimePort, TimeState, TransferPort,
-    TransferService, TransferServiceState, WifiNetwork, WifiSecurity,
+    ActionEvent, ActionPoll, ActionSource, AppliedNetworkEnabled, AppliedTransferState,
+    AppliedValue, ChangeAuthority, Deadline, EffectivePreference, FakeNetworkPort, FakePowerPort,
+    FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost, IdlePolicy, LaunchResult,
+    MonotonicTime, NetworkError, NetworkPort, NetworkState, NtpState, ObservedSessionState,
+    PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult, PreferenceChange,
+    PreferenceChangeResult, PreferenceError, PreferenceKey, PreferencePoll, PreferencePort,
+    PreferenceValue, SessionError, SessionEvent, SessionPoll, SessionPort, ShellAction, Support,
+    TerminalReceipt, TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort,
+    TransferService, TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -35,6 +36,7 @@ use std::{
 };
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
+const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 
 fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
     match reference {
@@ -50,6 +52,50 @@ fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
 
 fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
     ShellCore::boot_with_art(snapshot, theme, reduced, fixture_art)
+}
+
+fn catalog_art_paths(snapshot: &CatalogSnapshot) -> VecDeque<(String, PathBuf)> {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|item| {
+            let reference = item.presentation.icon_reference.clone()?;
+            let manifest_dir = item
+                .variants
+                .first()?
+                .launch_target
+                .descriptor_path
+                .parent()?
+                .to_owned();
+            Some((reference, manifest_dir))
+        })
+        .collect()
+}
+
+fn read_catalog_art(manifest_dir: &Path, reference: &str) -> Option<Arc<[u8]>> {
+    let path = manifest_dir.join(reference);
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.len() > MAX_CATALOG_ART_BYTES {
+        eprintln!(
+            "catalog art ignored: {} is {} bytes (limit {})",
+            path.display(),
+            metadata.len(),
+            MAX_CATALOG_ART_BYTES
+        );
+        return None;
+    }
+    fs::read(path).ok().map(Arc::from)
+}
+
+fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
+    let mut paths = catalog_art_paths(snapshot);
+    ShellCore::boot_with_art(snapshot, theme, reduced, move |reference| {
+        let index = paths
+            .iter()
+            .position(|(candidate, _)| candidate == reference)?;
+        let (_, manifest_dir) = paths.remove(index)?;
+        read_catalog_art(&manifest_dir, reference)
+    })
 }
 
 fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
@@ -182,7 +228,11 @@ fn main() -> Result<(), String> {
             footer.push_str(glyph);
         }
     }
-    let mut core = fixture_core(&snapshot, &theme, reduced);
+    let mut core = if fixture_mode {
+        fixture_core(&snapshot, &theme, reduced)
+    } else {
+        catalog_core(&snapshot, &theme, reduced)
+    };
     core.set_control_bindings(control_bindings(&glyphs));
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
@@ -233,9 +283,31 @@ fn main() -> Result<(), String> {
         &mut unavailable_power
     };
     core.load_power(power);
-    let (mut network, mut time, mut transfer) = fixture_device_ports();
-    core.load_network(&mut network);
-    core.load_system(&time, &transfer);
+    let mut fake_network;
+    let mut fake_time;
+    let mut fake_transfer;
+    let mut unavailable_network;
+    let mut unavailable_time;
+    let mut unavailable_transfer;
+    let (network, time, transfer): (
+        &mut dyn NetworkPort,
+        &mut dyn TimePort,
+        &mut dyn TransferPort,
+    ) = if fixture_mode {
+        (fake_network, fake_time, fake_transfer) = fixture_device_ports();
+        (&mut fake_network, &mut fake_time, &mut fake_transfer)
+    } else {
+        unavailable_network = UnavailableNetworkPort;
+        unavailable_time = UnavailableTimePort;
+        unavailable_transfer = UnavailableTransferPort;
+        (
+            &mut unavailable_network,
+            &mut unavailable_time,
+            &mut unavailable_transfer,
+        )
+    };
+    core.load_network(&mut *network);
+    core.load_system(&*time, &*transfer);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -260,9 +332,9 @@ fn main() -> Result<(), String> {
             glyphs,
             catalog.as_ref().expect("fbdev catalog"),
             Path::new(session_socket),
-            &mut network,
-            &mut time,
-            &mut transfer,
+            network,
+            time,
+            transfer,
             &state_dir,
             JsonRemapStore::at(remap_path),
         );
@@ -663,6 +735,77 @@ impl PowerPort for UnavailablePowerPort {
     }
 }
 
+struct UnavailableNetworkPort;
+
+impl NetworkPort for UnavailableNetworkPort {
+    fn state(&self) -> Result<NetworkState, NetworkError> {
+        Err(NetworkError::BackendUnavailable)
+    }
+
+    fn scan(&mut self) -> Result<Vec<WifiNetwork>, NetworkError> {
+        Err(NetworkError::BackendUnavailable)
+    }
+
+    fn connect(
+        &mut self,
+        _ssid: &str,
+        _credential: WifiCredential,
+    ) -> Result<pf_ports::ConnectResult, NetworkError> {
+        Err(NetworkError::BackendUnavailable)
+    }
+
+    fn forget(&mut self, _ssid: &str) -> Result<bool, NetworkError> {
+        Err(NetworkError::BackendUnavailable)
+    }
+
+    fn set_enabled(&mut self, _enabled: bool) -> Result<AppliedNetworkEnabled, NetworkError> {
+        Err(NetworkError::BackendUnavailable)
+    }
+}
+
+struct UnavailableTimePort;
+
+impl TimePort for UnavailableTimePort {
+    fn capabilities(&self) -> Result<TimeCapabilities, TimeError> {
+        Err(TimeError::BackendUnavailable)
+    }
+
+    fn read(&self) -> Result<TimeState, TimeError> {
+        Err(TimeError::BackendUnavailable)
+    }
+
+    fn set_timezone(&mut self, _timezone: String) -> Result<AppliedValue<String>, TimeError> {
+        Err(TimeError::BackendUnavailable)
+    }
+
+    fn set_ntp_enabled(&mut self, _enabled: bool) -> Result<AppliedValue<bool>, TimeError> {
+        Err(TimeError::BackendUnavailable)
+    }
+
+    fn set_time(
+        &mut self,
+        _wall_clock: std::time::SystemTime,
+    ) -> Result<AppliedValue<std::time::SystemTime>, TimeError> {
+        Err(TimeError::BackendUnavailable)
+    }
+}
+
+struct UnavailableTransferPort;
+
+impl TransferPort for UnavailableTransferPort {
+    fn services(&self) -> Result<Vec<TransferServiceState>, TransferError> {
+        Err(TransferError::BackendUnavailable)
+    }
+
+    fn set_enabled(
+        &mut self,
+        _service: TransferService,
+        _enabled: bool,
+    ) -> Result<AppliedTransferState, TransferError> {
+        Err(TransferError::BackendUnavailable)
+    }
+}
+
 fn redraw_state(
     core: &ShellCore,
 ) -> (
@@ -987,6 +1130,21 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    fn scanned_manifest() -> &'static str {
+        r#"[app]
+id="com.example.art"
+name="Catalog Art"
+category="game"
+icon="art/cover.png"
+version="1.0.0"
+[runtime]
+family="pocketforge/native"
+abi="1"
+[launch]
+exec="./launch"
+"#
+    }
+
     struct FailingScreenshotWriter;
 
     impl ScreenshotWriter for FailingScreenshotWriter {
@@ -1011,6 +1169,101 @@ mod durable_tests {
 
     struct AlwaysConflictingFavorites {
         snapshot: CatalogSnapshot,
+    }
+
+    #[test]
+    fn catalog_art_resolver_reads_relative_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("art")).unwrap();
+        fs::write(dir.path().join("art/cover.png"), b"cover bytes").unwrap();
+
+        assert_eq!(
+            read_catalog_art(dir.path(), "art/cover.png").as_deref(),
+            Some(&b"cover bytes"[..])
+        );
+    }
+
+    #[test]
+    fn catalog_art_resolver_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_catalog_art(dir.path(), "art/missing.png").is_none());
+    }
+
+    #[test]
+    fn catalog_art_resolver_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.png");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_CATALOG_ART_BYTES + 1).unwrap();
+
+        assert!(read_catalog_art(dir.path(), "large.png").is_none());
+    }
+
+    #[test]
+    fn scanned_catalog_art_reaches_shell_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("apps");
+        let app = root.join("example");
+        fs::create_dir_all(app.join("art")).unwrap();
+        fs::write(app.join("app.toml"), scanned_manifest()).unwrap();
+        fs::write(app.join("art/cover.png"), b"catalog cover bytes").unwrap();
+        let snapshot = InstalledAppProvider::new(
+            &root,
+            dir.path().join("favorites.json"),
+            "pocketforge/native",
+            "1",
+        )
+        .snapshot()
+        .unwrap();
+
+        let core = catalog_core(&snapshot, &pf_theme::flagship(), false);
+
+        assert_eq!(
+            snapshot.items[0].presentation.icon_reference.as_deref(),
+            Some("art/cover.png")
+        );
+        assert_eq!(
+            core.art_treatment("installed-applications:com.example.art"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
+    }
+
+    #[test]
+    fn unavailable_device_ports_render_disabled_honest_rooms() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        let mut network = UnavailableNetworkPort;
+        let time = UnavailableTimePort;
+        let transfer = UnavailableTransferPort;
+        core.load_network(&mut network);
+        core.load_system(&time, &transfer);
+        core.authority_snapshot(false);
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let network_scene = format!("{:?}", core.scene(metrics, "").unwrap());
+        assert!(network_scene.contains("Scan unavailable · BackendUnavailable"));
+        assert!(network_scene.contains("disabled: true"));
+        assert_eq!(core.action(&ShellAction::Activate), None);
+
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        let system_scene = format!("{:?}", core.scene(metrics, "").unwrap());
+        assert!(
+            system_scene.contains("Time status unavailable · BackendUnavailable"),
+            "{system_scene}"
+        );
+        assert!(system_scene.contains("disabled: true"));
+        assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
     #[test]

@@ -95,7 +95,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "da2c7c1430ef38cf1c5dcabfbadab665ca659e7434deb95a2229f88570404c67  ",
         "df2c08d5ee7a172634f3f0ca80f7620472f06e0900720fbd81c4158cd8dddb41  ",
         "afed935e11e9ea10dd19d594f7a18afff9f1bc48b67b27bb654c7a31e1a5c88e  ",
-        "4ce29e67ddc8f95e34c303033b52d36f1ae67155c3d01bec8e51c5b008a78f20  ",
+        "603739b294e684636e2284d414c34b59622bfe0bf407ab849669e880c8c0e2ac  ",
         "3a36ad0a0f3dc2406b31f638fec4c919050d61c3f46206529746181c756f31d3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

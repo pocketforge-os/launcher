@@ -76,6 +76,25 @@ fn ready_variant_label(variant: &Variant) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfflineCapability {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+fn offline_capability(variant: &Variant) -> OfflineCapability {
+    let runtime = variant.provenance.runtime_family.to_ascii_lowercase();
+    let families = runtime.split(['/', '-', '_', '.']);
+    if families.clone().any(|part| part == "stream") || runtime.contains("streaming") {
+        OfflineCapability::Unsupported
+    } else if families.into_iter().any(|part| part == "native") {
+        OfflineCapability::Supported
+    } else {
+        OfflineCapability::Unknown
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LibraryGeometry {
     columns: usize,
@@ -3310,10 +3329,14 @@ impl ShellCore {
                 {
                     let (variant_name, variant_sub) =
                         if matches!(variant.availability, Availability::Ready) {
+                            let capability_copy = match offline_capability(variant) {
+                                OfflineCapability::Supported => " · works offline",
+                                OfflineCapability::Unsupported | OfflineCapability::Unknown => "",
+                            };
                             (
                                 ready_variant_label(variant),
                                 format!(
-                                    "{}{} · works offline",
+                                    "{}{}{}",
                                     variant.provenance.app_version.as_deref().map_or_else(
                                         || "Current version".to_owned(),
                                         |version| format!("Version {version}"),
@@ -3325,7 +3348,8 @@ impl ShellCore {
                                             " · {}",
                                             humanize_identifier(&variant.provenance.runtime_family)
                                         )
-                                    }
+                                    },
+                                    capability_copy,
                                 ),
                             )
                         } else {
@@ -3586,19 +3610,17 @@ impl ShellCore {
                     out.push(pin);
                     634.0
                 };
+                let block_gap = 16.0;
+                let block_height = 54.0;
+                let mut flow_top = actions_bottom + block_gap;
                 if let Some(playtime) = self.playtime.get(&item.id).copied() {
-                    let facts_top = if compact {
-                        actions_bottom + 16.0
-                    } else {
-                        540.0
-                    };
                     out.push(
                         node(
                             "detail-time-played-heading",
                             Role::Heading,
                             "TIME PLAYED",
                             detail_column_left,
-                            facts_top,
+                            flow_top,
                             detail_column_width,
                             22.0,
                             "--color-text-muted",
@@ -3610,21 +3632,20 @@ impl ShellCore {
                         Role::Text,
                         &format_playtime(playtime),
                         detail_column_left,
-                        facts_top + 26.0,
+                        flow_top + 26.0,
                         detail_column_width,
                         28.0,
                         "--color-text-primary",
                     ));
+                    flow_top += block_height + block_gap;
                 }
-                let facts_height = 54.0;
-                let facts_top = actions_bottom + 16.0;
                 let footer_top = h - PROMPTS_AREA_HEIGHT;
                 if let Some(variant) = ready
                     .first()
                     .map(|&variant_index| &item.variants[variant_index])
-                    .filter(|_| !compact && facts_top + facts_height <= footer_top)
+                    .filter(|_| !compact && flow_top + block_height <= footer_top)
                 {
-                    let facts = [
+                    let mut facts = vec![
                         (
                             "developer",
                             "DEVELOPER",
@@ -3638,18 +3659,21 @@ impl ShellCore {
                                 |version| format!("Version {version}"),
                             ),
                         ),
-                        ("offline", "WORKS OFFLINE", "Yes".to_owned()),
                     ];
+                    if offline_capability(variant) == OfflineCapability::Supported {
+                        facts.push(("offline", "WORKS OFFLINE", "Yes".to_owned()));
+                    }
+                    let fact_width = detail_column_width / facts.len() as f32;
                     for (column, (id, eyebrow, value)) in facts.into_iter().enumerate() {
-                        let left = detail_column_left + column as f32 * detail_column_width / 3.0;
+                        let left = detail_column_left + column as f32 * fact_width;
                         out.push(
                             node(
                                 &format!("detail-fact-{id}-heading"),
                                 Role::Heading,
                                 eyebrow,
                                 left,
-                                facts_top,
-                                detail_column_width / 3.0 - 8.0,
+                                flow_top,
+                                fact_width - 8.0,
                                 22.0,
                                 "--color-text-muted",
                             )
@@ -3660,8 +3684,8 @@ impl ShellCore {
                             Role::Text,
                             &value,
                             left,
-                            facts_top + 26.0,
-                            detail_column_width / 3.0 - 8.0,
+                            flow_top + 26.0,
+                            fact_width - 8.0,
                             28.0,
                             "--color-text-primary",
                         ));
@@ -6971,6 +6995,117 @@ mod tests {
                 node.id.as_str()
             );
         }
+    }
+
+    #[test]
+    fn details_facts_flow_after_recorded_playtime() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn assert_subtree_misses(node: &Node, bounds: Bounds) {
+            assert!(
+                !intersects(node.bounds, bounds),
+                "{} {:?} intersects playtime {:?}",
+                node.id.as_str(),
+                node.bounds,
+                bounds
+            );
+            for child in &node.children {
+                assert_subtree_misses(child, bounds);
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "played",
+            "Played Game",
+            vec![variant("native", "played", Availability::Ready)],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        core.load_history(&[history_entry(
+            "played",
+            Some(start),
+            Some((start + Duration::from_secs(3_600), EndPrecision::Observed)),
+        )]);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let playtime = node_by_id(scene.root(), "detail-playtime").unwrap().bounds;
+        for fact in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("detail-fact-"))
+        {
+            assert_subtree_misses(fact, playtime);
+        }
+    }
+
+    #[test]
+    fn details_offline_claims_require_observed_native_runtime() {
+        fn details_for(mut variant: Variant) -> Scene {
+            variant.availability = Availability::Ready;
+            let mut core = fixture_core(vec![item("game", "Game", vec![variant])]);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap()
+        }
+
+        let native = details_for(variant("native", "game", Availability::Ready));
+        assert!(node_by_id(native.root(), "detail-fact-offline").is_some());
+        assert!(
+            node_by_id(native.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label
+                .contains("works offline")
+        );
+
+        let mut streaming = variant("stream", "game", Availability::Ready);
+        streaming.provenance.runtime_family = "pocketforge/stream".into();
+        let streaming = details_for(streaming);
+        assert!(node_by_id(streaming.root(), "detail-fact-offline").is_none());
+        assert!(
+            !node_by_id(streaming.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label
+                .contains("offline")
+        );
+
+        let mut unknown = variant("unknown", "game", Availability::Ready);
+        unknown.provenance.runtime_family.clear();
+        let unknown = details_for(unknown);
+        assert!(node_by_id(unknown.root(), "detail-fact-offline").is_none());
+        assert_eq!(
+            node_by_id(unknown.root(), "detail-variant-0-sub")
+                .unwrap()
+                .accessible_label,
+            "Version 1.0"
+        );
     }
 
     #[test]

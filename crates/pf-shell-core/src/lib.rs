@@ -4968,6 +4968,29 @@ mod tests {
     }
 
     #[test]
+    fn settings_rows_reserve_scaled_text_height_at_two_hundred_percent() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("200%".into()),
+            stored: PreferenceValue::Text("200%".into()),
+            applied: true,
+        });
+
+        let scene = settings_scene(&core);
+        let row = find(scene.root(), "settings-row-accessibility-textScale").unwrap();
+        assert!((row.bounds.height - 148.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn quiet_settings_navigation_cues_filtering_and_scroll_window_conform() {
         let mut core = core();
         core.load_preferences(&preferences(true), true).unwrap();

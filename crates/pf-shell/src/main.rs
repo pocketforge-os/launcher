@@ -503,6 +503,7 @@ fn main() -> Result<(), String> {
         orientation: Orientation::Landscape,
     };
     let mut host = OffscreenHost::new(metrics);
+    apply_text_scale(&mut host, &core)?;
     if args.iter().any(|a| a == "--desktop-sim-script") {
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let authority_state = value(&args, "--authority-state-dir")
@@ -649,6 +650,7 @@ fn emit_sim_frame(core: &mut ShellCore, prompt: &str, path: &Path) -> Result<(),
         },
     };
     let mut host = OffscreenHost::new(metrics);
+    apply_text_scale(&mut host, core)?;
     present(&mut host, core, prompt)?;
     let frame = host.frame().ok_or("sim frame missing")?;
     let mut out = fs::OpenOptions::new()
@@ -875,6 +877,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
         Err(error) => return Err(format!("session: {error:?}")),
     }
+    apply_text_scale(host, core)?;
     present_interactive(host, core, &activate)?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     loop {
@@ -912,6 +915,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                     .map_err(|e| format!("preferences: {e:?}"))?;
                 core.drive_preferences(preferences)
                     .map_err(|e| format!("preferences: {e:?}"))?;
+                apply_text_scale(host, core)?;
             }
             Some(Effect::ResetFirstRun) => core.reset_first_run(),
             Some(Effect::CaptureRemap) => actions.capture_next_button(),
@@ -1824,11 +1828,16 @@ fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
 }
 
 trait RenderedFrameHost: FrameHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String>;
     fn render_notes(&self) -> Option<&[RenderNote]>;
     fn raster_frame(&self) -> Option<&RasterFrame>;
 }
 
 impl RenderedFrameHost for OffscreenHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        OffscreenHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
     }
@@ -1839,6 +1848,10 @@ impl RenderedFrameHost for OffscreenHost {
 }
 
 impl RenderedFrameHost for FbdevHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        FbdevHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
     }
@@ -1850,6 +1863,10 @@ impl RenderedFrameHost for FbdevHost {
 
 #[cfg(feature = "wayland")]
 impl RenderedFrameHost for WaylandHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        WaylandHost::set_text_scale(self, factor).map_err(|error| format!("render: {error:?}"))
+    }
+
     fn render_notes(&self) -> Option<&[RenderNote]> {
         None
     }
@@ -1857,6 +1874,10 @@ impl RenderedFrameHost for WaylandHost {
     fn raster_frame(&self) -> Option<&RasterFrame> {
         None
     }
+}
+
+fn apply_text_scale(host: &mut impl RenderedFrameHost, core: &ShellCore) -> Result<(), String> {
+    host.set_text_scale(f32::from(core.text_scale()) / 100.0)
 }
 
 fn present(
@@ -1936,6 +1957,81 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    struct TextScaleHost {
+        inner: OffscreenHost,
+        scales: Vec<f32>,
+    }
+
+    impl TextScaleHost {
+        fn new() -> Self {
+            Self {
+                inner: OffscreenHost::new(SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                }),
+                scales: Vec::new(),
+            }
+        }
+    }
+
+    impl FrameHost for TextScaleHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.inner.metrics()
+        }
+
+        fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            self.inner.present(scene)
+        }
+    }
+
+    impl RenderedFrameHost for TextScaleHost {
+        fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+            self.scales.push(factor);
+            Ok(())
+        }
+
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            None
+        }
+
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            None
+        }
+    }
+
+    #[test]
+    fn renderer_receives_loaded_and_changed_text_scale() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        let loaded = EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("150%".into()),
+            stored: PreferenceValue::Text("150%".into()),
+            applied: true,
+        };
+        core.load_preferences(
+            &FakePreferencePort::new([loaded], ChangeAuthority("user".into())),
+            true,
+        )
+        .unwrap();
+        let mut host = TextScaleHost::new();
+
+        apply_text_scale(&mut host, &core).unwrap();
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("200%".into()),
+            stored: PreferenceValue::Text("200%".into()),
+            applied: true,
+        });
+        apply_text_scale(&mut host, &core).unwrap();
+
+        assert_eq!(host.scales, [1.5, 2.0]);
+    }
 
     #[test]
     fn safe_return_active_session_sends_exactly_one_request() {

@@ -1,5 +1,6 @@
 use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
+#[cfg(feature = "wayland")]
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
@@ -25,9 +26,11 @@ use pf_shell::{
 };
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "wayland")]
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     env, fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -73,6 +76,7 @@ fn catalog_snapshot(
     }
 }
 
+#[cfg(feature = "wayland")]
 fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Option<ShellAction> {
     let action = match (key, keysym) {
         (Key::Up, _) => "Move.up",
@@ -101,11 +105,13 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         })
 }
 
+#[cfg(feature = "wayland")]
 #[derive(Default)]
 struct KeyRepeatScheduler {
     held: BTreeMap<u32, (ShellAction, Duration)>,
 }
 
+#[cfg(feature = "wayland")]
 impl KeyRepeatScheduler {
     fn transition(
         &mut self,
@@ -466,6 +472,7 @@ fn main() -> Result<(), String> {
             JsonRemapStore::at(remap_path),
         );
     }
+    #[cfg(feature = "wayland")]
     if args.iter().any(|a| a == "--wayland") {
         let mut host = WaylandHost::connect().map_err(|e| e.to_string())?;
         let mut input = WaylandInteractiveInput::new(glyphs.clone());
@@ -680,6 +687,7 @@ impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
     }
 }
 
+#[cfg(feature = "wayland")]
 struct WaylandInteractiveInput {
     map: EffectiveMap,
     repeat: KeyRepeatScheduler,
@@ -687,12 +695,14 @@ struct WaylandInteractiveInput {
     started: Instant,
 }
 
+#[cfg(feature = "wayland")]
 trait WaylandInputHost {
     fn is_closed(&self) -> bool;
     fn repeat_info(&self) -> Option<RepeatInfo>;
     fn poll_key_event(&mut self) -> Option<KeyEvent>;
 }
 
+#[cfg(feature = "wayland")]
 impl WaylandInputHost for WaylandHost {
     fn is_closed(&self) -> bool {
         self.is_closed()
@@ -707,6 +717,7 @@ impl WaylandInputHost for WaylandHost {
     }
 }
 
+#[cfg(feature = "wayland")]
 impl WaylandInteractiveInput {
     fn new(map: EffectiveMap) -> Self {
         Self {
@@ -718,6 +729,7 @@ impl WaylandInteractiveInput {
     }
 }
 
+#[cfg(feature = "wayland")]
 impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
     fn next_action(&mut self, host: &mut H, _deadline: Deadline) -> Result<ActionPoll, String> {
         if host.is_closed() {
@@ -1370,6 +1382,7 @@ impl RenderedFrameHost for FbdevHost {
     }
 }
 
+#[cfg(feature = "wayland")]
 impl RenderedFrameHost for WaylandHost {
     fn render_notes(&self) -> Option<&[RenderNote]> {
         None
@@ -1410,6 +1423,13 @@ fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
+    #[cfg(not(feature = "wayland"))]
+    if args.iter().any(|arg| arg == "--wayland") {
+        return Err(
+            "--wayland requires a build with the 'wayland' feature (cargo build --features wayland)"
+                .into(),
+        );
+    }
     if args.iter().any(|arg| arg == "--fbdev")
         && args.iter().any(|arg| arg == "--settings-evidence")
     {
@@ -1428,12 +1448,14 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    #[cfg(feature = "wayland")]
     struct TestWaylandHost {
         closed: bool,
         events: VecDeque<KeyEvent>,
         repeat_info: RepeatInfo,
     }
 
+    #[cfg(feature = "wayland")]
     impl WaylandInputHost for TestWaylandHost {
         fn is_closed(&self) -> bool {
             self.closed
@@ -1448,11 +1470,13 @@ mod durable_tests {
         }
     }
 
+    #[cfg(feature = "wayland")]
     fn effective_map() -> EffectiveMap {
         let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
         EffectiveMap::load(contract, &MemoryStore::default()).unwrap()
     }
 
+    #[cfg(feature = "wayland")]
     fn key_event(code: u32, keysym: u32, state: KeyState, key: Key) -> KeyEvent {
         KeyEvent {
             code,
@@ -1462,6 +1486,7 @@ mod durable_tests {
         }
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn keyboard_mapping_table_only_exposes_effective_actions() {
         let map = effective_map();
@@ -1529,6 +1554,7 @@ mod durable_tests {
         );
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn repeat_scheduler_uses_fake_time_and_only_repeats_focus_moves() {
         let info = RepeatInfo {
@@ -1566,6 +1592,7 @@ mod durable_tests {
         assert!(scheduler.due(Duration::from_secs(1), info).is_empty());
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn closed_wayland_host_yields_closed() {
         let mut input = WaylandInteractiveInput::new(effective_map());
@@ -1586,6 +1613,7 @@ mod durable_tests {
         );
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn synthetic_release_clears_wayland_direction_repeat() {
         let info = RepeatInfo {
@@ -1885,6 +1913,14 @@ exec="./launch"
 
         assert!(error.contains("--fbdev"));
         assert!(error.contains("--settings-evidence"));
+    }
+
+    #[cfg(not(feature = "wayland"))]
+    #[test]
+    fn wayland_flag_requires_wayland_feature() {
+        let error = validate_args(&["--wayland".into()]).unwrap_err();
+
+        assert!(error.contains("requires a build with the 'wayland' feature"));
     }
 
     impl FavoriteCatalog for AlwaysConflictingFavorites {

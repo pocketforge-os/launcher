@@ -19,7 +19,7 @@ pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9
 pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
 pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
 pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
-pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1", features = ["keyboard"] }
+pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
 pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
 pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }
 pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "5aaa9d1" }

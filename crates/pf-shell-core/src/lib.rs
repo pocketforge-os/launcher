@@ -548,6 +548,7 @@ pub struct ShellCore {
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
     playtime: HashMap<String, Playtime>,
+    recent_use: HashMap<String, SystemTime>,
 }
 
 impl ShellCore {
@@ -679,13 +680,26 @@ impl ShellCore {
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
             playtime: HashMap::new(),
+            recent_use: HashMap::new(),
         }
     }
 
     pub fn load_history(&mut self, entries: &[HistoryEntry]) {
         let playtime = derive_playtime(entries);
-        if self.playtime != playtime {
+        let mut recent_use = HashMap::<String, SystemTime>::new();
+        for entry in entries {
+            let Some(used_at) = entry.ended_at.map(|end| end.at).or(entry.started_at) else {
+                continue;
+            };
+            recent_use
+                .entry(entry.item_id.clone())
+                .and_modify(|latest| *latest = (*latest).max(used_at))
+                .or_insert(used_at);
+        }
+        if self.playtime != playtime || self.recent_use != recent_use {
             self.playtime = playtime;
+            self.recent_use = recent_use;
+            self.refresh_library_items();
             self.bump_revision();
         }
     }
@@ -1198,14 +1212,21 @@ impl ShellCore {
                 included.then_some(index)
             })
             .collect();
-        if self.library_filter == LibraryFilter::Alphabetical {
-            self.library_items.sort_by(|left, right| {
+        match self.library_filter {
+            LibraryFilter::Recent => self.library_items.sort_by(|left, right| {
+                self.recent_use
+                    .get(&self.items[*right].id)
+                    .cmp(&self.recent_use.get(&self.items[*left].id))
+                    .then_with(|| left.cmp(right))
+            }),
+            LibraryFilter::Alphabetical => self.library_items.sort_by(|left, right| {
                 self.items[*left]
                     .title
                     .to_lowercase()
                     .cmp(&self.items[*right].title.to_lowercase())
                     .then_with(|| self.items[*left].id.cmp(&self.items[*right].id))
-            });
+            }),
+            LibraryFilter::Games | LibraryFilter::EverythingElse => {}
         }
     }
 
@@ -5149,6 +5170,113 @@ mod tests {
             .map(|node| node.accessible_label.as_str())
             .collect::<Vec<_>>();
         assert_eq!(labels, ["Recent", "A–Z", "Games 2", "Everything else 1"]);
+    }
+
+    #[test]
+    fn library_recent_orders_by_latest_use_and_trails_unplayed_titles() {
+        let mut core = fixture_core(vec![
+            item(
+                "unplayed-first",
+                "Unplayed First",
+                vec![variant("native", "unplayed-first", Availability::Ready)],
+            ),
+            item(
+                "older",
+                "Older",
+                vec![variant("native", "older", Availability::Ready)],
+            ),
+            item(
+                "newest",
+                "Newest",
+                vec![variant("native", "newest", Availability::Ready)],
+            ),
+            item(
+                "unplayed-last",
+                "Unplayed Last",
+                vec![variant("native", "unplayed-last", Availability::Ready)],
+            ),
+        ]);
+        let epoch = SystemTime::UNIX_EPOCH;
+
+        core.load_history(&[
+            history_entry(
+                "newest",
+                Some(epoch + Duration::from_secs(100)),
+                Some((epoch + Duration::from_secs(200), EndPrecision::Observed)),
+            ),
+            history_entry(
+                "older",
+                Some(epoch + Duration::from_secs(300)),
+                Some((epoch + Duration::from_secs(400), EndPrecision::Observed)),
+            ),
+            history_entry("newest", Some(epoch + Duration::from_secs(500)), None),
+        ]);
+
+        assert_eq!(core.library_items, vec![2, 1, 0, 3]);
+    }
+
+    #[test]
+    fn library_recent_empty_history_keeps_catalog_order() {
+        let mut core = fixture_core(vec![
+            item(
+                "third",
+                "Third",
+                vec![variant("native", "third", Availability::Ready)],
+            ),
+            item(
+                "first",
+                "First",
+                vec![variant("native", "first", Availability::Ready)],
+            ),
+            item(
+                "second",
+                "Second",
+                vec![variant("native", "second", Availability::Ready)],
+            ),
+        ]);
+
+        core.load_history(&[]);
+
+        assert_eq!(core.library_items, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn library_non_recent_filters_ignore_history_order() {
+        let mut tool = item(
+            "tool",
+            "Alpha Tool",
+            vec![variant("native", "tool", Availability::Ready)],
+        );
+        tool.kind = AppKind::System;
+        let mut core = fixture_core(vec![
+            item(
+                "game-z",
+                "Zulu Game",
+                vec![variant("native", "game-z", Availability::Ready)],
+            ),
+            tool,
+            item(
+                "game-b",
+                "Beta Game",
+                vec![variant("native", "game-b", Availability::Ready)],
+            ),
+        ]);
+        let epoch = SystemTime::UNIX_EPOCH;
+        core.load_history(&[
+            history_entry("game-b", Some(epoch + Duration::from_secs(300)), None),
+            history_entry("tool", Some(epoch + Duration::from_secs(200)), None),
+            history_entry("game-z", Some(epoch + Duration::from_secs(100)), None),
+        ]);
+
+        core.library_filter = LibraryFilter::Alphabetical;
+        core.refresh_library_items();
+        assert_eq!(core.library_items, vec![1, 2, 0]);
+        core.library_filter = LibraryFilter::Games;
+        core.refresh_library_items();
+        assert_eq!(core.library_items, vec![0, 2]);
+        core.library_filter = LibraryFilter::EverythingElse;
+        core.refresh_library_items();
+        assert_eq!(core.library_items, vec![1]);
     }
 
     #[test]

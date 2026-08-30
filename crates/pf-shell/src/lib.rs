@@ -18,6 +18,8 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{self, Read},
+    os::fd::OwnedFd,
+    os::unix::fs::FileTypeExt,
     path::Path,
 };
 
@@ -25,11 +27,18 @@ use std::{
 /// and maps press events through the descriptor's effective semantic map.
 pub struct EvdevActionSource {
     file: File,
+    // evdev releases EVIOCGRAB in Device::drop; the clone keeps the grab alive
+    // for exactly as long as this action source.
+    _grab: Option<evdev::Device>,
     by_code: BTreeMap<u16, ShellAction>,
     control_by_code: BTreeMap<u16, String>,
     capture_next: bool,
     source: InputSourceId,
     announced: bool,
+}
+
+fn evdev_grab_enabled(no_grab: bool, is_character_device: bool) -> bool {
+    !no_grab && is_character_device
 }
 
 impl EvdevActionSource {
@@ -90,9 +99,22 @@ impl EvdevActionSource {
                 by_code.insert(*code, action);
             }
         }
+        let file = File::open(path)?;
+        let grab = if evdev_grab_enabled(
+            std::env::var_os("PF_NO_EVDEV_GRAB").is_some(),
+            file.metadata()?.file_type().is_char_device(),
+        ) {
+            let fd: OwnedFd = file.try_clone()?.into();
+            let mut device = evdev::Device::from_fd(fd)?;
+            device.grab()?;
+            Some(device)
+        } else {
+            None
+        };
         Ok((
             Self {
-                file: File::open(path)?,
+                file,
+                _grab: grab,
                 by_code,
                 control_by_code,
                 capture_next: false,
@@ -742,6 +764,13 @@ mod tests {
                 "SafeReturn".into()
             )))
         );
+    }
+
+    #[test]
+    fn evdev_grab_policy_is_exclusive_by_default_with_debug_escape() {
+        assert!(evdev_grab_enabled(false, true));
+        assert!(!evdev_grab_enabled(true, true));
+        assert!(!evdev_grab_enabled(false, false));
     }
     #[test]
     fn safe_return_choices_are_ranked_and_device_filtered() {

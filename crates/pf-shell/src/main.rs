@@ -1,5 +1,6 @@
 use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
+use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, AppliedNetworkEnabled, AppliedTransferState,
@@ -26,7 +27,7 @@ use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env, fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -40,6 +41,117 @@ use std::{
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+
+fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
+    let mut snapshot: CatalogSnapshot =
+        serde_json::from_str(include_str!("../fixtures/catalog.json"))
+            .map_err(|e| e.to_string())?;
+    snapshot.items.clear();
+    snapshot.provider_results.clear();
+    snapshot.user_projection.favorite_item_ids.clear();
+    snapshot.user_projection.pinned_variant_ids.clear();
+    Ok(snapshot)
+}
+
+fn catalog_snapshot(
+    provider: &InstalledAppProvider,
+    root: &Path,
+) -> Result<CatalogSnapshot, String> {
+    match provider.snapshot() {
+        Ok(snapshot) => Ok(snapshot),
+        Err(pf_catalog::ProviderError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound && !root.exists() =>
+        {
+            eprintln!(
+                "pf-shell: catalog root {} is missing; continuing with an empty catalog",
+                root.display()
+            );
+            empty_catalog_snapshot()
+        }
+        Err(error) => Err(format!("catalog: {error:?}")),
+    }
+}
+
+fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Option<ShellAction> {
+    let action = match (key, keysym) {
+        (Key::Up, _) => "Move.up",
+        (Key::Down, _) => "Move.down",
+        (Key::Left, _) => "Move.left",
+        (Key::Right, _) => "Move.right",
+        (Key::Enter, _) => "Activate",
+        (Key::Escape, _) | (_, 0xff08) => "Back",
+        (_, 0xff09) | (Key::Char('f' | 'F'), _) => "Quick",
+        (Key::Char('s' | 'S'), _) => "SafeReturn",
+        _ => return None,
+    };
+    map.mappings()
+        .iter()
+        .any(|mapping| mapping.action == action)
+        .then(|| match action {
+            "Move.up" => ShellAction::Move(pf_scene::AxisMove::Up),
+            "Move.down" => ShellAction::Move(pf_scene::AxisMove::Down),
+            "Move.left" => ShellAction::Move(pf_scene::AxisMove::Left),
+            "Move.right" => ShellAction::Move(pf_scene::AxisMove::Right),
+            "Activate" => ShellAction::Activate,
+            "Back" => ShellAction::Back,
+            "Quick" => ShellAction::Custom("Favorite".into()),
+            "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
+            _ => unreachable!("keyboard action table is exhaustive"),
+        })
+}
+
+#[derive(Default)]
+struct KeyRepeatScheduler {
+    held: BTreeMap<u32, (ShellAction, Duration)>,
+}
+
+impl KeyRepeatScheduler {
+    fn transition(
+        &mut self,
+        event: KeyEvent,
+        action: Option<ShellAction>,
+        now: Duration,
+        info: RepeatInfo,
+    ) {
+        match event.state {
+            KeyState::Released => {
+                self.held.remove(&event.code);
+            }
+            KeyState::Pressed => {
+                if matches!(action, Some(ShellAction::Move(_)))
+                    && info.rate > 0
+                    && info.delay_ms >= 0
+                {
+                    self.held.insert(
+                        event.code,
+                        (
+                            action.expect("checked focus move"),
+                            now + Duration::from_millis(
+                                u64::try_from(info.delay_ms).expect("non-negative delay"),
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    fn due(&mut self, now: Duration, info: RepeatInfo) -> Vec<ShellAction> {
+        if info.rate <= 0 {
+            return Vec::new();
+        }
+        let interval = Duration::from_secs_f64(1.0 / f64::from(info.rate));
+        let mut due = Vec::new();
+        for (action, next) in self.held.values_mut() {
+            while *next <= now {
+                due.push(action.clone());
+                *next += interval;
+            }
+        }
+        due
+    }
+}
 
 fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
     match reference {
@@ -192,24 +304,34 @@ fn load_durable_map_or_shipped(
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        print!("{HELP}");
+        return Ok(());
+    }
     validate_args(&args)?;
+    let interactive_mode = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
     let fixture_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--sim-frame" | "--settings-evidence"))
-        || !args.iter().any(|a| a == "--fbdev");
+        || !interactive_mode;
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
+    let catalog_root =
+        PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
     let catalog = (!fixture_mode).then(|| {
         InstalledAppProvider::new(
-            value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"),
+            &catalog_root,
             state_dir.join("favorites.json"),
             "native",
             "aarch64",
         )
     });
     let snapshot: CatalogSnapshot = if let Some(provider) = &catalog {
-        provider
-            .snapshot()
-            .map_err(|error| format!("catalog: {error:?}"))?
+        catalog_snapshot(provider, &catalog_root)?
     } else {
         serde_json::from_str(include_str!("../fixtures/catalog.json")).map_err(|e| e.to_string())?
     };
@@ -326,15 +448,37 @@ fn main() -> Result<(), String> {
         let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
             .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
-        return run_fbdev(
+        let mut input = EvdevInteractiveInput(&mut actions);
+        return run_interactive(
             &mut host,
-            &mut actions,
+            &mut input,
             &mut core,
             footer,
             preferences,
             power,
             glyphs,
             catalog.as_ref().expect("fbdev catalog"),
+            Path::new(session_socket),
+            network,
+            time,
+            transfer,
+            &state_dir,
+            JsonRemapStore::at(remap_path),
+        );
+    }
+    if args.iter().any(|a| a == "--wayland") {
+        let mut host = WaylandHost::connect().map_err(|e| e.to_string())?;
+        let mut input = WaylandInteractiveInput::new(glyphs.clone());
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        return run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer,
+            preferences,
+            power,
+            glyphs,
+            catalog.as_ref().expect("wayland catalog"),
             Path::new(session_socket),
             network,
             time,
@@ -508,10 +652,91 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
     })
 }
 
+trait InteractiveInput<H> {
+    fn next_action(&mut self, host: &mut H, deadline: Deadline) -> Result<ActionPoll, String>;
+    fn capture_next_button(&mut self);
+    fn apply_effective_map(&mut self, map: &EffectiveMap);
+}
+
+struct EvdevInteractiveInput<'a>(&'a mut EvdevActionSource);
+
+impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
+    fn next_action(
+        &mut self,
+        _host: &mut FbdevHost,
+        deadline: Deadline,
+    ) -> Result<ActionPoll, String> {
+        self.0
+            .next_action(deadline)
+            .map_err(|e| format!("input: {e:?}"))
+    }
+
+    fn capture_next_button(&mut self) {
+        self.0.capture_next_button();
+    }
+
+    fn apply_effective_map(&mut self, map: &EffectiveMap) {
+        self.0.apply_effective_map(map);
+    }
+}
+
+struct WaylandInteractiveInput {
+    map: EffectiveMap,
+    repeat: KeyRepeatScheduler,
+    pending: VecDeque<ShellAction>,
+    started: Instant,
+}
+
+impl WaylandInteractiveInput {
+    fn new(map: EffectiveMap) -> Self {
+        Self {
+            map,
+            repeat: KeyRepeatScheduler::default(),
+            pending: VecDeque::new(),
+            started: Instant::now(),
+        }
+    }
+}
+
+impl InteractiveInput<WaylandHost> for WaylandInteractiveInput {
+    fn next_action(
+        &mut self,
+        host: &mut WaylandHost,
+        _deadline: Deadline,
+    ) -> Result<ActionPoll, String> {
+        let repeat_info = host.repeat_info().unwrap_or(RepeatInfo {
+            rate: 25,
+            delay_ms: 600,
+        });
+        let now = self.started.elapsed();
+        while let Some(event) = host.poll_key_event() {
+            let action = effective_keyboard_action(&self.map, event.key, event.keysym);
+            self.repeat
+                .transition(event, action.clone(), now, repeat_info);
+            if event.state == KeyState::Pressed {
+                self.pending.extend(action);
+            }
+        }
+        self.pending.extend(self.repeat.due(now, repeat_info));
+        if let Some(action) = self.pending.pop_front() {
+            Ok(ActionPoll::Event(ActionEvent::Action(action)))
+        } else {
+            thread::sleep(Duration::from_millis(5));
+            Ok(ActionPoll::DeadlineReached)
+        }
+    }
+
+    fn capture_next_button(&mut self) {}
+
+    fn apply_effective_map(&mut self, map: &EffectiveMap) {
+        self.map = map.clone();
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run_fbdev(
-    host: &mut FbdevHost,
-    actions: &mut EvdevActionSource,
+fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
+    host: &mut H,
+    actions: &mut I,
     core: &mut ShellCore,
     mut activate: String,
     preferences: &mut dyn PreferencePort,
@@ -539,9 +764,7 @@ fn run_fbdev(
     let mut remap = GamepadRemap::with_store(map, remap_store);
     loop {
         let before = redraw_state(core);
-        let poll = actions
-            .next_action(deadline)
-            .map_err(|e| format!("input: {e:?}"))?;
+        let poll = actions.next_action(host, deadline)?;
         drive_socket_session(core, &mut session)?;
         let ActionPoll::Event(ActionEvent::Action(action)) = poll else {
             if matches!(poll, ActionPoll::Closed) {
@@ -632,7 +855,7 @@ fn run_fbdev(
             },
             Some(Effect::CaptureScreenshot) => {
                 let result = host
-                    .frame()
+                    .raster_frame()
                     .ok_or_else(|| "composed frame is unavailable".to_owned())
                     .and_then(|frame| capture_screenshot(frame, state_dir, &FsScreenshotWriter));
                 match result {
@@ -1105,17 +1328,36 @@ fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
 
 trait RenderedFrameHost: FrameHost {
     fn render_notes(&self) -> Option<&[RenderNote]>;
+    fn raster_frame(&self) -> Option<&RasterFrame>;
 }
 
 impl RenderedFrameHost for OffscreenHost {
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
     }
+
+    fn raster_frame(&self) -> Option<&RasterFrame> {
+        self.frame()
+    }
 }
 
 impl RenderedFrameHost for FbdevHost {
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.frame().map(|frame| frame.notes.as_slice())
+    }
+
+    fn raster_frame(&self) -> Option<&RasterFrame> {
+        self.frame()
+    }
+}
+
+impl RenderedFrameHost for WaylandHost {
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        None
+    }
+
+    fn raster_frame(&self) -> Option<&RasterFrame> {
+        None
     }
 }
 
@@ -1166,6 +1408,152 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    fn effective_map() -> EffectiveMap {
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        EffectiveMap::load(contract, &MemoryStore::default()).unwrap()
+    }
+
+    fn key_event(code: u32, keysym: u32, state: KeyState, key: Key) -> KeyEvent {
+        KeyEvent {
+            code,
+            keysym,
+            state,
+            key,
+        }
+    }
+
+    #[test]
+    fn keyboard_mapping_table_only_exposes_effective_actions() {
+        let map = effective_map();
+        let cases = [
+            (Key::Up, 0xff52, ShellAction::Move(pf_scene::AxisMove::Up)),
+            (
+                Key::Down,
+                0xff54,
+                ShellAction::Move(pf_scene::AxisMove::Down),
+            ),
+            (
+                Key::Left,
+                0xff51,
+                ShellAction::Move(pf_scene::AxisMove::Left),
+            ),
+            (
+                Key::Right,
+                0xff53,
+                ShellAction::Move(pf_scene::AxisMove::Right),
+            ),
+            (Key::Enter, 0xff0d, ShellAction::Activate),
+            (Key::Escape, 0xff1b, ShellAction::Back),
+            (Key::Other(0xff08), 0xff08, ShellAction::Back),
+            (
+                Key::Other(0xff09),
+                0xff09,
+                ShellAction::Custom("Favorite".into()),
+            ),
+            (
+                Key::Char('F'),
+                u32::from('F'),
+                ShellAction::Custom("Favorite".into()),
+            ),
+            (
+                Key::Char('s'),
+                u32::from('s'),
+                ShellAction::Custom("SafeReturn".into()),
+            ),
+        ];
+        for (key, keysym, expected) in cases {
+            assert_eq!(effective_keyboard_action(&map, key, keysym), Some(expected));
+        }
+        assert_eq!(
+            effective_keyboard_action(&map, Key::Char('q'), u32::from('q')),
+            None
+        );
+
+        let mut without_quick = map.clone();
+        let mappings = without_quick
+            .mappings()
+            .iter()
+            .filter(|mapping| mapping.action != "Quick")
+            .cloned()
+            .collect::<Vec<_>>();
+        // Build a map from a contract lacking Quick to prove keyboard affordances
+        // cannot drift beyond the effective action set.
+        let mut contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        contract["effective_map"] = serde_json::to_value(mappings).unwrap();
+        let contract = DeviceContract::parse_json(&contract.to_string()).unwrap();
+        without_quick = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        assert_eq!(
+            effective_keyboard_action(&without_quick, Key::Char('f'), u32::from('f')),
+            None
+        );
+    }
+
+    #[test]
+    fn repeat_scheduler_uses_fake_time_and_only_repeats_focus_moves() {
+        let info = RepeatInfo {
+            rate: 10,
+            delay_ms: 300,
+        };
+        let mut scheduler = KeyRepeatScheduler::default();
+        scheduler.transition(
+            key_event(1, 0xff52, KeyState::Pressed, Key::Up),
+            Some(ShellAction::Move(pf_scene::AxisMove::Up)),
+            Duration::ZERO,
+            info,
+        );
+        scheduler.transition(
+            key_event(2, 0xff0d, KeyState::Pressed, Key::Enter),
+            Some(ShellAction::Activate),
+            Duration::ZERO,
+            info,
+        );
+        assert!(scheduler.due(Duration::from_millis(299), info).is_empty());
+        assert_eq!(
+            scheduler.due(Duration::from_millis(500), info),
+            vec![
+                ShellAction::Move(pf_scene::AxisMove::Up),
+                ShellAction::Move(pf_scene::AxisMove::Up),
+                ShellAction::Move(pf_scene::AxisMove::Up),
+            ]
+        );
+        scheduler.transition(
+            key_event(1, 0xff52, KeyState::Released, Key::Up),
+            None,
+            Duration::from_millis(501),
+            info,
+        );
+        assert!(scheduler.due(Duration::from_secs(1), info).is_empty());
+    }
+
+    #[test]
+    fn missing_catalog_root_degrades_but_existing_unreadable_root_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let missing_provider = InstalledAppProvider::new(
+            &missing,
+            dir.path().join("favorites.json"),
+            "native",
+            "aarch64",
+        );
+        assert!(
+            catalog_snapshot(&missing_provider, &missing)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        let not_a_directory = dir.path().join("catalog-file");
+        fs::write(&not_a_directory, b"not a directory").unwrap();
+        let unreadable_provider = InstalledAppProvider::new(
+            &not_a_directory,
+            dir.path().join("other-favorites.json"),
+            "native",
+            "aarch64",
+        );
+        assert!(catalog_snapshot(&unreadable_provider, &not_a_directory).is_err());
+    }
 
     fn scanned_manifest() -> &'static str {
         r#"[app]

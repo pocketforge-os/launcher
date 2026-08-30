@@ -45,6 +45,8 @@ use std::{
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
+const RUNTIME_FAMILY: &str = "pocketforge/native";
+const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
@@ -78,6 +80,10 @@ fn catalog_snapshot(
         }
         Err(error) => Err(format!("catalog: {error:?}")),
     }
+}
+
+fn installed_app_provider(root: &Path, favorites_path: PathBuf) -> InstalledAppProvider {
+    InstalledAppProvider::new(root, favorites_path, RUNTIME_FAMILY, RUNTIME_ABI)
 }
 
 #[cfg(feature = "wayland")]
@@ -322,14 +328,8 @@ fn main() -> Result<(), String> {
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
-    let catalog = (!fixture_mode).then(|| {
-        InstalledAppProvider::new(
-            &catalog_root,
-            state_dir.join("favorites.json"),
-            "native",
-            "aarch64",
-        )
-    });
+    let catalog = (!fixture_mode)
+        .then(|| installed_app_provider(&catalog_root, state_dir.join("favorites.json")));
     let snapshot: CatalogSnapshot = if let Some(provider) = &catalog {
         catalog_snapshot(provider, &catalog_root)?
     } else {
@@ -1993,12 +1993,7 @@ mod durable_tests {
     fn missing_catalog_root_degrades_but_existing_unreadable_root_errors() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
-        let missing_provider = InstalledAppProvider::new(
-            &missing,
-            dir.path().join("favorites.json"),
-            "native",
-            "aarch64",
-        );
+        let missing_provider = installed_app_provider(&missing, dir.path().join("favorites.json"));
         assert!(
             catalog_snapshot(&missing_provider, &missing)
                 .unwrap()
@@ -2008,28 +2003,30 @@ mod durable_tests {
 
         let not_a_directory = dir.path().join("catalog-file");
         fs::write(&not_a_directory, b"not a directory").unwrap();
-        let unreadable_provider = InstalledAppProvider::new(
-            &not_a_directory,
-            dir.path().join("other-favorites.json"),
-            "native",
-            "aarch64",
-        );
+        let unreadable_provider =
+            installed_app_provider(&not_a_directory, dir.path().join("other-favorites.json"));
         assert!(catalog_snapshot(&unreadable_provider, &not_a_directory).is_err());
     }
 
-    fn scanned_manifest() -> &'static str {
-        r#"[app]
-id="com.example.art"
+    fn scanned_manifest_with_runtime(id: &str, family: &str, abi: &str) -> String {
+        format!(
+            r#"[app]
+id="{id}"
 name="Catalog Art"
 category="game"
 icon="art/cover.png"
 version="1.0.0"
 [runtime]
-family="pocketforge/native"
-abi="1"
+family="{family}"
+abi="{abi}"
 [launch]
 exec="./launch"
 "#
+        )
+    }
+
+    fn scanned_manifest() -> String {
+        scanned_manifest_with_runtime("com.example.art", RUNTIME_FAMILY, RUNTIME_ABI)
     }
 
     struct FailingScreenshotWriter;
@@ -2087,6 +2084,48 @@ exec="./launch"
     }
 
     #[test]
+    fn production_catalog_provider_matches_canonical_runtime_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("apps");
+        let ready_app = root.join("ready");
+        let incompatible_app = root.join("incompatible");
+        fs::create_dir_all(&ready_app).unwrap();
+        fs::create_dir_all(&incompatible_app).unwrap();
+        fs::write(
+            ready_app.join("app.toml"),
+            scanned_manifest_with_runtime("com.example.ready", "pocketforge/native", "1"),
+        )
+        .unwrap();
+        fs::write(
+            incompatible_app.join("app.toml"),
+            scanned_manifest_with_runtime("com.example.incompatible", "pocketforge/other", "2"),
+        )
+        .unwrap();
+
+        let snapshot = installed_app_provider(&root, dir.path().join("favorites.json"))
+            .snapshot()
+            .unwrap();
+        let availability = |id: &str| {
+            &snapshot
+                .items
+                .iter()
+                .find(|item| item.id.ends_with(id))
+                .unwrap()
+                .variants[0]
+                .availability
+        };
+
+        assert!(matches!(
+            availability("com.example.ready"),
+            pf_catalog::Availability::Ready
+        ));
+        assert!(matches!(
+            availability("com.example.incompatible"),
+            pf_catalog::Availability::IncompatibleRuntime { .. }
+        ));
+    }
+
+    #[test]
     fn scanned_catalog_art_reaches_shell_boot() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("apps");
@@ -2094,14 +2133,9 @@ exec="./launch"
         fs::create_dir_all(app.join("art")).unwrap();
         fs::write(app.join("app.toml"), scanned_manifest()).unwrap();
         fs::write(app.join("art/cover.png"), b"catalog cover bytes").unwrap();
-        let snapshot = InstalledAppProvider::new(
-            &root,
-            dir.path().join("favorites.json"),
-            "pocketforge/native",
-            "1",
-        )
-        .snapshot()
-        .unwrap();
+        let snapshot = installed_app_provider(&root, dir.path().join("favorites.json"))
+            .snapshot()
+            .unwrap();
 
         let core = catalog_core(&snapshot, &pf_theme::flagship(), false);
 

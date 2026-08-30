@@ -1,6 +1,6 @@
 use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
 use pf_framehost::{FbdevHost, OffscreenHost};
-use pf_input_map::{DeviceContract, EffectiveMap, MemoryStore};
+use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore};
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ChangeAuthority, Deadline, EffectivePreference,
     FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost,
@@ -103,6 +103,23 @@ fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
     (network, time, transfer)
 }
 
+fn load_durable_map_or_shipped(
+    contract: DeviceContract,
+    path: &Path,
+) -> Result<EffectiveMap, String> {
+    match EffectiveMap::load(contract.clone(), &JsonRemapStore::at(path)) {
+        Ok(map) => Ok(map),
+        Err(error) => {
+            eprintln!(
+                "pf-shell: remap store {} could not be loaded ({error:?}); using shipped controls",
+                path.display()
+            );
+            EffectiveMap::load(contract, &MemoryStore::default())
+                .map_err(|fallback| format!("shipped input map: {fallback:?}"))
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -131,8 +148,13 @@ fn main() -> Result<(), String> {
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
         .map_err(|e| format!("{e:?}"))?;
     let options = safe_return_options(&contract);
-    let glyphs =
-        EffectiveMap::load(contract, &MemoryStore::default()).map_err(|e| format!("{e:?}"))?;
+    let remap_path = state_dir.join("remaps.json");
+    let glyphs = if fixture_mode {
+        EffectiveMap::load(contract.clone(), &MemoryStore::default())
+            .map_err(|e| format!("{e:?}"))?
+    } else {
+        load_durable_map_or_shipped(contract.clone(), &remap_path)?
+    };
     let mut footer = footer_prompt(&glyphs);
     if let Some(hint) = favorite_footer_prompt(&glyphs, false) {
         if let Some(glyph) = hint.strip_suffix("  Favorite") {
@@ -205,9 +227,8 @@ fn main() -> Result<(), String> {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
         let input = value(&args, "--input").unwrap_or("/dev/input/event0");
         let mut host = FbdevHost::open(framebuffer).map_err(|e| e.to_string())?;
-        let (mut actions, _) =
-            EvdevActionSource::open(input, include_str!("../fixtures/device.json"))
-                .map_err(|e| format!("input adapter: {e:?}"))?;
+        let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
+            .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         return run_fbdev(
             &mut host,
@@ -223,6 +244,7 @@ fn main() -> Result<(), String> {
             &mut time,
             &mut transfer,
             &state_dir,
+            JsonRemapStore::at(remap_path),
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -405,6 +427,7 @@ fn run_fbdev(
     time: &mut dyn TimePort,
     transfer: &mut dyn TransferPort,
     state_dir: &Path,
+    remap_store: JsonRemapStore,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = SessionClient::new(
@@ -417,7 +440,7 @@ fn run_fbdev(
         Err(error) => return Err(format!("session: {error:?}")),
     }
     present(host, core, &activate)?;
-    let mut remap = GamepadRemap::new(map);
+    let mut remap = GamepadRemap::with_store(map, remap_store);
     loop {
         let before = redraw_state(core);
         let poll = actions
@@ -1348,5 +1371,42 @@ mod durable_tests {
         drop(first);
         let second = DurablePreferences::open(dir.path()).unwrap();
         assert!(second.first_run_complete().unwrap());
+    }
+
+    #[test]
+    fn remap_commit_survives_rebuilding_from_the_same_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remaps.json");
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
+        let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
+        remap
+            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .unwrap();
+        remap.gamepad_action(&ShellAction::Activate).unwrap();
+        drop(remap);
+
+        let reloaded = load_durable_map_or_shipped(contract, &path).unwrap();
+        assert!(
+            control_bindings(&reloaded)
+                .iter()
+                .any(|binding| { binding.action == "Activate" && binding.binding == "Y" })
+        );
+    }
+
+    #[test]
+    fn corrupt_remap_file_falls_back_to_shipped_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remaps.json");
+        fs::write(&path, b"not json").unwrap();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+
+        let map = load_durable_map_or_shipped(contract, &path).unwrap();
+
+        assert!(
+            control_bindings(&map)
+                .iter()
+                .any(|binding| { binding.action == "Activate" && binding.binding == "A" })
+        );
     }
 }

@@ -6,7 +6,7 @@ use pf_catalog::{
 };
 use pf_input_map::{
     Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
-    TransactionOutcome,
+    RemapStore, TransactionOutcome,
 };
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ActionSourceError, Deadline, GlyphResolver, GlyphResult,
@@ -44,6 +44,20 @@ impl EvdevActionSource {
     ) -> Result<(Self, EffectiveMap), AdapterError> {
         let contract = DeviceContract::parse_json(contract_json)
             .map_err(|e| AdapterError::Map(format!("{e:?}")))?;
+        let effective = EffectiveMap::load(contract.clone(), &MemoryStore::default())
+            .map_err(|e| AdapterError::Map(format!("{e:?}")))?;
+        Self::open_with_map(path, &contract, effective)
+    }
+
+    /// Opens a device using an effective map already loaded by the application.
+    ///
+    /// # Errors
+    /// Returns an error if the evdev node cannot be opened.
+    pub fn open_with_map(
+        path: impl AsRef<Path>,
+        contract: &DeviceContract,
+        effective: EffectiveMap,
+    ) -> Result<(Self, EffectiveMap), AdapterError> {
         let controls = contract
             .physical_controls
             .iter()
@@ -59,8 +73,6 @@ impl EvdevActionSource {
             .iter()
             .map(|(position, code)| (*code, position.clone()))
             .collect();
-        let effective = EffectiveMap::load(contract, &MemoryStore::default())
-            .map_err(|e| AdapterError::Map(format!("{e:?}")))?;
         let mut by_code = BTreeMap::new();
         for mapping in effective.mappings() {
             if mapping.binding.shape != BindingShape::SinglePress {
@@ -449,8 +461,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
 
 /// Thin product-facing transaction wrapper. During preview all gamepad actions remain usable;
 /// Back and the focused Revert action both atomically restore the effective map.
-pub struct GamepadRemap {
-    engine: RemapEngine<MemoryStore>,
+pub struct GamepadRemap<S: RemapStore = MemoryStore> {
+    engine: RemapEngine<S>,
     previewing: bool,
 }
 impl GamepadRemap {
@@ -461,13 +473,21 @@ impl GamepadRemap {
             previewing: false,
         }
     }
+
     #[cfg(test)]
     fn with_failing_store(map: EffectiveMap) -> Self {
+        Self::with_store(map, MemoryStore::failing())
+    }
+}
+impl<S: RemapStore> GamepadRemap<S> {
+    #[must_use]
+    pub fn with_store(map: EffectiveMap, store: S) -> Self {
         Self {
-            engine: RemapEngine::new(map, MemoryStore::failing()),
+            engine: RemapEngine::new(map, store),
             previewing: false,
         }
     }
+
     /// Starts a validated candidate preview.
     ///
     /// # Errors

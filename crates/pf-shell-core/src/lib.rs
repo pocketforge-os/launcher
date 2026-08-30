@@ -2524,7 +2524,8 @@ impl ShellCore {
                 );
                 out.push(card);
             }
-            if self.library_items.len() > visible_rows * geometry.columns {
+            let total_rows = self.library_items.len().div_ceil(geometry.columns);
+            if first_visible_row + visible_rows < total_rows {
                 out.push(node(
                     "library-fold-fade",
                     Role::Group,
@@ -5081,6 +5082,29 @@ mod tests {
             .expect("focused item below the initial fold");
         assert_eq!(focused.id.as_str(), "library-item-item-3");
         assert!((focused.bounds.y - library_geometry(640.0).card_top).abs() < f32::EPSILON);
+        assert!(
+            !has_fold(&scrolled),
+            "fold hides when the final row is fully visible"
+        );
+
+        core.action(&ShellAction::Move(AxisMove::Up));
+        let scrolled_back = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert_eq!(core.focus, 5);
+        assert!(
+            has_fold(&scrolled_back),
+            "fold reappears when scrolling above the final row"
+        );
     }
 
     #[test]

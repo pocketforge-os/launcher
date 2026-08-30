@@ -655,6 +655,7 @@ fn run_fbdev(
             }
             Some(Effect::SetTimezone(zone)) => core.timezone_result(time.set_timezone(zone)),
             Some(Effect::SetNtp(enabled)) => core.ntp_result(time.set_ntp_enabled(enabled)),
+            Some(Effect::RefreshManualTime) => core.manual_time_refresh_result(time.read()),
             Some(Effect::SetManualTime(wall_clock)) => {
                 core.manual_time_result(time.set_time(wall_clock));
             }

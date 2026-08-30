@@ -161,6 +161,7 @@ pub enum Effect {
     },
     SetTimezone(String),
     SetNtp(bool),
+    RefreshManualTime,
     SetManualTime(SystemTime),
     SetTransfer {
         service: TransferService,
@@ -671,6 +672,24 @@ impl ShellCore {
         });
         if let (Ok(state), Ok(value)) = (&mut self.time_state, result) {
             state.wall_clock = value.applied;
+        }
+        self.bump_revision();
+    }
+
+    pub fn manual_time_refresh_result(
+        &mut self,
+        result: Result<pf_ports::TimeState, pf_ports::TimeError>,
+    ) {
+        match result {
+            Ok(state) => {
+                self.manual_time_picker = ManualTimePicker::from_system_time(state.wall_clock);
+                self.time_state = Ok(state);
+                self.system_flow = SystemFlow::ManualTime;
+            }
+            Err(error) => {
+                self.time_state = Err(format!("Time status unavailable · {error:?}"));
+                self.system_status = Some(format!("Manual time unavailable · {error:?}"));
+            }
         }
         self.bump_revision();
     }
@@ -1524,16 +1543,7 @@ impl ShellCore {
                     SystemRow::Ntp => Some(Effect::SetNtp(
                         self.time_state.as_ref().ok()?.ntp_state != NtpState::Active,
                     )),
-                    SystemRow::ManualTime => {
-                        self.manual_time_picker = self
-                            .time_state
-                            .as_ref()
-                            .map_or(ManualTimePicker::DEFAULT, |state| {
-                                ManualTimePicker::from_system_time(state.wall_clock)
-                            });
-                        self.system_flow = SystemFlow::ManualTime;
-                        None
-                    }
+                    SystemRow::ManualTime => Some(Effect::RefreshManualTime),
                     SystemRow::Transfer(service) => {
                         let enabled = self
                             .transfer_services
@@ -3843,19 +3853,33 @@ mod tests {
 
     #[test]
     fn manual_time_picker_navigates_wraps_clamps_composes_and_cancels() {
-        let (_, time, transfer) = device_ports(NtpState::Inactive);
+        let (_, mut time, transfer) = device_ports(NtpState::Inactive);
         let mut core = core();
         core.load_system(&time, &transfer);
+        assert_eq!(
+            core.time_state.as_ref().unwrap().wall_clock,
+            SystemTime::UNIX_EPOCH
+        );
         core.go(Route::Settings);
         core.settings_room = SettingsRoom::System;
         core.focus = 2;
 
-        assert_eq!(core.action(&ShellAction::Activate), None);
+        let fresh_wall_clock = SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_210_040);
+        time.state_result = Ok(pf_ports::TimeState {
+            wall_clock: fresh_wall_clock,
+            timezone: "UTC".into(),
+            ntp_state: NtpState::Inactive,
+        });
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::RefreshManualTime)
+        );
+        core.manual_time_refresh_result(time.read());
         assert_eq!(core.system_flow, SystemFlow::ManualTime);
         assert!(format!("{:?}", settings_scene(&core)).contains("manual-time-fields"));
         assert_eq!(
             core.manual_time_picker,
-            ManualTimePicker::from_system_time(SystemTime::UNIX_EPOCH)
+            ManualTimePicker::from_system_time(fresh_wall_clock)
         );
 
         core.manual_time_picker = ManualTimePicker {
@@ -3932,7 +3956,11 @@ mod tests {
         );
         assert_eq!(core.system_flow, SystemFlow::Rows);
 
-        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::RefreshManualTime)
+        );
+        core.manual_time_refresh_result(time.read());
         core.action(&ShellAction::Move(AxisMove::Up));
         assert_eq!(core.action(&ShellAction::Back), None);
         assert_eq!(core.system_flow, SystemFlow::Rows);

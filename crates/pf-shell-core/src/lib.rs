@@ -1719,6 +1719,33 @@ impl ShellCore {
                     self.focus -= 1;
                 }
             }
+            ShellAction::Move(AxisMove::Right) if self.route == Route::Details => {
+                let play = self.detail_play_focus();
+                if play.is_some_and(|play| self.focus == play) {
+                    self.focus += 1;
+                }
+            }
+            ShellAction::Move(AxisMove::Left) if self.route == Route::Details => {
+                if let Some(play) = self.detail_play_focus()
+                    && self.focus == play + 1
+                {
+                    self.focus = play;
+                }
+            }
+            ShellAction::Move(AxisMove::Down) if self.route == Route::Details => {
+                let variant_count = self.detail_focusable_variants().len();
+                if self.focus < variant_count {
+                    self.focus = (self.focus + 1).min(self.detail_pin_focus());
+                }
+            }
+            ShellAction::Move(AxisMove::Up) if self.route == Route::Details => {
+                let variant_count = self.detail_focusable_variants().len();
+                if variant_count > 0 && self.focus >= variant_count {
+                    self.focus = variant_count - 1;
+                } else {
+                    self.focus = self.focus.saturating_sub(1);
+                }
+            }
             ShellAction::Move(AxisMove::Down) if self.route == Route::Library && self.focus < 5 => {
                 if !self.library_items.is_empty() {
                     let geometry = library_geometry(self.library_surface_width.get());
@@ -1917,6 +1944,16 @@ impl ShellCore {
         }
         if self.route == Route::Details {
             let item = self.selected_item?;
+            let variants = self.detail_focusable_variants();
+            if let Some(&variant) = variants.get(self.focus) {
+                return self.launch_variant(item, variant);
+            }
+            if self.focus == self.detail_pin_focus() {
+                return Some(Effect::ToggleFavorite {
+                    item_id: self.items[item].id.clone(),
+                    favorite: !self.items[item].favorite,
+                });
+            }
             let ready = self.ready_variants(item);
             return match ready.len() {
                 0 => None,
@@ -1963,6 +2000,28 @@ impl ShellCore {
             .filter(|(_, variant)| matches!(variant.availability, Availability::Ready))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn detail_focusable_variants(&self) -> Vec<usize> {
+        self.selected_item
+            .and_then(|item| self.items.get(item))
+            .into_iter()
+            .flat_map(|item| item.variants.iter().take(2).enumerate())
+            .filter_map(|(index, variant)| {
+                matches!(variant.availability, Availability::Ready).then_some(index)
+            })
+            .collect()
+    }
+
+    fn detail_play_focus(&self) -> Option<usize> {
+        self.selected_item
+            .is_some_and(|item| !self.ready_variants(item).is_empty())
+            .then(|| self.detail_focusable_variants().len())
+    }
+
+    fn detail_pin_focus(&self) -> usize {
+        self.detail_play_focus()
+            .map_or_else(|| self.detail_focusable_variants().len(), |play| play + 1)
     }
 
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
@@ -2044,7 +2103,7 @@ impl ShellCore {
             Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
             Route::Library => self.library_items.len() + 5,
             Route::Search => self.search_results.len().max(1),
-            Route::Details => 1,
+            Route::Details => self.detail_pin_focus() + 1,
             Route::VariantChooser => self
                 .selected_item
                 .map_or(0, |item| self.ready_variants(item).len())
@@ -2354,17 +2413,6 @@ impl ShellCore {
                 "--color-surface-raised",
             ),
             node(
-                "rooms",
-                Role::Text,
-                "L     Home     Library     Settings     R",
-                w / 2.0 - 220.0,
-                16.0,
-                440.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Label),
-            node(
                 "status-cluster",
                 Role::Text,
                 if self.authority_unavailable() {
@@ -2380,6 +2428,99 @@ impl ShellCore {
             )
             .with_type_role(TypeRole::Caption),
         ];
+        let room_left = w / 2.0 - 220.0;
+        children.push(
+            node(
+                "rooms",
+                Role::Group,
+                "",
+                room_left,
+                12.0,
+                424.0,
+                40.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+        for (id, label, x, width) in [
+            ("room-keycap-left", "L", room_left + 8.0, 32.0),
+            ("room-home", "Home", room_left + 56.0, 72.0),
+            ("room-library", "Library", room_left + 152.0, 88.0),
+            ("room-settings", "Settings", room_left + 264.0, 92.0),
+            ("room-keycap-right", "R", room_left + 384.0, 32.0),
+        ] {
+            let keycap = id.contains("keycap");
+            let selected = matches!(
+                (id, self.route),
+                ("room-home", Route::Home)
+                    | (
+                        "room-library",
+                        Route::Library | Route::Search | Route::Details | Route::VariantChooser
+                    )
+                    | ("room-settings", Route::Settings)
+            );
+            if keycap {
+                children.push(node(
+                    &format!("{id}-border"),
+                    Role::Group,
+                    "",
+                    x - 4.0,
+                    12.0,
+                    width + 8.0,
+                    34.0,
+                    "--color-border-strong",
+                ));
+                children.push(node(
+                    &format!("{id}-fill"),
+                    Role::Group,
+                    "",
+                    x - 2.0,
+                    14.0,
+                    width + 4.0,
+                    30.0,
+                    "--color-surface-raised",
+                ));
+                children.push(
+                    node(
+                        id,
+                        Role::Text,
+                        label,
+                        x,
+                        16.0,
+                        width,
+                        26.0,
+                        "--state-rest-text",
+                    )
+                    .with_type_role(TypeRole::Caption),
+                );
+            } else {
+                children.push(
+                    node(
+                        id,
+                        Role::Text,
+                        label,
+                        x,
+                        16.0,
+                        width,
+                        32.0,
+                        "--color-surface-raised",
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
+                if selected {
+                    children.push(node(
+                        &format!("{id}-underline"),
+                        Role::Group,
+                        "",
+                        x,
+                        49.0,
+                        width,
+                        3.0,
+                        "--state-selected-accent",
+                    ));
+                }
+            }
+        }
         if let Some(status) = self.session_status() {
             children.push(node(
                 "session-status",
@@ -2398,7 +2539,7 @@ impl ShellCore {
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
         }
-        let footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
+        let supplied_footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
             self.focused_item_index().map_or_else(
                 || base.to_owned(),
                 |item| {
@@ -2412,6 +2553,49 @@ impl ShellCore {
             )
         } else {
             footer.to_owned()
+        };
+        let footer = match self.route {
+            Route::Library => (self.focus >= 5)
+                .then(|| self.binding_prompt("Activate", "Details"))
+                .flatten()
+                .unwrap_or_default(),
+            Route::Details => {
+                let ready = self
+                    .selected_item
+                    .is_some_and(|index| !self.ready_variants(index).is_empty());
+                let mut prompts = Vec::new();
+                if let Some(prompt) = self.binding_prompt("Back", "Back") {
+                    prompts.push(prompt);
+                }
+                if let Some(item) = self.selected_item.and_then(|index| self.items.get(index))
+                    && let Some(prompt) = self.binding_prompt(
+                        "Quick",
+                        if item.favorite {
+                            "Unfavorite"
+                        } else {
+                            "Favorite"
+                        },
+                    )
+                {
+                    prompts.push(prompt);
+                }
+                let activate_label = if self.focus == self.detail_pin_focus() {
+                    self.selected_item
+                        .and_then(|index| self.items.get(index))
+                        .map(|item| if item.favorite { "Unpin" } else { "Pin" })
+                } else if ready {
+                    Some("Play")
+                } else {
+                    None
+                };
+                if let Some(prompt) =
+                    activate_label.and_then(|label| self.binding_prompt("Activate", label))
+                {
+                    prompts.push(prompt);
+                }
+                prompts.join(" · ")
+            }
+            _ => supplied_footer,
         };
         children.push(node(
             "prompt-bar",
@@ -2453,6 +2637,13 @@ impl ShellCore {
             Scene::new(root, NodeId::new(focus_id).unwrap())
                 .expect("one deterministic focus owner"),
         )
+    }
+
+    fn binding_prompt(&self, action: &str, label: &str) -> Option<String> {
+        self.control_bindings
+            .iter()
+            .find(|binding| binding.action == action)
+            .map(|binding| format!("{} {label}", binding.binding))
     }
 
     fn route_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
@@ -2585,7 +2776,24 @@ impl ShellCore {
                     .variants
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
-                n.children = art_nodes(item, "home-card", x, 390.0, card_width, i == self.focus);
+                n.children = art_nodes(
+                    item,
+                    "home-card",
+                    x,
+                    390.0,
+                    card_width,
+                    158.0,
+                    i == self.focus,
+                );
+                add_unavailable_card_cues(
+                    &mut n.children,
+                    item,
+                    availability,
+                    "home-card",
+                    x,
+                    390.0,
+                    card_width,
+                );
                 if item.favorite {
                     n.children.push(
                         node(
@@ -2629,7 +2837,7 @@ impl ShellCore {
             let mut search = node(
                 "library-search",
                 Role::Button,
-                &format!("Search {} titles", self.items.len()),
+                &format!("⌕  Search {} titles", self.items.len()),
                 48.0,
                 112.0,
                 search_width,
@@ -2674,7 +2882,7 @@ impl ShellCore {
                     chip_width,
                     52.0,
                     if focused {
-                        "--state-focused-ring"
+                        "--color-text-inverse"
                     } else {
                         "--state-rest-surface"
                     },
@@ -2683,6 +2891,18 @@ impl ShellCore {
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
                 out.push(chip);
+                if active {
+                    out.push(node(
+                        &format!("library-selected-underline-{index}"),
+                        Role::Group,
+                        "",
+                        toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap) + 12.0,
+                        toolbar_top + chip_row as f32 * 68.0 + 46.0,
+                        chip_width - 24.0,
+                        3.0,
+                        "--state-selected-accent",
+                    ));
+                }
             }
             let row_height = 292.0;
             let card_top = geometry.card_top;
@@ -2741,7 +2961,17 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
+                    136.0,
                     self.focus == i + 5,
+                );
+                add_unavailable_card_cues(
+                    &mut card.children,
+                    item,
+                    availability,
+                    "library-card",
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
+                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    geometry.card_width,
                 );
                 out.push(card);
             }
@@ -2819,8 +3049,6 @@ impl ShellCore {
                 return;
             };
             let item = &self.items[item_index];
-            let has_playtime = self.playtime.contains_key(&item.id);
-            let detail_offset = if has_playtime { 16.0 } else { 0.0 };
             let first_variant = item.variants.first();
             let provenance = first_variant.map_or_else(
                 || kind_text(&item.kind).to_owned(),
@@ -2833,85 +3061,97 @@ impl ShellCore {
                     )
                 },
             );
+            let compact = library_geometry(w).columns < 6;
+            let cover_left = 48.0;
+            let cover_top = 112.0;
+            let cover_width = if compact { 240.0 } else { 320.0 };
+            let cover_height = if compact { 321.0 } else { 428.0 };
+            let detail_column_left = cover_left + cover_width + 32.0;
+            let detail_column_width = w - detail_column_left - 48.0;
             out.push(node(
                 "detail-provenance",
                 Role::Text,
                 &provenance,
-                400.0,
-                165.0,
-                w - 448.0,
-                42.0,
+                detail_column_left,
+                112.0,
+                detail_column_width,
+                30.0,
                 "--color-text-secondary",
             ));
             out.push(node(
                 "detail-title",
                 Role::Heading,
                 &item.title,
-                400.0,
-                212.0,
-                w - 448.0,
-                58.0,
-                "--state-rest-text",
+                detail_column_left,
+                148.0,
+                detail_column_width,
+                64.0,
+                "--color-surface-canvas",
             ));
-            if let Some(playtime) = self.playtime.get(&item.id).copied() {
-                out.push(node(
-                    "detail-playtime",
-                    Role::Text,
-                    &format_playtime(playtime),
-                    400.0,
-                    258.0,
-                    w - 448.0,
-                    30.0,
-                    "--color-text-secondary",
-                ));
-            }
             let mut cover = node(
                 "detail-cover",
                 Role::Group,
                 &format!("Cover for {}", item.title),
-                48.0,
-                96.0,
-                320.0,
-                428.0,
+                cover_left,
+                cover_top,
+                cover_width,
+                cover_height,
                 "--color-surface-raised",
             )
             .with_elevation(Elevation::Elev2);
-            cover.children = art_nodes(item, "detail-art", 48.0, 96.0, 320.0, false);
+            cover.children = art_nodes(
+                item,
+                "detail-art",
+                cover_left,
+                cover_top,
+                cover_width,
+                cover_height,
+                false,
+            );
             out.push(cover);
             let detail_availability = best_availability(item);
-            let availability = availability_text(detail_availability, &self.presentation);
+            let availability = if matches!(detail_availability, Availability::Ready) {
+                "● Ready".to_owned()
+            } else {
+                format!(
+                    "⊘ {}",
+                    availability_text(detail_availability, &self.presentation)
+                )
+            };
             let mut availability_node = node(
                 "detail-availability-reason",
                 Role::Text,
                 &availability,
-                400.0,
-                294.0 + detail_offset,
-                w - 448.0,
+                detail_column_left,
+                218.0,
+                detail_column_width,
                 38.0,
-                state_token(detail_availability, false),
+                if matches!(detail_availability, Availability::Ready) {
+                    "--color-text-primary"
+                } else {
+                    "--state-unavailable-text"
+                },
             );
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
-            if item.variants.len() >= 2 {
-                out.push(
-                    node(
-                        "detail-ways-heading",
-                        Role::Heading,
-                        "Ways to play",
-                        400.0,
-                        342.0 + detail_offset,
-                        w - 448.0,
-                        28.0,
-                        "--color-text-muted",
-                    )
-                    .with_type_role(TypeRole::Eyebrow),
-                );
-            }
+            out.push(
+                node(
+                    "detail-ways-heading",
+                    Role::Heading,
+                    "WAYS TO PLAY",
+                    detail_column_left,
+                    270.0,
+                    detail_column_width,
+                    28.0,
+                    "--color-text-muted",
+                )
+                .with_type_role(TypeRole::Eyebrow),
+            );
             let ready = self.ready_variants(item_index);
-            let variant_row_height = 48.0;
+            let variant_row_height = 54.0;
             let variant_row_gap = 7.0;
-            let variant_rows_top = 378.0 + detail_offset;
+            let variant_rows_top = 302.0;
             let detail_variant_capacity = 2;
             let visible_detail_variants = item.variants.len().min(detail_variant_capacity);
             if self.route == Route::Details {
@@ -2921,37 +3161,58 @@ impl ShellCore {
                     .take(visible_detail_variants)
                     .enumerate()
                 {
-                    if item.variants.len() < 2 {
-                        break;
-                    }
                     let variant_label = if matches!(variant.availability, Availability::Ready) {
-                        format!("{} · Ready", humanize_identifier(&variant.id))
-                    } else if variant_index == 0 && ready.is_empty() {
                         format!(
-                            "{} · See availability above",
-                            humanize_identifier(&variant.id)
+                            "✓ {}\n{}",
+                            humanize_identifier(&variant.id),
+                            variant
+                                .provenance
+                                .app_version
+                                .as_deref()
+                                .map_or("Installed on this device", |version| version)
                         )
                     } else {
                         format!(
-                            "{} · {}",
+                            "⊘ {}\n{}",
                             humanize_identifier(&variant.id),
                             availability_text(&variant.availability, &self.presentation)
                         )
                     };
+                    let variant_focus = item
+                        .variants
+                        .iter()
+                        .take(variant_index + 1)
+                        .filter(|variant| matches!(variant.availability, Availability::Ready))
+                        .count()
+                        .checked_sub(1);
+                    let focused = matches!(variant.availability, Availability::Ready)
+                        && variant_focus == Some(self.focus);
                     let mut variant_node = node(
                         &format!("detail-variant-{variant_index}"),
-                        Role::Text,
+                        if matches!(variant.availability, Availability::Ready) {
+                            Role::Button
+                        } else {
+                            Role::Text
+                        },
                         &variant_label,
-                        400.0,
+                        detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
-                        w - 448.0,
+                        detail_column_width,
                         variant_row_height,
-                        state_token(&variant.availability, false),
+                        if focused {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
                     );
+                    variant_node.state.focused = focused;
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
                     variant_node.state.selected = variant_index == 0;
+                    if matches!(variant.availability, Availability::Ready) {
+                        variant_node.action = Some(NodeAction::Activate);
+                    }
                     out.push(variant_node);
                 }
                 if item.variants.len() > visible_detail_variants {
@@ -2962,11 +3223,11 @@ impl ShellCore {
                             "+{} more ways to play",
                             item.variants.len() - visible_detail_variants
                         ),
-                        400.0,
+                        detail_column_left,
                         variant_rows_top
                             + visible_detail_variants as f32
                                 * (variant_row_height + variant_row_gap),
-                        w - 448.0,
+                        detail_column_width,
                         28.0,
                         "--color-text-muted",
                     ));
@@ -3036,48 +3297,138 @@ impl ShellCore {
                     row.action = Some(NodeAction::Activate);
                     out.push(row);
                 }
-            } else if !ready.is_empty() {
-                let variants_bottom = if item.variants.len() < 2 {
-                    variant_rows_top
-                } else {
-                    variant_rows_top
+            } else {
+                let actions_bottom = if let Some(_ready_variant) = ready.first() {
+                    let variants_bottom = variant_rows_top
                         + visible_detail_variants as f32 * (variant_row_height + variant_row_gap)
                         + if item.variants.len() > visible_detail_variants {
-                            28.0 + variant_row_gap
+                            35.0
                         } else {
                             0.0
-                        }
-                };
-                let mut open = node(
-                    "detail-open",
-                    Role::Button,
-                    if ready.len() == 1 {
-                        "Open"
+                        };
+                    let button_gap = 16.0;
+                    let stack_buttons = compact && detail_column_width < 336.0;
+                    let button_width = if stack_buttons {
+                        detail_column_width
                     } else {
-                        "Choose how to play"
-                    },
-                    400.0,
-                    variants_bottom.max(510.0),
-                    360.0,
-                    54.0,
-                    "--state-focused-ring",
-                );
-                open.state.focused = true;
-                open.action = Some(NodeAction::Activate);
-                out.push(open);
-            } else {
-                let mut unavailable = node(
-                    "detail-unavailable",
-                    Role::Text,
-                    "No launch action is available",
-                    400.0,
-                    510.0,
-                    w - 448.0,
-                    60.0,
-                    "--state-unavailable-text",
-                );
-                unavailable.state.unavailable = true;
-                out.push(unavailable);
+                        (detail_column_width - button_gap) / 2.0
+                    };
+                    let buttons_top = variants_bottom.max(430.0);
+                    let play_focus = self.detail_play_focus().unwrap_or(0);
+                    let mut open = node(
+                        "detail-open",
+                        Role::Button,
+                        if ready.len() == 1 {
+                            "▶ Play"
+                        } else {
+                            "Choose how to play"
+                        },
+                        detail_column_left,
+                        buttons_top,
+                        button_width,
+                        54.0,
+                        if self.focus == play_focus {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
+                    );
+                    open.state.focused = self.focus == play_focus;
+                    open.action = Some(NodeAction::Activate);
+                    out.push(open);
+                    let pin_label = if item.favorite {
+                        "★ Unpin"
+                    } else {
+                        "★ Pin to favorites"
+                    };
+                    let mut pin = node(
+                        "detail-pin",
+                        Role::Button,
+                        pin_label,
+                        if stack_buttons {
+                            detail_column_left
+                        } else {
+                            detail_column_left + button_width + button_gap
+                        },
+                        if stack_buttons {
+                            buttons_top + 54.0 + button_gap
+                        } else {
+                            buttons_top
+                        },
+                        button_width,
+                        54.0,
+                        if self.focus == self.detail_pin_focus() {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
+                    );
+                    pin.state.focused = self.focus == self.detail_pin_focus();
+                    pin.action = Some(NodeAction::Activate);
+                    out.push(pin);
+                    buttons_top + if stack_buttons { 124.0 } else { 54.0 }
+                } else {
+                    let mut unavailable = node(
+                        "detail-unavailable",
+                        Role::Text,
+                        "No launch action is available",
+                        detail_column_left,
+                        510.0,
+                        detail_column_width,
+                        60.0,
+                        "--state-unavailable-text",
+                    );
+                    unavailable.state.unavailable = true;
+                    out.push(unavailable);
+                    let mut pin = node(
+                        "detail-pin",
+                        Role::Button,
+                        if item.favorite {
+                            "★ Unpin"
+                        } else {
+                            "★ Pin to favorites"
+                        },
+                        detail_column_left,
+                        580.0,
+                        detail_column_width,
+                        54.0,
+                        "--state-focused-ring",
+                    );
+                    pin.state.focused = true;
+                    pin.action = Some(NodeAction::Activate);
+                    out.push(pin);
+                    634.0
+                };
+                if let Some(playtime) = self.playtime.get(&item.id).copied() {
+                    let facts_top = if compact {
+                        actions_bottom + 16.0
+                    } else {
+                        540.0
+                    };
+                    out.push(
+                        node(
+                            "detail-time-played-heading",
+                            Role::Heading,
+                            "TIME PLAYED",
+                            detail_column_left,
+                            facts_top,
+                            detail_column_width,
+                            22.0,
+                            "--color-text-muted",
+                        )
+                        .with_type_role(TypeRole::Eyebrow),
+                    );
+                    out.push(node(
+                        "detail-playtime",
+                        Role::Text,
+                        &format_playtime(playtime),
+                        detail_column_left,
+                        facts_top + 26.0,
+                        detail_column_width,
+                        28.0,
+                        "--color-text-primary",
+                    ));
+                }
             }
         } else if self.route == Route::Settings {
             self.quiet_settings_nodes(out, w, h);
@@ -3891,6 +4242,7 @@ fn procedural_art_nodes(
     x: f32,
     y: f32,
     width: f32,
+    art_height: f32,
     focused: bool,
 ) -> Vec<Node> {
     let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
@@ -3915,10 +4267,13 @@ fn procedural_art_nodes(
     let monogram = title.chars().next().unwrap_or('·').to_string();
     let home = context == "home-card";
     let favorite = context == "favorite-card";
+    let detail = context == "detail-art";
     let kind_y = if home {
         y + 166.0
     } else if favorite {
         y + 8.0
+    } else if detail {
+        y + art_height - 68.0
     } else {
         y + 142.0
     };
@@ -3926,6 +4281,8 @@ fn procedural_art_nodes(
         y + 210.0
     } else if favorite {
         y + 32.0
+    } else if detail {
+        y + art_height - 36.0
     } else {
         y + 176.0
     };
@@ -3939,9 +4296,17 @@ fn procedural_art_nodes(
         Role::Group,
         "",
         if favorite { art_x } else { x },
-        if favorite { y + 4.0 } else { y - 8.0 },
+        if favorite {
+            y + 4.0
+        } else if detail {
+            y
+        } else {
+            y - 8.0
+        },
         if favorite { art_width } else { width },
-        if home {
+        if detail {
+            art_height
+        } else if home {
             166.0
         } else if favorite {
             64.0
@@ -3959,7 +4324,9 @@ fn procedural_art_nodes(
             art_x,
             if favorite { y + 4.0 } else { y },
             art_width,
-            if home {
+            if detail {
+                art_height
+            } else if home {
                 158.0
             } else if favorite {
                 64.0
@@ -4031,24 +4398,19 @@ fn procedural_art_nodes(
     nodes
 }
 
-fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
+fn art_nodes(
+    item: &Item,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    art_height: f32,
+    focused: bool,
+) -> Vec<Node> {
     if let Some(art) = item.art.as_ref().filter(|_| !item.art_failed) {
         let home = context == "home-card";
         let favorite = context == "favorite-card";
-        let art_height = if home {
-            158.0
-        } else if favorite {
-            64.0
-        } else {
-            136.0
-        };
-        let kind_y = if home {
-            y + 166.0
-        } else if favorite {
-            y + 8.0
-        } else {
-            y + 142.0
-        };
+        let detail = context == "detail-art";
         let label_y = if home {
             y + 210.0
         } else if favorite {
@@ -4067,19 +4429,11 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
             "--state-rest-surface",
         );
         image = image.with_image(art.clone(), ImageFit::Cover);
+        if detail {
+            return vec![image];
+        }
         return vec![
             image,
-            node(
-                &format!("{context}-plate-{}", item.id),
-                Role::Text,
-                kind_text(&item.kind),
-                if favorite { x + 68.0 } else { x + 12.0 },
-                kind_y,
-                if favorite { width - 72.0 } else { width - 24.0 },
-                if favorite { 20.0 } else { 24.0 },
-                "--color-surface-scrim",
-            )
-            .with_type_role(TypeRole::Eyebrow),
             node(
                 &format!("{context}-title-{}", item.id),
                 Role::Text,
@@ -4088,13 +4442,7 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 label_y,
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                if context == "home-card" {
-                    "--color-surface-canvas"
-                } else if focused {
-                    "--state-focused-text"
-                } else {
-                    "--color-text-secondary"
-                },
+                "--color-text-primary",
             )
             .with_type_role(TypeRole::Label),
         ];
@@ -4107,8 +4455,71 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
         x,
         y,
         width,
+        art_height,
         focused,
     )
+}
+
+fn add_unavailable_card_cues(
+    nodes: &mut Vec<Node>,
+    item: &Item,
+    availability: &Availability,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    if matches!(availability, Availability::Ready) {
+        return;
+    }
+    let home = context == "home-card";
+    let art_height = if home { 158.0 } else { 136.0 };
+    let badge = match availability {
+        Availability::NeedsNetwork { .. } => "Network",
+        Availability::NeedsSetup { .. } => "Setup",
+        Availability::IncompatibleRuntime { .. } => "Update",
+        Availability::UnsupportedCapability { .. } => "Unavailable",
+        Availability::Ready => return,
+    };
+    nodes.push(node(
+        &format!("{context}-veil-{}", item.id),
+        Role::Group,
+        "",
+        x + 8.0,
+        y,
+        width - 16.0,
+        art_height,
+        "--state-unavailable-veil",
+    ));
+    nodes.push(
+        node(
+            &format!("{context}-badge-{}", item.id),
+            Role::Text,
+            &format!("⊘ {badge}"),
+            x + width - 98.0,
+            y + 10.0,
+            84.0,
+            28.0,
+            "--color-surface-scrim",
+        )
+        .with_type_role(TypeRole::Caption),
+    );
+    nodes.push(
+        node(
+            &format!("{context}-reason-{}", item.id),
+            Role::Text,
+            &format!(
+                "⊘ {}",
+                availability_text(availability, &Presentation::Ready)
+            ),
+            x,
+            if home { y + 238.0 } else { y + 204.0 },
+            width,
+            28.0,
+            "--color-text-muted",
+        )
+        .with_type_role(TypeRole::Caption),
+    );
 }
 
 #[cfg(test)]
@@ -6020,7 +6431,7 @@ mod tests {
         let joined = labels.join("\n");
         assert!(!joined.contains("provider.debug/raw-id"));
         assert!(!joined.contains("/srv/apps/private"));
-        assert_eq!(joined.matches(reason).count(), 1);
+        assert_eq!(joined.matches(reason).count(), 2);
         let availability = scene
             .root()
             .children
@@ -6038,6 +6449,207 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "detail-open")
         );
+    }
+
+    #[test]
+    fn details_controls_follow_variant_then_button_focus_order_and_dispatch_by_focus() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![
+                variant("native", "game-native", Availability::Ready),
+                variant(
+                    "cloud",
+                    "game-cloud",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                ),
+            ],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        assert_eq!(core.focus(), 0, "the ready variant row is first");
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus(), 1, "Play follows the variant rows");
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.focus(), 2, "Pin is beside Play");
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::ToggleFavorite {
+                item_id: "game".into(),
+                favorite: true,
+            }),
+            "activating Pin must never launch"
+        );
+        core.favorite_committed("game", true);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let pin = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "detail-pin")
+            .unwrap();
+        assert!(pin.state.focused);
+        assert_eq!(pin.action, Some(NodeAction::Activate));
+        assert_eq!(pin.accessible_label, "★ Unpin");
+
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.focus(), 1);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "game-native".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn details_subtrees_stay_in_surface_and_separate_regions_at_supported_widths() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn descendants<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(node);
+            for child in &node.children {
+                descendants(child, out);
+            }
+        }
+
+        let art_item = |with_real_art| {
+            let mut catalog_item = item(
+                "game",
+                "Game",
+                vec![variant("native", "game-native", Availability::Ready)],
+            );
+            if with_real_art {
+                catalog_item.presentation.icon_reference = Some("art/game.png".into());
+                catalog_item.presentation.icon_decodable = true;
+            }
+            catalog_item
+        };
+
+        for with_real_art in [true, false] {
+            let snapshot = CatalogSnapshot {
+                revision: 10,
+                observed_at_unix_seconds: 0,
+                provider_results: vec![],
+                items: vec![art_item(with_real_art)],
+                user_projection: UserProjection::default(),
+            };
+            let mut core =
+                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_| {
+                    with_real_art.then(|| Arc::from(&b"png"[..]))
+                });
+            core.authority_snapshot(false);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+
+            for width in [640.0, 1024.0, 1280.0] {
+                let scene = core
+                    .scene(
+                        SurfaceMetrics {
+                            logical_width: width,
+                            logical_height: 720.0,
+                            scale: 1.0,
+                            safe_insets: Default::default(),
+                            orientation: pf_scene::Orientation::Landscape,
+                        },
+                        "",
+                    )
+                    .unwrap();
+                let root = scene.root();
+                let cover = root
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == "detail-cover")
+                    .unwrap();
+                let footer = root
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == "prompts")
+                    .unwrap();
+                let column: Vec<_> = root
+                    .children
+                    .iter()
+                    .filter(|node| {
+                        node.id.as_str().starts_with("detail-")
+                            && node.id.as_str() != "detail-cover"
+                    })
+                    .collect();
+                let mut cover_tree = Vec::new();
+                descendants(cover, &mut cover_tree);
+                let mut column_tree = Vec::new();
+                for node in &column {
+                    descendants(node, &mut column_tree);
+                }
+                let mut footer_tree = Vec::new();
+                descendants(footer, &mut footer_tree);
+
+                for top_level in root
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("detail-"))
+                {
+                    let mut tree = Vec::new();
+                    descendants(top_level, &mut tree);
+                    for node in tree {
+                        assert!(node.bounds.x >= 0.0, "{}", node.id.as_str());
+                        assert!(node.bounds.y >= 0.0, "{}", node.id.as_str());
+                        assert!(
+                            node.bounds.x + node.bounds.width <= width,
+                            "{} overflows width {width}",
+                            node.id.as_str()
+                        );
+                        assert!(
+                            node.bounds.y + node.bounds.height <= 720.0,
+                            "{} overflows height at width {width}",
+                            node.id.as_str()
+                        );
+                    }
+                }
+
+                for (left_name, left, right_name, right) in [
+                    ("cover", &cover_tree, "column", &column_tree),
+                    ("cover", &cover_tree, "footer", &footer_tree),
+                    ("column", &column_tree, "footer", &footer_tree),
+                ] {
+                    for left_node in left {
+                        for right_node in right {
+                            assert!(
+                                !intersects(left_node.bounds, right_node.bounds),
+                                "{left_name} {} {:?} intersects {right_name} {} {:?} at width {width} ({})",
+                                left_node.id.as_str(),
+                                left_node.bounds,
+                                right_node.id.as_str(),
+                                right_node.bounds,
+                                if with_real_art {
+                                    "real art"
+                                } else {
+                                    "Edition Plate"
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -6320,9 +6932,12 @@ mod tests {
             )
         }));
         assert!(card.accessible_label.is_empty());
-        assert!(card.children.iter().any(|node| {
-            node.id.as_str() == "home-card-plate-plate-id" && node.accessible_label == "GAME"
-        }));
+        assert!(
+            !card
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "home-card-plate-plate-id")
+        );
         assert!(card.children.iter().all(|node| {
             !node.accessible_label.contains("art/paper-comet.png")
                 && !node.accessible_label.contains("Catalog art")
@@ -6661,12 +7276,7 @@ mod tests {
                 .contains("Home content scroll region")
         );
         for id in ["ridge", "tides"] {
-            for (part, role) in [
-                ("art", Role::Group),
-                ("initial", Role::Text),
-                ("plate", Role::Text),
-                ("title", Role::Text),
-            ] {
+            for (part, role) in [("art", Role::Group), ("title", Role::Text)] {
                 let node_id = format!("home-card-{part}-{id}");
                 assert_eq!(
                     find(scene.root(), &node_id).map(|node| node.role),
@@ -6677,10 +7287,6 @@ mod tests {
             assert_eq!(
                 find(scene.root(), &format!("home-card-plate-{id}")).map(|node| node.type_role),
                 Some(TypeRole::Eyebrow)
-            );
-            assert_eq!(
-                find(scene.root(), &format!("home-card-initial-{id}")).map(|node| node.type_role),
-                Some(TypeRole::Plate)
             );
             assert_eq!(
                 find(scene.root(), &format!("home-card-title-{id}"))
@@ -7141,6 +7747,238 @@ mod tests {
                     "chooser focus {focus} of {variant_count} must remain visible"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn quiet_console_mockup_cues_and_binding_derived_footers_are_emitted() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+        let unavailable = Availability::NeedsSetup {
+            reason: "choose a profile".into(),
+        };
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("installed", "ready", Availability::Ready)],
+            ),
+            item(
+                "setup",
+                "Setup Game",
+                vec![variant("stream", "setup", unavailable)],
+            ),
+        ]);
+        let desktop_bindings = || {
+            vec![
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Activate".into(),
+                    label: "Activate".into(),
+                    binding: "A".into(),
+                },
+                ControlBinding {
+                    context: "global".into(),
+                    action: "Back".into(),
+                    label: "Back".into(),
+                    binding: "B".into(),
+                },
+                ControlBinding {
+                    context: "shell".into(),
+                    action: "Quick".into(),
+                    label: "Quick".into(),
+                    binding: "X".into(),
+                },
+            ]
+        };
+        core.set_control_bindings(desktop_bindings());
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        core.go(Route::Library);
+        core.focus = 5;
+        let library = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(find(library.root(), "library-selected-underline-0").is_some());
+        assert!(find(library.root(), "room-library-underline").is_some());
+        assert!(find(library.root(), "room-keycap-left-border").is_some());
+        assert_eq!(
+            find(library.root(), "prompts").map(|node| node.accessible_label.as_str()),
+            Some("A Details")
+        );
+        let library_prompts = find(library.root(), "prompts")
+            .unwrap()
+            .accessible_label
+            .as_str();
+        assert!(!library_prompts.contains("SELECT"));
+        assert!(!library_prompts.contains('Y'));
+
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let ready = core.scene(metrics, "wrong caller footer").unwrap();
+        assert_eq!(
+            find(ready.root(), "detail-title").map(|node| node.style_token.as_str()),
+            Some("--color-surface-canvas")
+        );
+        assert!(find(ready.root(), "detail-ways-heading").is_some());
+        assert!(
+            find(ready.root(), "detail-open").is_some_and(|node| node.accessible_label == "▶ Play")
+        );
+        assert!(
+            find(ready.root(), "prompts")
+                .is_some_and(|node| node.accessible_label == "B Back · X Favorite · A Play")
+        );
+
+        let mut remapped = desktop_bindings();
+        remapped
+            .iter_mut()
+            .find(|binding| binding.action == "Quick")
+            .unwrap()
+            .binding = "START".into();
+        core.set_control_bindings(remapped);
+        let remapped = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(
+            find(remapped.root(), "prompts")
+                .is_some_and(|node| node.accessible_label.contains("START Favorite"))
+        );
+
+        core.set_control_bindings(
+            desktop_bindings()
+                .into_iter()
+                .filter(|binding| binding.action != "Quick")
+                .collect(),
+        );
+        let favorite_unbound = core.scene(metrics, "wrong caller footer").unwrap();
+        assert!(
+            find(favorite_unbound.root(), "prompts").is_some_and(|node| {
+                !node.accessible_label.contains("Favorite")
+                    && !node.accessible_label.contains("Unfavorite")
+            })
+        );
+
+        core.selected_item = Some(1);
+        let unavailable = core.scene(metrics, "wrong caller footer").unwrap();
+        let labels = format!("{unavailable:?}");
+        assert!(labels.contains("⊘ Stream"));
+        assert!(labels.contains("choose a profile"));
+        assert!(find(unavailable.root(), "detail-open").is_none());
+        assert!(find(unavailable.root(), "prompts").is_some_and(|node| {
+            !node.accessible_label.contains("Play") && !node.accessible_label.contains("Open")
+        }));
+    }
+
+    #[test]
+    fn emitted_text_on_light_surfaces_has_a_declared_paired_on_color() {
+        const PAIRS: [(&str, &str); 8] = [
+            ("--color-surface-canvas", "--color-text-primary"),
+            ("--color-surface-raised", "--state-rest-text"),
+            ("--color-surface-overlay", "--color-text-primary"),
+            ("--color-surface-sunken", "--color-text-primary"),
+            ("--state-rest-surface", "--state-rest-text"),
+            ("--color-focus-ring", "--color-text-inverse"),
+            ("--state-selected-accent", "--color-text-inverse"),
+            ("--color-surface-scrim", "--color-text-primary"),
+        ];
+        fn visit(node: &Node, theme: &Theme) {
+            if !node.accessible_label.is_empty()
+                && let Some((_, on_color)) = PAIRS
+                    .iter()
+                    .find(|(surface, _)| *surface == node.style_token)
+            {
+                assert!(
+                    theme.resolve(Base::Dusk, on_color).is_ok(),
+                    "{} has surface {} without resolvable paired {}",
+                    node.id.as_str(),
+                    node.style_token,
+                    on_color
+                );
+            }
+            for child in &node.children {
+                visit(child, theme);
+            }
+        }
+
+        let theme = pf_theme::flagship();
+        let mut core = fixture_core(vec![item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "stream",
+                "setup",
+                Availability::NeedsNetwork {
+                    reason: "connect to Wi-Fi".into(),
+                },
+            )],
+        )]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [Route::Home, Route::Library, Route::Search, Route::Details] {
+            core.selected_item = Some(0);
+            core.go(route);
+            visit(core.scene(metrics, "").unwrap().root(), &theme);
+        }
+    }
+
+    #[test]
+    fn chrome_keycaps_emit_border_fill_then_on_surface_label() {
+        let scene = core()
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let children = &scene.root().children;
+
+        for id in ["room-keycap-left", "room-keycap-right"] {
+            let border_id = format!("{id}-border");
+            let fill_id = format!("{id}-fill");
+            let border_index = children
+                .iter()
+                .position(|node| node.id.as_str() == border_id)
+                .unwrap();
+            let fill_index = children
+                .iter()
+                .position(|node| node.id.as_str() == fill_id)
+                .unwrap();
+            let label_index = children
+                .iter()
+                .position(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(border_index < fill_index && fill_index < label_index);
+
+            let border = &children[border_index];
+            let fill = &children[fill_index];
+            let label = &children[label_index];
+            assert_eq!(border.style_token, "--color-border-strong");
+            assert_eq!(fill.style_token, "--color-surface-raised");
+            assert_eq!(label.style_token, "--state-rest-text");
+            assert!((fill.bounds.x - border.bounds.x - 2.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.y - border.bounds.y - 2.0).abs() < f32::EPSILON);
+            assert!((border.bounds.width - fill.bounds.width - 4.0).abs() < f32::EPSILON);
+            assert!((border.bounds.height - fill.bounds.height - 4.0).abs() < f32::EPSILON);
+            assert!(label.bounds.x >= fill.bounds.x && label.bounds.y >= fill.bounds.y);
+            assert!(
+                label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
+                    && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
+            );
         }
     }
 

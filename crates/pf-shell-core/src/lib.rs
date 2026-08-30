@@ -2026,7 +2026,12 @@ impl ShellCore {
         let item = self.focused_item_index()?;
         let ready = self.ready_variants(item);
         match ready.len() {
-            0 => None,
+            0 => {
+                self.selected_item = Some(item);
+                self.remember_caller();
+                self.go(Route::Details);
+                None
+            }
             1 => self.launch_variant(item, ready[0]),
             _ => {
                 self.selected_item = Some(item);
@@ -2618,6 +2623,19 @@ impl ShellCore {
             footer.to_owned()
         };
         let footer = match self.route {
+            Route::Home => self
+                .focused_item_index()
+                .and_then(|item| {
+                    self.binding_prompt(
+                        "Activate",
+                        if self.ready_variants(item).is_empty() {
+                            "Details"
+                        } else {
+                            "Open"
+                        },
+                    )
+                })
+                .unwrap_or_default(),
             Route::Library => (self.focus >= 5)
                 .then(|| self.binding_prompt("Activate", "Details"))
                 .flatten()
@@ -8854,6 +8872,71 @@ mod tests {
             }),
             "the painted title must be a sibling of the art-bounded focus owner"
         );
+    }
+
+    #[test]
+    fn home_activation_and_footer_match_each_cards_availability() {
+        fn prompt(scene: &Scene) -> &str {
+            scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == "prompts")
+                .map(|node| node.accessible_label.as_str())
+                .unwrap()
+        }
+
+        let bindings = || {
+            vec![ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            }]
+        };
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.set_control_bindings(bindings());
+        assert_eq!(prompt(&core.scene(metrics, "").unwrap()), "A Open");
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "ready-app".into(),
+            }))
+        );
+
+        for availability in [
+            Availability::NeedsNetwork {
+                reason: "connect to Wi-Fi".into(),
+            },
+            Availability::NeedsSetup {
+                reason: "choose a profile".into(),
+            },
+        ] {
+            let mut core = fixture_core(vec![item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant("stream", "unavailable-app", availability)],
+            )]);
+            core.set_control_bindings(bindings());
+            assert_eq!(prompt(&core.scene(metrics, "").unwrap()), "A Details");
+            assert_eq!(core.action(&ShellAction::Activate), None);
+            assert_eq!(
+                (core.route(), core.selected_item),
+                (Route::Details, Some(0))
+            );
+        }
     }
 
     #[test]

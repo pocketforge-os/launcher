@@ -1711,6 +1711,33 @@ impl ShellCore {
                     self.focus -= 1;
                 }
             }
+            ShellAction::Move(AxisMove::Right) if self.route == Route::Details => {
+                let play = self.detail_play_focus();
+                if play.is_some_and(|play| self.focus == play) {
+                    self.focus += 1;
+                }
+            }
+            ShellAction::Move(AxisMove::Left) if self.route == Route::Details => {
+                if let Some(play) = self.detail_play_focus()
+                    && self.focus == play + 1
+                {
+                    self.focus = play;
+                }
+            }
+            ShellAction::Move(AxisMove::Down) if self.route == Route::Details => {
+                let variant_count = self.detail_focusable_variants().len();
+                if self.focus < variant_count {
+                    self.focus = (self.focus + 1).min(self.detail_pin_focus());
+                }
+            }
+            ShellAction::Move(AxisMove::Up) if self.route == Route::Details => {
+                let variant_count = self.detail_focusable_variants().len();
+                if variant_count > 0 && self.focus >= variant_count {
+                    self.focus = variant_count - 1;
+                } else {
+                    self.focus = self.focus.saturating_sub(1);
+                }
+            }
             ShellAction::Move(AxisMove::Down) if self.route == Route::Library && self.focus < 5 => {
                 if !self.library_items.is_empty() {
                     let geometry = library_geometry(self.library_surface_width.get());
@@ -1919,6 +1946,16 @@ impl ShellCore {
         }
         if self.route == Route::Details {
             let item = self.selected_item?;
+            let variants = self.detail_focusable_variants();
+            if let Some(&variant) = variants.get(self.focus) {
+                return self.launch_variant(item, variant);
+            }
+            if self.focus == self.detail_pin_focus() {
+                return Some(Effect::ToggleFavorite {
+                    item_id: self.items[item].id.clone(),
+                    favorite: !self.items[item].favorite,
+                });
+            }
             let ready = self.ready_variants(item);
             return match ready.len() {
                 0 => None,
@@ -1965,6 +2002,28 @@ impl ShellCore {
             .filter(|(_, variant)| matches!(variant.availability, Availability::Ready))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn detail_focusable_variants(&self) -> Vec<usize> {
+        self.selected_item
+            .and_then(|item| self.items.get(item))
+            .into_iter()
+            .flat_map(|item| item.variants.iter().take(2).enumerate())
+            .filter_map(|(index, variant)| {
+                matches!(variant.availability, Availability::Ready).then_some(index)
+            })
+            .collect()
+    }
+
+    fn detail_play_focus(&self) -> Option<usize> {
+        self.selected_item
+            .is_some_and(|item| !self.ready_variants(item).is_empty())
+            .then(|| self.detail_focusable_variants().len())
+    }
+
+    fn detail_pin_focus(&self) -> usize {
+        self.detail_play_focus()
+            .map_or_else(|| self.detail_focusable_variants().len(), |play| play + 1)
     }
 
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
@@ -2046,7 +2105,7 @@ impl ShellCore {
             Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
             Route::Library => self.library_items.len() + 5,
             Route::Search => self.search_results.len().max(1),
-            Route::Details => 1,
+            Route::Details => self.detail_pin_focus() + 1,
             Route::VariantChooser => self
                 .selected_item
                 .map_or(0, |item| self.ready_variants(item).len())
@@ -2312,7 +2371,18 @@ impl ShellCore {
                 {
                     prompts.push(prompt);
                 }
-                if ready && let Some(prompt) = self.binding_prompt("Activate", "Play") {
+                let activate_label = if self.focus == self.detail_pin_focus() {
+                    self.selected_item
+                        .and_then(|index| self.items.get(index))
+                        .map(|item| if item.favorite { "Unpin" } else { "Pin" })
+                } else if ready {
+                    Some("Play")
+                } else {
+                    None
+                };
+                if let Some(prompt) =
+                    activate_label.and_then(|label| self.binding_prompt("Activate", label))
+                {
                     prompts.push(prompt);
                 }
                 prompts.join(" · ")
@@ -2900,20 +2970,41 @@ impl ShellCore {
                             availability_text(&variant.availability, &self.presentation)
                         )
                     };
+                    let variant_focus = item
+                        .variants
+                        .iter()
+                        .take(variant_index + 1)
+                        .filter(|variant| matches!(variant.availability, Availability::Ready))
+                        .count()
+                        .checked_sub(1);
+                    let focused = matches!(variant.availability, Availability::Ready)
+                        && variant_focus == Some(self.focus);
                     let mut variant_node = node(
                         &format!("detail-variant-{variant_index}"),
-                        Role::Text,
+                        if matches!(variant.availability, Availability::Ready) {
+                            Role::Button
+                        } else {
+                            Role::Text
+                        },
                         &variant_label,
                         400.0,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
                         w - 448.0,
                         variant_row_height,
-                        "--state-rest-surface",
+                        if focused {
+                            "--state-focused-ring"
+                        } else {
+                            "--state-rest-surface"
+                        },
                     );
+                    variant_node.state.focused = focused;
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
                     variant_node.state.selected = variant_index == 0;
+                    if matches!(variant.availability, Availability::Ready) {
+                        variant_node.action = Some(NodeAction::Activate);
+                    }
                     out.push(variant_node);
                 }
                 if item.variants.len() > visible_detail_variants {
@@ -3006,6 +3097,12 @@ impl ShellCore {
                     } else {
                         0.0
                     };
+                let compact = library_geometry(w).columns < 6;
+                let button_left = if compact { 48.0 } else { 400.0 };
+                let button_area_width = if compact { w - 96.0 } else { w - 448.0 };
+                let button_gap = 16.0;
+                let button_width = (button_area_width - button_gap) / 2.0;
+                let play_focus = self.detail_play_focus().unwrap_or(0);
                 let mut open = node(
                     "detail-open",
                     Role::Button,
@@ -3014,13 +3111,17 @@ impl ShellCore {
                     } else {
                         "Choose how to play"
                     },
-                    400.0,
+                    button_left,
                     variants_bottom.max(430.0),
-                    180.0,
+                    button_width,
                     54.0,
-                    "--color-focus-ring",
+                    if self.focus == play_focus {
+                        "--state-focused-ring"
+                    } else {
+                        "--state-rest-surface"
+                    },
                 );
-                open.state.focused = true;
+                open.state.focused = self.focus == play_focus;
                 open.action = Some(NodeAction::Activate);
                 out.push(open);
                 let pin_label = if item.favorite {
@@ -3028,16 +3129,23 @@ impl ShellCore {
                 } else {
                     "★ Pin to favorites"
                 };
-                out.push(node(
+                let mut pin = node(
                     "detail-pin",
                     Role::Button,
                     pin_label,
-                    596.0,
+                    button_left + button_width + button_gap,
                     variants_bottom.max(430.0),
-                    220.0,
+                    button_width,
                     54.0,
-                    "--state-rest-surface",
-                ));
+                    if self.focus == self.detail_pin_focus() {
+                        "--state-focused-ring"
+                    } else {
+                        "--state-rest-surface"
+                    },
+                );
+                pin.state.focused = self.focus == self.detail_pin_focus();
+                pin.action = Some(NodeAction::Activate);
+                out.push(pin);
             } else {
                 let mut unavailable = node(
                     "detail-unavailable",
@@ -3051,6 +3159,26 @@ impl ShellCore {
                 );
                 unavailable.state.unavailable = true;
                 out.push(unavailable);
+                let compact = library_geometry(w).columns < 6;
+                let button_left = if compact { 48.0 } else { 400.0 };
+                let button_width = if compact { w - 96.0 } else { w - 448.0 };
+                let mut pin = node(
+                    "detail-pin",
+                    Role::Button,
+                    if item.favorite {
+                        "★ Unpin"
+                    } else {
+                        "★ Pin to favorites"
+                    },
+                    button_left,
+                    580.0,
+                    button_width,
+                    54.0,
+                    "--state-focused-ring",
+                );
+                pin.state.focused = true;
+                pin.action = Some(NodeAction::Activate);
+                out.push(pin);
             }
         } else if self.route == Route::Settings {
             self.settings_nodes(out, w);
@@ -5731,6 +5859,110 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "detail-open")
         );
+    }
+
+    #[test]
+    fn details_controls_follow_variant_then_button_focus_order_and_dispatch_by_focus() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![
+                variant("native", "game-native", Availability::Ready),
+                variant(
+                    "cloud",
+                    "game-cloud",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                ),
+            ],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        assert_eq!(core.focus(), 0, "the ready variant row is first");
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(core.focus(), 1, "Play follows the variant rows");
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.focus(), 2, "Pin is beside Play");
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::ToggleFavorite {
+                item_id: "game".into(),
+                favorite: true,
+            }),
+            "activating Pin must never launch"
+        );
+        core.favorite_committed("game", true);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let pin = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "detail-pin")
+            .unwrap();
+        assert!(pin.state.focused);
+        assert_eq!(pin.action, Some(NodeAction::Activate));
+        assert_eq!(pin.accessible_label, "★ Unpin");
+
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.focus(), 1);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "game-native".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn details_controls_stay_inside_supported_surface_widths() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game-native", Availability::Ready)],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        for width in [640.0, 1024.0, 1280.0] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            for control in scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("detail-") && node.action.is_some())
+            {
+                assert!(control.bounds.x >= 0.0, "{}", control.id.as_str());
+                assert!(
+                    control.bounds.x + control.bounds.width <= width,
+                    "{} overflows {width}",
+                    control.id.as_str()
+                );
+            }
+        }
     }
 
     #[test]

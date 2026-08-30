@@ -28,7 +28,7 @@ use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::Theme;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
@@ -3123,12 +3123,22 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
     }
 }
 fn best_availability(item: &Item) -> &Availability {
+    static NO_VARIANTS: OnceLock<Availability> = OnceLock::new();
+
     item.variants
         .iter()
         .find(|variant| matches!(variant.availability, Availability::Ready))
         .or_else(|| item.variants.first())
         .map_or_else(
-            || panic!("catalog item {} has no variants", item.id),
+            || {
+                eprintln!(
+                    "pf-shell: catalog item {} has no variants; rendering it unavailable",
+                    item.id
+                );
+                NO_VARIANTS.get_or_init(|| Availability::UnsupportedCapability {
+                    capability: "catalog item has no variants".into(),
+                })
+            },
             |variant| &variant.availability,
         )
 }
@@ -3936,6 +3946,29 @@ mod tests {
         )]);
         assert_eq!(none.action(&ShellAction::Activate), None);
         assert_eq!(none.presentation(), &Presentation::Ready);
+    }
+
+    #[test]
+    fn item_without_variants_renders_as_unavailable() {
+        let mut core = fixture_core(vec![item("empty", "Empty Orbit", vec![])]);
+
+        let scene = format!(
+            "{:?}",
+            core.scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                ""
+            )
+            .unwrap()
+        );
+
+        assert!(scene.contains("Not supported on this device — catalog item has no variants"));
+        assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
     #[test]

@@ -3549,8 +3549,14 @@ impl ShellCore {
                         "--color-text-primary",
                     ));
                 }
-                if let Some(variant) = first_variant.filter(|_| !compact) {
-                    let facts_top = actions_bottom + 16.0;
+                let facts_height = 54.0;
+                let facts_top = actions_bottom + 16.0;
+                let footer_top = h - PROMPTS_AREA_HEIGHT;
+                if let Some(variant) = ready
+                    .first()
+                    .map(|&variant_index| &item.variants[variant_index])
+                    .filter(|_| !compact && facts_top + facts_height <= footer_top)
+                {
                     let facts = [
                         (
                             "developer",
@@ -6739,6 +6745,80 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "detail-open")
         );
+        assert!(
+            !scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str().starts_with("detail-fact-")),
+            "unavailable variants must not produce installed or offline claims"
+        );
+    }
+
+    #[test]
+    fn details_facts_come_from_a_ready_variant_and_stay_above_the_footer() {
+        let mut unavailable = variant(
+            "setup",
+            "setup-app",
+            Availability::NeedsSetup {
+                reason: "choose a profile once".into(),
+            },
+        );
+        unavailable.provenance.provider_id = "unavailable-provider".into();
+        unavailable.provenance.app_version = Some("0.1".into());
+        let mut ready = variant("native", "ready-app", Availability::Ready);
+        ready.provenance.provider_id = "ready-provider".into();
+        ready.provenance.app_version = Some("2.4".into());
+        let mut core = fixture_core(vec![item("mixed", "Mixed Game", vec![unavailable, ready])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let fact = |id: &str| {
+            root.children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap()
+        };
+        assert_eq!(
+            fact("detail-fact-developer").accessible_label,
+            "Ready provider"
+        );
+        assert_eq!(
+            fact("detail-fact-installed").accessible_label,
+            "Version 2.4"
+        );
+        assert_eq!(fact("detail-fact-offline").accessible_label, "Yes");
+        let footer_top = root
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "prompt-bar")
+            .unwrap()
+            .bounds
+            .y;
+        for node in root
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("detail-fact-"))
+        {
+            assert!(
+                node.bounds.y + node.bounds.height <= footer_top,
+                "{} crosses the footer",
+                node.id.as_str()
+            );
+        }
     }
 
     #[test]

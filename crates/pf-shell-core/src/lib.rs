@@ -2000,7 +2000,7 @@ impl ShellCore {
             .find(|n| n.state.focused)
             .map_or("quiet-console", |n| n.id.as_str())
             .to_owned();
-        let mut root = Node::new(
+        let root = Node::new(
             NodeId::new("quiet-console").unwrap(),
             Role::Group,
             "",
@@ -2008,9 +2008,6 @@ impl ShellCore {
             "--color-surface-canvas",
         )
         .with_children(children);
-        // The retained scene carries the selected base as state so a preference change is
-        // immediately visible to the current raster backend as well as to token-aware hosts.
-        root.state.selected = self.theme_base() == Base::HighContrast;
         Some(
             Scene::new(root, NodeId::new(focus_id).unwrap())
                 .expect("one deterministic focus owner"),
@@ -4110,11 +4107,10 @@ mod tests {
     }
 
     #[test]
-    fn high_contrast_selects_theme_base_and_changes_scene_palette_state() {
+    fn high_contrast_selects_theme_base() {
         let mut core = core();
         core.load_preferences(&preferences(true), true).unwrap();
         assert_eq!(core.theme_base(), Base::Dark);
-        assert!(!settings_scene(&core).root().state.selected);
 
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("highContrast".into()),
@@ -4123,7 +4119,6 @@ mod tests {
             applied: true,
         });
         assert_eq!(core.theme_base(), Base::HighContrast);
-        assert!(settings_scene(&core).root().state.selected);
         assert_ne!(
             pf_theme::flagship()
                 .resolve(Base::Dark, "--color-surface-canvas")

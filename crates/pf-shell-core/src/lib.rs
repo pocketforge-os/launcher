@@ -2535,7 +2535,7 @@ impl ShellCore {
                 };
                 let mut card = node(
                     &format!("library-item-{}", item.id),
-                    Role::Group,
+                    Role::ListItem,
                     &card_label,
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + (row as f32 - first_visible_row as f32) * row_height,
@@ -5832,6 +5832,50 @@ mod tests {
             }
         ));
         assert_eq!(corrupt, corrupt_core.art_treatment("plate-id").unwrap());
+    }
+
+    #[test]
+    fn emitted_routes_never_make_structural_groups_actionable() {
+        fn assert_no_actionable_group(node: &Node) {
+            assert!(
+                node.role != Role::Group || node.action.is_none(),
+                "structural group {} must not carry an action",
+                node.id.as_str()
+            );
+            for child in &node.children {
+                assert_no_actionable_group(child);
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "many",
+            "Many Moons",
+            vec![
+                variant("native", "many-native", Availability::Ready),
+                variant("stream", "many-stream", Availability::Ready),
+            ],
+        )]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        for route in [
+            Route::Home,
+            Route::Library,
+            Route::Search,
+            Route::Details,
+            Route::VariantChooser,
+            Route::Settings,
+            Route::Quick,
+        ] {
+            core.go(route);
+            let scene = core.scene(metrics, "").unwrap();
+            assert_no_actionable_group(scene.root());
+        }
     }
 
     #[test]

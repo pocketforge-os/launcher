@@ -872,7 +872,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
         Err(error) => return Err(format!("session: {error:?}")),
     }
-    present(host, core, &activate)?;
+    present_interactive(host, core, &activate)?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     loop {
         let before = redraw_state(core);
@@ -883,7 +883,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 return Ok(());
             }
             if before != redraw_state(core) {
-                present(host, core, &activate)?;
+                present_interactive(host, core, &activate)?;
             }
             continue;
         };
@@ -895,7 +895,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 Ok(result) => {
                     core.session_backend_reachable();
                     core.launch_result(&result);
-                    present(host, core, &activate)?;
+                    present_interactive(host, core, &activate)?;
                     drive_socket_session(core, &mut session)?;
                 }
                 Err(SessionError::BackendUnavailable) => core.session_backend_unavailable(),
@@ -1006,7 +1006,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         if before != redraw_state(core) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            present(host, core, &activate)?;
+            present_interactive(host, core, &activate)?;
         }
     }
 }
@@ -1640,17 +1640,39 @@ fn present(
     core: &mut ShellCore,
     prompt: &str,
 ) -> Result<(), String> {
+    let scene = core
+        .scene(host.metrics(), prompt)
+        .ok_or("shell has no frame")?;
+    present_scene(host, core, prompt, &scene)
+}
+
+fn present_interactive(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+) -> Result<bool, String> {
+    let Some(scene) = core.scene(host.metrics(), prompt) else {
+        // While a session is active, the foreground app owns presentation. Keep
+        // polling input, authority events, and host lifecycle without committing
+        // a replacement shell frame.
+        return Ok(false);
+    };
+    present_scene(host, core, prompt, &scene)?;
+    Ok(true)
+}
+
+fn present_scene(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+    scene: &pf_scene::Scene,
+) -> Result<(), String> {
     host.set_palette(if core.high_contrast() {
         Palette::high_contrast()
     } else {
         Palette::standard()
     });
-    host.present(
-        core.scene(host.metrics(), prompt)
-            .as_ref()
-            .ok_or("shell has no frame")?,
-    )
-    .map_err(|e| e.to_string())?;
+    host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
         .render_notes()
         .is_some_and(|notes| core.reject_art_sources(failed_source_ids(notes)));
@@ -1948,6 +1970,26 @@ mod durable_tests {
                 .unwrap(),
             ActionPoll::Closed
         );
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let Effect::Launch(_) = core.action(&ShellAction::Activate).unwrap() else {
+            panic!("ready fixture must launch");
+        };
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "closed-session".into(),
+        });
+        core.session_event(&SessionEvent::Observed(ObservedSessionState::Running));
+        let mut frame_host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        assert!(!present_interactive(&mut frame_host, &mut core, "A Open").unwrap());
     }
 
     #[cfg(feature = "wayland")]
@@ -2563,6 +2605,64 @@ exec="./launch"
         let mut host = OffscreenHost::new(metrics);
         present(&mut host, &mut core, "A Open").unwrap();
         assert!(host.frame().is_some());
+    }
+
+    #[test]
+    fn interactive_session_gap_skips_present_but_safe_return_and_receipt_continue() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let mut host = OffscreenHost::new(metrics);
+        assert!(present_interactive(&mut host, &mut core, "A Open").unwrap());
+        let last_frame = host.frame().unwrap().rgba.clone();
+
+        let Effect::Launch(request) = core.action(&ShellAction::Activate).unwrap() else {
+            panic!("ready fixture must launch");
+        };
+        let mut session = pf_ports::FakeSession::new(
+            Ok(LaunchResult::Accepted {
+                session_id: "interactive-session".into(),
+            }),
+            [
+                pf_ports::ScriptedSession::Event(SessionEvent::Observed(
+                    ObservedSessionState::Running,
+                )),
+                pf_ports::ScriptedSession::Idle,
+                pf_ports::ScriptedSession::Event(SessionEvent::Observed(
+                    ObservedSessionState::ObservationComplete,
+                )),
+                pf_ports::ScriptedSession::Event(SessionEvent::Terminal(
+                    TerminalReceipt::Returned {
+                        session_id: "interactive-session".into(),
+                    },
+                )),
+                pf_ports::ScriptedSession::Idle,
+            ],
+        );
+        core.launch_result(&session.launch(request).unwrap());
+        core.drive_session(&mut session).unwrap();
+
+        assert!(!present_interactive(&mut host, &mut core, "A Open").unwrap());
+        assert_eq!(host.frame().unwrap().rgba, last_frame);
+        assert_eq!(
+            core.action(&ShellAction::Custom("SafeReturn".into())),
+            Some(Effect::SafeReturn),
+            "synthetic S must still reach the safe-return submission path"
+        );
+
+        let in_session_revision = core.revision();
+        core.drive_session(&mut session).unwrap();
+        assert!(core.revision() > in_session_revision);
+        assert!(present_interactive(&mut host, &mut core, "A Open").unwrap());
+        assert_ne!(host.frame().unwrap().rgba, last_frame);
     }
 
     #[test]

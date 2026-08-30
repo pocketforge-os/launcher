@@ -3033,7 +3033,7 @@ impl ShellCore {
                 let chip_height = 36.0;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
                 let label_width = label_text_width(&label) + 20.0;
-                let mut chip = semantic_only(node(
+                let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
                     &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
@@ -3046,7 +3046,7 @@ impl ShellCore {
                     } else {
                         "--state-rest-surface"
                     },
-                ));
+                );
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
@@ -3124,7 +3124,7 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
-                let mut card = semantic_only(node(
+                let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
                     &format!(
@@ -3139,7 +3139,7 @@ impl ShellCore {
                     geometry.card_width - 16.0,
                     136.0,
                     "--color-surface-canvas",
-                ));
+                );
                 card.state.focused = self.focus == i + 5;
                 card.state.unavailable = !matches!(availability, Availability::Ready);
                 card.action = Some(NodeAction::Activate);
@@ -3835,7 +3835,7 @@ impl ShellCore {
                     SettingsRoom::Network => "Network",
                     SettingsRoom::System => "System",
                 };
-                let mut nav = semantic_only(node(
+                let mut nav = node(
                     &format!("settings-nav-{}", name.to_ascii_lowercase()),
                     Role::Button,
                     name,
@@ -3848,7 +3848,7 @@ impl ShellCore {
                     } else {
                         "--color-surface-raised"
                     },
-                ));
+                );
                 nav.state.focused = focused;
                 nav.state.selected = selected;
                 nav.action = Some(NodeAction::Activate);
@@ -3935,7 +3935,7 @@ impl ShellCore {
         for (index, row) in rows.drain(..).enumerate().skip(first).take(capacity) {
             let interactive = row.action.is_some();
             let focused = self.settings_row_focused && self.focus == index && interactive;
-            let mut scene_row = semantic_only(node(
+            let mut scene_row = node(
                 &format!("settings-row-{}", row.id),
                 if interactive {
                     Role::Button
@@ -3954,7 +3954,7 @@ impl ShellCore {
                 } else {
                     "--state-disabled-border"
                 },
-            ));
+            );
             scene_row.state.focused = focused;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
@@ -5300,18 +5300,6 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         label,
         Bounds::new(x, y, w, h),
         token,
-    )
-}
-
-fn semantic_only(node: Node) -> Node {
-    const TRANSPARENT_PNG: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 218, 99, 252, 207, 192, 80, 15,
-        0, 5, 129, 1, 255, 226, 237, 217, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-    ];
-    node.with_image(
-        ImageSource::new("semantic-only-transparent-pixel", TRANSPARENT_PNG),
-        ImageFit::Cover,
     )
 }
 

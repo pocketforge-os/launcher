@@ -2422,6 +2422,30 @@ mod durable_tests {
     }
 
     #[test]
+    fn library_and_settings_evidence_routes_render_without_notes() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for (route, room_moves) in [("Library", 1), ("Settings", 2)] {
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            for _ in 0..room_moves {
+                core.action(&ShellAction::Custom("Room.next".into()));
+            }
+            let scene = core.scene(metrics, "").unwrap();
+            let mut host = OffscreenHost::new(metrics);
+            host.present(&scene).unwrap();
+            assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");
+        }
+    }
+
+    #[test]
     fn fixture_library_has_six_distinct_scenic_ready_covers_and_honest_hero_fact() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();

@@ -36,6 +36,45 @@ use std::time::{Duration, SystemTime};
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 8;
+const LIBRARY_SIDE_MARGIN: f32 = 48.0;
+const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
+const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
+const CHIP_HORIZONTAL_PADDING: f32 = 24.0;
+const CHIP_COUNT_GAP: f32 = 8.0;
+
+// The flagship label role is 14 px Manrope semibold. This conservative advance keeps
+// scene geometry renderer-independent while reserving enough room for its widest glyphs.
+fn label_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 8.0
+}
+
+fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
+    label_text_width(label)
+        + CHIP_HORIZONTAL_PADDING
+        + count.map_or(0.0, |value| {
+            CHIP_COUNT_GAP + label_text_width(&value.to_string())
+        })
+}
+
+fn ready_variant_label(variant: &Variant) -> String {
+    let runtime = variant.provenance.runtime_family.to_ascii_lowercase();
+    if runtime
+        .split(['/', '-', '_', '.'])
+        .any(|part| part == "stream")
+        || runtime.contains("streaming")
+    {
+        "Stream from your PC".to_owned()
+    } else if runtime
+        .split(['/', '-', '_', '.'])
+        .any(|part| part == "native")
+    {
+        "Installed on this device".to_owned()
+    } else if variant.provenance.runtime_family.is_empty() {
+        humanize_identifier(&variant.id)
+    } else {
+        humanize_identifier(&variant.provenance.runtime_family)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LibraryGeometry {
@@ -2852,7 +2891,28 @@ impl ShellCore {
                 .count();
             let other = self.items.len() - games;
             let compact_toolbar = geometry.columns < 6;
-            let search_width = if compact_toolbar { w - 96.0 } else { w * 0.55 };
+            let filters = [
+                ("Recent".to_owned(), None, LibraryFilter::Recent),
+                ("A–Z".to_owned(), None, LibraryFilter::Alphabetical),
+                ("Games".to_owned(), Some(games), LibraryFilter::Games),
+                (
+                    "Everything else".to_owned(),
+                    Some(other),
+                    LibraryFilter::EverythingElse,
+                ),
+            ];
+            let chip_widths = filters
+                .iter()
+                .map(|(label, count, _)| library_chip_width(label, *count))
+                .collect::<Vec<_>>();
+            let required_toolbar_width = chip_widths.iter().sum::<f32>()
+                + (geometry.toolbar_columns - 1) as f32 * geometry.card_gap;
+            let search_width = if compact_toolbar {
+                w - 2.0 * LIBRARY_SIDE_MARGIN
+            } else {
+                (w - 2.0 * LIBRARY_SIDE_MARGIN - LIBRARY_TOOLBAR_GAP - required_toolbar_width)
+                    .max(LIBRARY_SEARCH_MIN_WIDTH)
+            };
             let mut search = node(
                 "library-search",
                 Role::Button,
@@ -2870,23 +2930,11 @@ impl ShellCore {
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
             out.push(search);
-            for (index, (label, count, filter)) in [
-                ("Recent".to_owned(), None, LibraryFilter::Recent),
-                ("A–Z".to_owned(), None, LibraryFilter::Alphabetical),
-                ("Games".to_owned(), Some(games), LibraryFilter::Games),
-                (
-                    "Everything else".to_owned(),
-                    Some(other),
-                    LibraryFilter::EverythingElse,
-                ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (index, (label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
                     48.0
                 } else {
-                    search_width + 64.0
+                    LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
                 let toolbar_top = if compact_toolbar { 180.0 } else { 112.0 };
                 let toolbar_width = if compact_toolbar {
@@ -2894,19 +2942,30 @@ impl ShellCore {
                 } else {
                     w - toolbar_left - 48.0
                 };
-                let chip_width = (toolbar_width
-                    - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
-                    / geometry.toolbar_columns as f32;
+                let chip_width = if compact_toolbar {
+                    (toolbar_width - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
+                        / geometry.toolbar_columns as f32
+                } else {
+                    chip_widths[index]
+                };
                 let chip_column = index % geometry.toolbar_columns;
                 let chip_row = index / geometry.toolbar_columns;
+                let chip_x = if compact_toolbar {
+                    toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap)
+                } else {
+                    toolbar_left
+                        + chip_widths[..index].iter().sum::<f32>()
+                        + index as f32 * geometry.card_gap
+                };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let chip_height = 36.0;
+                let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
                     "",
-                    toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap),
+                    chip_x,
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
                     chip_height,
@@ -2919,35 +2978,43 @@ impl ShellCore {
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
-                chip.children.push(node(
-                    &format!("library-filter-{index}-label"),
-                    Role::Text,
-                    &label,
-                    chip.bounds.x + 12.0,
-                    chip.bounds.y + 5.0,
-                    chip_width - 36.0,
-                    26.0,
-                    if focused {
-                        "--color-text-inverse"
-                    } else {
-                        "--state-rest-text"
-                    },
-                ));
-                if let Some(count) = count {
-                    chip.children.push(node(
-                        &format!("library-filter-{index}-count"),
+                chip.children.push(
+                    node(
+                        &format!("library-filter-{index}-label"),
                         Role::Text,
-                        &count.to_string(),
-                        chip.bounds.x + chip_width - 30.0,
+                        &label,
+                        chip.bounds.x + 12.0,
                         chip.bounds.y + 5.0,
-                        22.0,
+                        chip_width
+                            - CHIP_HORIZONTAL_PADDING
+                            - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_width),
                         26.0,
                         if focused {
                             "--color-text-inverse"
                         } else {
-                            "--color-text-muted"
+                            "--state-rest-text"
                         },
-                    ));
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
+                if let Some(count) = count {
+                    chip.children.push(
+                        node(
+                            &format!("library-filter-{index}-count"),
+                            Role::Text,
+                            &count.to_string(),
+                            chip.bounds.x + chip_width - 12.0 - count_width,
+                            chip.bounds.y + 5.0,
+                            count_width,
+                            26.0,
+                            if focused {
+                                "--color-text-inverse"
+                            } else {
+                                "--color-text-muted"
+                            },
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                 }
                 out.push(chip);
                 if active {
@@ -2955,7 +3022,7 @@ impl ShellCore {
                         &format!("library-selected-underline-{index}"),
                         Role::Group,
                         "",
-                        toolbar_left + chip_column as f32 * (chip_width + geometry.card_gap) + 12.0,
+                        chip_x + 12.0,
                         toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
                         chip_width - 24.0,
                         3.0,
@@ -3244,7 +3311,7 @@ impl ShellCore {
                     let (variant_name, variant_sub) =
                         if matches!(variant.availability, Availability::Ready) {
                             (
-                                "Installed on this device".to_owned(),
+                                ready_variant_label(variant),
                                 format!(
                                     "{}{} · works offline",
                                     variant.provenance.app_version.as_deref().map_or_else(
@@ -6150,6 +6217,12 @@ mod tests {
         core
     }
 
+    fn node_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+        (node.id.as_str() == id)
+            .then_some(node)
+            .or_else(|| node.children.iter().find_map(|child| node_by_id(child, id)))
+    }
+
     #[test]
     fn five_hundred_items_filter_deterministically_and_search_opens_details_only() {
         let items = (0..500)
@@ -6297,6 +6370,39 @@ mod tests {
                     chip.id.as_str()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn widest_library_chip_label_fits_at_desktop_breakpoints() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+
+        for width in [1100.0, 1280.0] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let label = node_by_id(scene.root(), "library-filter-3-label").unwrap();
+            assert_eq!(label.accessible_label, "Everything else");
+            assert!(
+                label.bounds.width >= label_text_width(&label.accessible_label),
+                "Everything else needs {}px but receives {}px at {width}px",
+                label_text_width(&label.accessible_label),
+                label.bounds.width
+            );
         }
     }
 
@@ -7145,6 +7251,38 @@ mod tests {
         )]);
         assert_eq!(none.action(&ShellAction::Activate), None);
         assert_eq!(none.presentation(), &Presentation::Ready);
+    }
+
+    #[test]
+    fn ready_native_and_stream_variants_have_distinct_human_labels() {
+        let native = variant("native", "many-native", Availability::Ready);
+        let mut stream = variant("stream", "many-stream", Availability::Ready);
+        stream.provenance.runtime_family = "pocketforge/stream".into();
+        let mut core = fixture_core(vec![item("many", "Many Moons", vec![native, stream])]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let native_label = &node_by_id(scene.root(), "detail-variant-0-name")
+            .unwrap()
+            .accessible_label;
+        let stream_label = &node_by_id(scene.root(), "detail-variant-1-name")
+            .unwrap()
+            .accessible_label;
+        assert_eq!(native_label, "Installed on this device");
+        assert_eq!(stream_label, "Stream from your PC");
+        assert_ne!(native_label, stream_label);
     }
 
     #[test]

@@ -2272,23 +2272,6 @@ impl ShellCore {
                     )
                     | ("room-settings", Route::Settings)
             );
-            children.push(
-                node(
-                    id,
-                    Role::Text,
-                    label,
-                    x,
-                    16.0,
-                    width,
-                    32.0,
-                    "--color-surface-raised",
-                )
-                .with_type_role(if keycap {
-                    TypeRole::Caption
-                } else {
-                    TypeRole::Label
-                }),
-            );
             if keycap {
                 children.push(node(
                     &format!("{id}-border"),
@@ -2300,17 +2283,55 @@ impl ShellCore {
                     34.0,
                     "--color-border-strong",
                 ));
-            } else if selected {
                 children.push(node(
-                    &format!("{id}-underline"),
+                    &format!("{id}-fill"),
                     Role::Group,
                     "",
-                    x,
-                    49.0,
-                    width,
-                    3.0,
-                    "--state-selected-accent",
+                    x - 2.0,
+                    14.0,
+                    width + 4.0,
+                    30.0,
+                    "--color-surface-raised",
                 ));
+                children.push(
+                    node(
+                        id,
+                        Role::Text,
+                        label,
+                        x,
+                        16.0,
+                        width,
+                        26.0,
+                        "--state-rest-text",
+                    )
+                    .with_type_role(TypeRole::Caption),
+                );
+            } else {
+                children.push(
+                    node(
+                        id,
+                        Role::Text,
+                        label,
+                        x,
+                        16.0,
+                        width,
+                        32.0,
+                        "--color-surface-raised",
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
+                if selected {
+                    children.push(node(
+                        &format!("{id}-underline"),
+                        Role::Group,
+                        "",
+                        x,
+                        49.0,
+                        width,
+                        3.0,
+                        "--state-selected-accent",
+                    ));
+                }
             }
         }
         if let Some(status) = self.session_status() {
@@ -7395,6 +7416,57 @@ mod tests {
             core.selected_item = Some(0);
             core.go(route);
             visit(core.scene(metrics, "").unwrap().root(), &theme);
+        }
+    }
+
+    #[test]
+    fn chrome_keycaps_emit_border_fill_then_on_surface_label() {
+        let scene = core()
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let children = &scene.root().children;
+
+        for id in ["room-keycap-left", "room-keycap-right"] {
+            let border_id = format!("{id}-border");
+            let fill_id = format!("{id}-fill");
+            let border_index = children
+                .iter()
+                .position(|node| node.id.as_str() == border_id)
+                .unwrap();
+            let fill_index = children
+                .iter()
+                .position(|node| node.id.as_str() == fill_id)
+                .unwrap();
+            let label_index = children
+                .iter()
+                .position(|node| node.id.as_str() == id)
+                .unwrap();
+            assert!(border_index < fill_index && fill_index < label_index);
+
+            let border = &children[border_index];
+            let fill = &children[fill_index];
+            let label = &children[label_index];
+            assert_eq!(border.style_token, "--color-border-strong");
+            assert_eq!(fill.style_token, "--color-surface-raised");
+            assert_eq!(label.style_token, "--state-rest-text");
+            assert!((fill.bounds.x - border.bounds.x - 2.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.y - border.bounds.y - 2.0).abs() < f32::EPSILON);
+            assert!((border.bounds.width - fill.bounds.width - 4.0).abs() < f32::EPSILON);
+            assert!((border.bounds.height - fill.bounds.height - 4.0).abs() < f32::EPSILON);
+            assert!(label.bounds.x >= fill.bounds.x && label.bounds.y >= fill.bounds.y);
+            assert!(
+                label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
+                    && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
+            );
         }
     }
 

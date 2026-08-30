@@ -1,6 +1,17 @@
 #!/bin/sh
 set -eu
 
+if [ "${1:-}" = "--supervise" ]; then
+    if [ "$#" -ne 2 ]; then
+        printf 'usage: %s --supervise STATE_DIR\n' "$0" >&2
+        exit 2
+    fi
+    repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+    exec "$repo_dir/target/debug/pf-shell" \
+        --desktop-sim-supervise "$2/authority" \
+        --session-socket "$2/session-authority.sock"
+fi
+
 step="initialization"
 work_dir=""
 authority_pid=""
@@ -29,7 +40,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap finish EXIT
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pf-desktop-soak.XXXXXX")
 runtime_rev=$(sed -n 's/.*runtime\.git", rev = "\([0-9a-f][0-9a-f]*\)".*/\1/p' "$repo_dir/Cargo.toml" | head -n 1)
 if [ -z "$runtime_rev" ]; then

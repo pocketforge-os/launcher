@@ -29,7 +29,19 @@ pf-session-authorityd --command-preset desktop-sim \
 ```
 
 In a second terminal, reuse the printed `desktop_state` value (or paste its path), then start the
-shell:
+desktop supervisor:
+
+```sh
+desktop_state=/tmp/pf-desktop.REPLACE_WITH_YOURS
+scripts/desktop-sim-soak.sh --supervise "$desktop_state"
+```
+
+Keep this process running for the whole interactive session; Ctrl-C stops it cleanly. It stands in
+for the real device's systemd supervisor: it observes the stub session starting and stopping, then
+reports those observations to the authority so its launch and restoration state machines can
+advance.
+
+In a third terminal, reuse the same `desktop_state` value, then start the shell:
 
 ```sh
 desktop_state=/tmp/pf-desktop.REPLACE_WITH_YOURS
@@ -44,9 +56,11 @@ the current context, and `S` is the safe-return binding. Closing the window quit
 
 Launching a catalog title does **not** run that title. Under `desktop-sim`, the authority creates
 an `authority/sessions/<session-id>.running` marker representing a stub foreground process. This
-preset exists only to exercise session lifecycle wiring. Press `S` to request return when a
-session is active, then close the window. Stop the authority with Ctrl-C. Remove the temporary
-directory after both processes have exited:
+preset exists only to exercise session lifecycle wiring. During an active session, press `S` to
+request graceful return. The stub session ends, the authority restores the shell, and the shell
+returns to the foreground after consuming its `Returned` receipt. You can launch and return again
+while the supervisor remains running. Then close the window and stop the supervisor and authority
+with Ctrl-C. Remove the temporary directory after all three processes have exited:
 
 ```sh
 find "$desktop_state" -depth -delete

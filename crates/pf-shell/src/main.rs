@@ -45,7 +45,7 @@ use std::{
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  Enter    Activate\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -519,6 +519,10 @@ fn main() -> Result<(), String> {
             Path::new(authority_state),
         );
     }
+    if let Some(authority_state) = value(&args, "--desktop-sim-supervise") {
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        return run_desktop_sim_supervisor(Path::new(session_socket), Path::new(authority_state));
+    }
     if args.iter().any(|a| a == "--settings-evidence") {
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
@@ -960,6 +964,75 @@ fn authority_rpc(socket: &Path, request: &pf_session_authority::RpcRequest) -> R
     }
 }
 
+fn observe_desktop_sim_running(socket: &Path) -> Result<(), String> {
+    use pf_session_authority::{RpcObservation, RpcRequest};
+
+    authority_rpc(
+        socket,
+        &RpcRequest::Observe {
+            observation: RpcObservation::SessionRunning,
+        },
+    )
+}
+
+fn observe_desktop_sim_return(socket: &Path) -> Result<(), String> {
+    use pf_session_authority::{RpcObservation, RpcRequest};
+
+    for observation in [
+        RpcObservation::SessionExitedCleanly,
+        RpcObservation::UnitInactive,
+        RpcObservation::TargetReleased,
+        RpcObservation::SelectedOwnerActive,
+        RpcObservation::PresentationAcknowledged,
+    ] {
+        authority_rpc(socket, &RpcRequest::Observe { observation })?;
+    }
+    Ok(())
+}
+
+fn desktop_sim_marker(authority_state: &Path) -> Result<Option<PathBuf>, String> {
+    let sessions = authority_state.join("sessions");
+    let entries = match fs::read_dir(&sessions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", sessions.display())),
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("read session marker: {error}"))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("running") {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn run_desktop_sim_supervisor(socket: &Path, authority_state: &Path) -> Result<(), String> {
+    let mut active_marker = None;
+    println!(
+        "SUPERVISOR watching state_dir={}",
+        authority_state.display()
+    );
+    loop {
+        let marker = desktop_sim_marker(authority_state)?;
+        match (&active_marker, marker) {
+            (None, Some(path)) => {
+                observe_desktop_sim_running(socket)?;
+                println!("SUPERVISOR running marker={}", path.display());
+                active_marker = Some(path);
+            }
+            (Some(path), None) => {
+                observe_desktop_sim_return(socket)?;
+                println!("SUPERVISOR returned marker={}", path.display());
+                active_marker = None;
+            }
+            _ => {}
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn run_desktop_sim_script(
     host: &mut OffscreenHost,
     core: &mut ShellCore,
@@ -967,8 +1040,6 @@ fn run_desktop_sim_script(
     socket: &Path,
     authority_state: &Path,
 ) -> Result<(), String> {
-    use pf_session_authority::{RpcObservation, RpcRequest};
-
     let mut session = SessionClient::new("pf-shell-desktop-soak", SocketTransport::connect(socket));
     wait_for_session_authority(&mut session, Duration::from_secs(3))
         .map_err(|error| format!("authority ready: {error:?}"))?;
@@ -1007,26 +1078,13 @@ fn run_desktop_sim_script(
     }
     println!("SOAK marker={}", marker.display());
 
-    authority_rpc(
-        socket,
-        &RpcRequest::Observe {
-            observation: RpcObservation::SessionRunning,
-        },
-    )?;
+    observe_desktop_sim_running(socket)?;
     drive_socket_session(core, &mut session)?;
 
     // The desktop preset's title is deliberately only a marker-backed stub. Script its clean
     // exit, then feed the same supervisor observations used by the real authority lifecycle.
     fs::remove_file(&marker).map_err(|error| format!("remove stub marker: {error}"))?;
-    for observation in [
-        RpcObservation::SessionExitedCleanly,
-        RpcObservation::UnitInactive,
-        RpcObservation::TargetReleased,
-        RpcObservation::SelectedOwnerActive,
-        RpcObservation::PresentationAcknowledged,
-    ] {
-        authority_rpc(socket, &RpcRequest::Observe { observation })?;
-    }
+    observe_desktop_sim_return(socket)?;
     drive_socket_session(core, &mut session)?;
     present(host, core, footer)?;
     if initial_revision == redraw_state(core) {

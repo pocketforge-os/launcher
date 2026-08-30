@@ -1183,11 +1183,29 @@ impl ShellCore {
         if let Some(id) = self.caller_focus_id.as_deref()
             && let Some(item_id) = id.strip_prefix("item-")
             && let Some(index) = self.items.iter().position(|item| item.id == item_id)
+            && let Some(focus) = match self.caller_route {
+                Route::Home => (index < self.focus_count()).then_some(index),
+                Route::Library => self
+                    .library_items
+                    .iter()
+                    .position(|&item| item == index)
+                    .map(|position| position + 4),
+                Route::Search => self.search_results.iter().position(|&item| item == index),
+                _ => None,
+            }
         {
-            self.focus = index.min(self.focus_count().saturating_sub(1));
+            self.focus = focus;
             return;
         }
-        self.focus = self.caller_focus.min(self.focus_count().saturating_sub(1));
+        self.focus = match self.caller_route {
+            Route::Library if !self.library_items.is_empty() => {
+                self.caller_focus.clamp(4, self.library_items.len() + 3)
+            }
+            Route::Search if !self.search_results.is_empty() => self
+                .caller_focus
+                .min(self.search_results.len().saturating_sub(1)),
+            _ => self.caller_focus.min(self.focus_count().saturating_sub(1)),
+        };
     }
     #[must_use]
     pub fn art_treatment(&self, item_id: &str) -> Option<ArtTreatment> {
@@ -4334,6 +4352,51 @@ mod tests {
             usize::from(n.state.focused) + n.children.iter().map(count).sum::<usize>()
         }
         assert_eq!(count(s.root()), 1);
+    }
+
+    #[test]
+    fn details_back_restores_library_items_in_route_local_space() {
+        for (focus, expected_item) in [(4, 0), (5, 1)] {
+            let mut c = core();
+            c.go(Route::Library);
+            c.focus = focus;
+            c.action(&ShellAction::Activate);
+            assert_eq!(
+                (c.route(), c.selected_item),
+                (Route::Details, Some(expected_item))
+            );
+
+            c.action(&ShellAction::Back);
+            assert_eq!((c.route(), c.focus()), (Route::Library, focus));
+        }
+    }
+
+    #[test]
+    fn details_back_restores_item_in_current_search_results() {
+        let mut c = core();
+        c.go(Route::Search);
+        c.search_results = vec![1, 0];
+        c.focus = 0;
+        c.action(&ShellAction::Activate);
+        assert_eq!((c.route(), c.selected_item), (Route::Details, Some(1)));
+
+        c.action(&ShellAction::Back);
+        assert_eq!((c.route(), c.focus()), (Route::Search, 0));
+        assert_eq!(c.focused_item_index(), Some(1));
+    }
+
+    #[test]
+    fn details_back_clamps_to_search_item_when_result_vanished() {
+        let mut c = core();
+        c.go(Route::Search);
+        c.focus = 1;
+        c.action(&ShellAction::Activate);
+        assert_eq!((c.route(), c.selected_item), (Route::Details, Some(1)));
+        c.search_results = vec![0];
+
+        c.action(&ShellAction::Back);
+        assert_eq!((c.route(), c.focus()), (Route::Search, 0));
+        assert_eq!(c.focused_item_index(), Some(0));
     }
     #[test]
     fn all_presentations_route_safe_return() {

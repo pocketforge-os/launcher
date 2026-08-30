@@ -32,6 +32,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 const TIMEZONES: [&str; 4] = ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"];
+const PROMPTS_AREA_HEIGHT: f32 = 48.0;
 
 fn action_label(action: &str) -> String {
     if action == "SafeReturn" {
@@ -1990,7 +1991,7 @@ impl ShellCore {
             Role::Text,
             &footer,
             w - 600.0,
-            h - 48.0,
+            h - PROMPTS_AREA_HEIGHT,
             552.0,
             32.0,
             "--color-text-secondary",
@@ -2046,6 +2047,12 @@ impl ShellCore {
             "--state-rest-text",
         ));
         if self.route == Route::Home {
+            // Home is composed as whole rows.  The footer is fixed, so scroll the
+            // row stack when focus enters a row below it and never emit a row that
+            // would only be partially visible.
+            let content_top = 64.0;
+            let content_bottom = h - PROMPTS_AREA_HEIGHT;
+            let route_heading = [out.pop().expect("Home route heading was just added")];
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
@@ -2058,7 +2065,7 @@ impl ShellCore {
                         .any(|variant| matches!(variant.availability, Availability::Ready))
                 })
                 .count();
-            out.extend([
+            let recent_row = [
                 node(
                     "hero-title",
                     Role::Heading,
@@ -2087,17 +2094,17 @@ impl ShellCore {
                         "--color-status-ready"
                     },
                 ),
-                node(
-                    "ready-now-label",
-                    Role::Heading,
-                    &format!("READY NOW · {ready_count}"),
-                    48.0,
-                    398.0,
-                    220.0,
-                    28.0,
-                    "--color-text-muted",
-                ),
-            ]);
+            ];
+            let mut ready_row = vec![node(
+                "ready-now-label",
+                Role::Heading,
+                &format!("READY NOW · {ready_count}"),
+                48.0,
+                398.0,
+                220.0,
+                28.0,
+                "--color-text-muted",
+            )];
             let gap = 24.0;
             let card_width = 158.0_f32.min((w - 96.0) / self.items.len().max(1) as f32 - gap);
             for (i, item) in self.items.iter().enumerate() {
@@ -2126,7 +2133,7 @@ impl ShellCore {
                     .iter()
                     .any(|variant| matches!(variant.availability, Availability::Ready));
                 n.children = art_nodes(item, "home-card", x, 438.0, card_width, i == self.focus);
-                out.push(n);
+                ready_row.push(n);
             }
             let favorite_items: Vec<_> = self
                 .items
@@ -2134,17 +2141,19 @@ impl ShellCore {
                 .enumerate()
                 .filter(|(_, item)| item.favorite)
                 .collect();
-            if !favorite_items.is_empty() {
-                out.push(node(
+            let favorites_row = if favorite_items.is_empty() {
+                None
+            } else {
+                let mut favorites_row = vec![node(
                     "favorites-label",
                     Role::Heading,
                     &format!("FAVORITES · {}", favorite_items.len()),
                     48.0,
-                    646.0,
+                    688.0,
                     220.0,
                     28.0,
                     "--color-text-muted",
-                ));
+                )];
                 for (shelf_index, (item_index, item)) in favorite_items.into_iter().enumerate() {
                     let x = 286.0 + shelf_index as f32 * 174.0;
                     let focused = self.focus == self.items.len() + shelf_index;
@@ -2153,17 +2162,30 @@ impl ShellCore {
                         Role::Button,
                         if item.has_real_art() { "" } else { &item.title },
                         x,
-                        638.0,
+                        680.0,
                         158.0,
                         72.0,
                         state_token(best_availability(item), focused),
                     );
                     card.state.focused = focused;
                     card.action = Some(NodeAction::Activate);
-                    card.children = art_nodes(item, "favorite-card", x, 640.0, 158.0, focused);
+                    card.children = art_nodes(item, "favorite-card", x, 682.0, 158.0, focused);
                     let _ = item_index;
-                    out.push(card);
+                    favorites_row.push(card);
                 }
+                Some(favorites_row)
+            };
+            let focused_row_bottom = [&recent_row[..], &ready_row[..]]
+                .into_iter()
+                .chain(favorites_row.as_deref())
+                .find(|row| row.iter().any(|node| node.state.focused))
+                .map_or(content_bottom, |row| home_row_vertical_extent(row).1);
+            let scroll_y = (focused_row_bottom - content_bottom).max(0.0);
+            for row in [&route_heading[..], &recent_row[..], &ready_row[..]] {
+                push_visible_home_row(out, row.to_vec(), scroll_y, content_top, content_bottom);
+            }
+            if let Some(row) = favorites_row {
+                push_visible_home_row(out, row, scroll_y, content_top, content_bottom);
             }
             if self.presentation == Presentation::ForcedClose {
                 out.push(node(
@@ -3261,8 +3283,23 @@ fn procedural_art_nodes(
     ][(hash % 6) as usize];
     let monogram = title.chars().next().unwrap_or('·').to_string();
     let home = context == "home-card";
-    let kind_y = if home { y + 166.0 } else { y + 142.0 };
-    let label_y = if home { y + 210.0 } else { y + 176.0 };
+    let favorite = context == "favorite-card";
+    let kind_y = if home {
+        y + 166.0
+    } else if favorite {
+        y + 8.0
+    } else {
+        y + 142.0
+    };
+    let label_y = if home {
+        y + 210.0
+    } else if favorite {
+        y + 32.0
+    } else {
+        y + 176.0
+    };
+    let art_x = if favorite { x + 4.0 } else { x + 8.0 };
+    let art_width = if favorite { 56.0 } else { width - 16.0 };
     let label_mask = node(
         // Card labels remain available to assistive consumers, but the current renderer
         // also paints them. Mask the full art region before painting the inset art so a
@@ -3270,10 +3307,16 @@ fn procedural_art_nodes(
         &format!("{context}-label-mask-{id}"),
         Role::Group,
         "",
-        x,
-        y - 8.0,
-        width,
-        if home { 166.0 } else { 144.0 },
+        if favorite { art_x } else { x },
+        if favorite { y + 4.0 } else { y - 8.0 },
+        if favorite { art_width } else { width },
+        if home {
+            166.0
+        } else if favorite {
+            64.0
+        } else {
+            144.0
+        },
         token,
     );
     let mut nodes = vec![
@@ -3282,30 +3325,40 @@ fn procedural_art_nodes(
             &format!("{context}-art-{id}"),
             Role::Group,
             "",
-            x + 8.0,
-            y,
-            width - 16.0,
-            if home { 158.0 } else { 136.0 },
+            art_x,
+            if favorite { y + 4.0 } else { y },
+            art_width,
+            if home {
+                158.0
+            } else if favorite {
+                64.0
+            } else {
+                136.0
+            },
             token,
         ),
         node(
             &format!("{context}-motif-{id}"),
             Role::Text,
             motif,
-            x + 8.0,
-            y,
-            width - 16.0,
-            60.0,
+            art_x,
+            if favorite { y + 4.0 } else { y },
+            art_width,
+            if favorite { 28.0 } else { 60.0 },
             token,
         ),
         node(
             &format!("{context}-initial-{id}"),
             Role::Text,
             &monogram,
-            x + width * 0.27,
-            y + 72.0,
-            width * 0.46,
-            58.0,
+            if favorite {
+                art_x + 16.0
+            } else {
+                x + width * 0.27
+            },
+            if favorite { y + 30.0 } else { y + 72.0 },
+            if favorite { 24.0 } else { width * 0.46 },
+            if favorite { 28.0 } else { 58.0 },
             token,
         ),
     ];
@@ -3314,10 +3367,10 @@ fn procedural_art_nodes(
             &format!("{context}-plate-{id}"),
             Role::Text,
             edition,
-            x + 12.0,
+            if favorite { x + 68.0 } else { x + 12.0 },
             kind_y,
-            width - 24.0,
-            24.0,
+            if favorite { width - 72.0 } else { width - 24.0 },
+            if favorite { 20.0 } else { 24.0 },
             token,
         ));
     }
@@ -3325,10 +3378,10 @@ fn procedural_art_nodes(
         &format!("{context}-title-{id}"),
         Role::Text,
         title,
-        x,
+        if favorite { x + 68.0 } else { x },
         label_y,
-        width,
-        28.0,
+        if favorite { width - 72.0 } else { width },
+        if favorite { 32.0 } else { 28.0 },
         if focused {
             "--state-focused-text"
         } else {
@@ -3341,16 +3394,35 @@ fn procedural_art_nodes(
 fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bool) -> Vec<Node> {
     if let Some(art) = item.art.as_ref().filter(|_| !item.art_failed) {
         let home = context == "home-card";
-        let art_height = if home { 158.0 } else { 136.0 };
-        let kind_y = if home { y + 166.0 } else { y + 142.0 };
-        let label_y = if home { y + 210.0 } else { y + 176.0 };
+        let favorite = context == "favorite-card";
+        let art_height = if home {
+            158.0
+        } else if favorite {
+            64.0
+        } else {
+            136.0
+        };
+        let kind_y = if home {
+            y + 166.0
+        } else if favorite {
+            y + 8.0
+        } else {
+            y + 142.0
+        };
+        let label_y = if home {
+            y + 210.0
+        } else if favorite {
+            y + 32.0
+        } else {
+            y + 176.0
+        };
         let mut image = node(
             &format!("{context}-art-{}", item.id),
             Role::Group,
             &format!("{} cover art", item.title),
-            x + 8.0,
-            y,
-            width - 16.0,
+            if favorite { x + 4.0 } else { x + 8.0 },
+            if favorite { y + 4.0 } else { y },
+            if favorite { 56.0 } else { width - 16.0 },
             art_height,
             "--state-rest-surface",
         );
@@ -3361,20 +3433,20 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
                 &format!("{context}-plate-{}", item.id),
                 Role::Text,
                 kind_text(&item.kind),
-                x + 12.0,
+                if favorite { x + 68.0 } else { x + 12.0 },
                 kind_y,
-                width - 24.0,
-                24.0,
+                if favorite { width - 72.0 } else { width - 24.0 },
+                if favorite { 20.0 } else { 24.0 },
                 "--state-rest-surface",
             ),
             node(
                 &format!("{context}-title-{}", item.id),
                 Role::Text,
                 &item.title,
-                x,
+                if favorite { x + 68.0 } else { x },
                 label_y,
-                width,
-                28.0,
+                if favorite { width - 72.0 } else { width },
+                if favorite { 32.0 } else { 28.0 },
                 if focused {
                     "--state-focused-text"
                 } else {
@@ -3393,6 +3465,47 @@ fn art_nodes(item: &Item, context: &str, x: f32, y: f32, width: f32, focused: bo
         width,
         focused,
     )
+}
+
+fn push_visible_home_row(
+    out: &mut Vec<Node>,
+    mut row: Vec<Node>,
+    scroll_y: f32,
+    content_top: f32,
+    content_bottom: f32,
+) {
+    fn translate(node: &mut Node, y: f32) {
+        node.bounds.y -= y;
+        for child in &mut node.children {
+            translate(child, y);
+        }
+    }
+
+    for node in &mut row {
+        translate(node, scroll_y);
+    }
+    let (top, bottom) = home_row_vertical_extent(&row);
+    if top >= content_top && bottom <= content_bottom {
+        out.extend(row);
+    }
+}
+
+fn home_row_vertical_extent(row: &[Node]) -> (f32, f32) {
+    fn node_vertical_extent(node: &Node) -> (f32, f32) {
+        node.children.iter().fold(
+            (node.bounds.y, node.bounds.y + node.bounds.height),
+            |(top, bottom), child| {
+                let (child_top, child_bottom) = node_vertical_extent(child);
+                (top.min(child_top), bottom.max(child_bottom))
+            },
+        )
+    }
+
+    row.iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(top, bottom), node| {
+            let (node_top, node_bottom) = node_vertical_extent(node);
+            (top.min(node_top), bottom.max(node_bottom))
+        })
 }
 
 fn availability_text(a: &Availability, p: &Presentation) -> String {
@@ -4864,6 +4977,7 @@ mod tests {
         };
         let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
+        core.focus = core.items.len();
         let home = core.scene(metrics, "").unwrap();
         let ids: Vec<_> = home
             .root()
@@ -4957,6 +5071,171 @@ mod tests {
             .find(|node| node.id.as_str() == "detail-availability-reason")
             .unwrap();
         assert!(reason.accessible_label.contains("choose a profile"));
+    }
+
+    #[test]
+    fn home_rows_scroll_and_clip_without_shelf_overlap() {
+        fn vertical_extent(node: &Node) -> (f32, f32) {
+            node.children.iter().fold(
+                (node.bounds.y, node.bounds.y + node.bounds.height),
+                |(top, bottom), child| {
+                    let (child_top, child_bottom) = vertical_extent(child);
+                    (top.min(child_top), bottom.max(child_bottom))
+                },
+            )
+        }
+
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn assert_tree_misses(node: &Node, footer: Bounds) {
+            assert!(
+                !intersects(node.bounds, footer),
+                "{} {:?} intersects footer {:?}",
+                node.id.as_str(),
+                node.bounds,
+                footer
+            );
+            for child in &node.children {
+                assert_tree_misses(child, footer);
+            }
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for item_count in 1..=3 {
+            for favorite_mask in 0..(1 << item_count) {
+                let all_items = [
+                    item(
+                        "ridge",
+                        "Ridgeline",
+                        vec![variant("native", "ridge", Availability::Ready)],
+                    ),
+                    item(
+                        "tides",
+                        "Hollow Tides",
+                        vec![variant("native", "tides", Availability::Ready)],
+                    ),
+                    item(
+                        "ember",
+                        "Ember Garden",
+                        vec![variant("native", "ember", Availability::Ready)],
+                    ),
+                ];
+                let items = all_items[..item_count].to_vec();
+                let mut favorite_item_ids: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| favorite_mask & (1 << index) != 0)
+                    .map(|(_, item)| item.id.clone())
+                    .collect();
+                favorite_item_ids.sort();
+                let snapshot = CatalogSnapshot {
+                    revision: 1,
+                    observed_at_unix_seconds: 0,
+                    provider_results: vec![],
+                    items,
+                    user_projection: UserProjection {
+                        favorite_item_ids,
+                        ..UserProjection::default()
+                    },
+                };
+                let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+                core.authority_snapshot(false);
+                let focus_count = core.focus_count();
+
+                for focus in 0..focus_count {
+                    core.focus = focus;
+                    let scene = core.scene(metrics, "").unwrap();
+                    let footer = scene
+                        .root()
+                        .children
+                        .iter()
+                        .find(|node| node.id.as_str() == "prompts")
+                        .unwrap();
+                    for node in scene
+                        .root()
+                        .children
+                        .iter()
+                        .filter(|node| node.id.as_str() != "prompts")
+                    {
+                        assert_tree_misses(node, footer.bounds);
+                    }
+
+                    let focused = scene
+                        .root()
+                        .children
+                        .iter()
+                        .find(|node| node.state.focused)
+                        .expect("focused Home row must be emitted");
+                    let favorite_focused = focused.id.as_str().starts_with("favorite-item-");
+                    let row: Vec<_> = scene
+                        .root()
+                        .children
+                        .iter()
+                        .filter(|node| {
+                            let id = node.id.as_str();
+                            if favorite_focused {
+                                id == "favorites-label" || id.starts_with("favorite-item-")
+                            } else {
+                                id == "ready-now-label" || id.starts_with("item-")
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    let (row_top, row_bottom) = home_row_vertical_extent(&row);
+                    assert!(row_top >= 64.0);
+                    assert!(row_bottom <= footer.bounds.y);
+
+                    let ready_bottom = scene
+                        .root()
+                        .children
+                        .iter()
+                        .filter(|node| node.id.as_str().starts_with("item-"))
+                        .map(|node| vertical_extent(node).1)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let favorites_top = scene
+                        .root()
+                        .children
+                        .iter()
+                        .filter(|node| node.id.as_str().starts_with("favorite-item-"))
+                        .map(|node| vertical_extent(node).0)
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(ready_bottom <= favorites_top);
+                }
+            }
+        }
+
+        let snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![item(
+                "ridge",
+                "Ridgeline",
+                vec![variant("native", "ridge", Availability::Ready)],
+            )],
+            user_projection: UserProjection::default(),
+        };
+        let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
+            .scene(metrics, "")
+            .unwrap();
+        assert!(
+            empty
+                .root()
+                .children
+                .iter()
+                .all(|node| node.id.as_str() != "favorites-label")
+        );
     }
 
     fn quick_scene(core: &ShellCore) -> Scene {

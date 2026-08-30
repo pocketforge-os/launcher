@@ -2574,7 +2574,7 @@ mod durable_tests {
                 .find(|node| node.id.as_str() == "hero-status")
                 .unwrap()
                 .accessible_label,
-            "● Ready · Game · Installed · 34 hours on the trail"
+            "● Ready · Game · Installed on this device · 34 hours on the trail"
         );
     }
 

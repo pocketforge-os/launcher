@@ -89,6 +89,14 @@ fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
     }
 }
 
+fn ready_variant_capability_cue(variant: &Variant) -> &'static str {
+    match ready_variant_capability(variant) {
+        ReadyVariantCapability::Native => "Installed on this device",
+        ReadyVariantCapability::Stream => "Available over the network",
+        ReadyVariantCapability::Unknown => "Source availability unknown",
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LibraryGeometry {
     columns: usize,
@@ -2814,9 +2822,27 @@ impl ShellCore {
                         Availability::Ready
                             if matches!(self.presentation, Presentation::Starting) =>
                         {
-                            format!("● Starting · {kind} · Installed")
+                            let cue = item
+                                .variants
+                                .iter()
+                                .find(|variant| matches!(variant.availability, Availability::Ready))
+                                .map_or(
+                                    "Source availability unknown",
+                                    ready_variant_capability_cue,
+                                );
+                            format!("● Starting · {kind} · {cue}")
                         }
-                        Availability::Ready => format!("● Ready · {kind} · Installed"),
+                        Availability::Ready => {
+                            let cue = item
+                                .variants
+                                .iter()
+                                .find(|variant| matches!(variant.availability, Availability::Ready))
+                                .map_or(
+                                    "Source availability unknown",
+                                    ready_variant_capability_cue,
+                                );
+                            format!("● Ready · {kind} · {cue}")
+                        }
                         Availability::NeedsSetup { .. } => format!("⊘ Needs setup · {kind}"),
                         Availability::NeedsNetwork { .. } => {
                             format!("⊘ Network required · {kind}")
@@ -5220,11 +5246,7 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
 
 fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
     let source = match &variant.availability {
-        Availability::Ready => match ready_variant_capability(variant) {
-            ReadyVariantCapability::Native => "Installed on this device",
-            ReadyVariantCapability::Stream => "Available over the network",
-            ReadyVariantCapability::Unknown => "Source availability unknown",
-        },
+        Availability::Ready => ready_variant_capability_cue(variant),
         Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => "Source not ready",
         Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
             "Source unavailable"
@@ -7134,6 +7156,64 @@ mod tests {
         let status = node_by_id(scene.root(), "hero-status").unwrap();
         assert_eq!(status.accessible_label, "⊘ Needs setup · Game");
         assert!(!status.accessible_label.contains("Ready"));
+    }
+
+    #[test]
+    fn home_hero_ready_suffix_follows_selected_variant_capability() {
+        let cases = [
+            (
+                "native",
+                "pocketforge/native",
+                "● Ready · Game · Installed on this device",
+                true,
+            ),
+            (
+                "stream",
+                "pc-stream",
+                "● Ready · Game · Available over the network",
+                false,
+            ),
+            (
+                "unknown",
+                "other-runtime",
+                "● Ready · Game · Source availability unknown",
+                false,
+            ),
+        ];
+
+        for (id, runtime_family, expected, locally_installed) in cases {
+            let mut ready = variant(id, id, Availability::Ready);
+            ready.provenance.runtime_family = runtime_family.into();
+            let unavailable_native = variant(
+                "unavailable-native",
+                id,
+                Availability::NeedsSetup {
+                    reason: "install first".into(),
+                },
+            );
+            let core = fixture_core(vec![item(id, "Game", vec![unavailable_native, ready])]);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let status = &node_by_id(scene.root(), "hero-status")
+                .unwrap()
+                .accessible_label;
+            assert_eq!(status, expected, "case {id}");
+            assert_eq!(
+                status.contains("Installed on this device"),
+                locally_installed,
+                "case {id} local-installation claim"
+            );
+        }
     }
 
     #[test]

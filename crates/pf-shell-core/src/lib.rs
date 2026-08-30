@@ -3455,6 +3455,12 @@ impl ShellCore {
                         .checked_sub(1);
                     let focused = matches!(variant.availability, Availability::Ready)
                         && variant_focus == Some(self.focus);
+                    let variant_accessible_label =
+                        if matches!(variant.availability, Availability::Ready) {
+                            format!("{variant_name} · {variant_sub}")
+                        } else {
+                            variant_name.clone()
+                        };
                     let mut variant_node = node(
                         &format!("detail-variant-{variant_index}"),
                         if matches!(variant.availability, Availability::Ready) {
@@ -3462,7 +3468,7 @@ impl ShellCore {
                         } else {
                             Role::Text
                         },
-                        &format!("{variant_name} · {variant_sub}"),
+                        &variant_accessible_label,
                         detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
@@ -5219,8 +5225,7 @@ fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
             ReadyVariantCapability::Stream => "Available over the network",
             ReadyVariantCapability::Unknown => "Source availability unknown",
         },
-        Availability::NeedsNetwork { .. } => "Network required",
-        Availability::NeedsSetup { .. } => "Setup required",
+        Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => "Source not ready",
         Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
             "Source unavailable"
         }
@@ -7166,7 +7171,7 @@ mod tests {
                     reason: "connect first".into(),
                 },
                 "native",
-                "Game · Network required",
+                "Game · Source not ready",
             ),
             (
                 "setup",
@@ -7174,7 +7179,7 @@ mod tests {
                     reason: "choose a profile".into(),
                 },
                 "native",
-                "Game · Setup required",
+                "Game · Source not ready",
             ),
             (
                 "stream",

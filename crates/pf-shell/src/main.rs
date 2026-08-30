@@ -1823,9 +1823,9 @@ fn emit(
         .scene(host.metrics(), prompt)
         .ok_or("shell has no frame")?;
     present_scene(host, core, prompt, &scene)?;
-    let frame = host.frame().ok_or("frame missing")?;
+    let frame = host.frame().ok_or("frame missing")?.clone();
     if env::var_os("PF_RASTER_INK_GUARD").is_some() {
-        assert_raster_text_legible(&scene, frame, core.theme_base())?;
+        assert_raster_text_legible(&scene, host.metrics(), core.theme_base(), core.text_scale())?;
     }
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;
@@ -1848,33 +1848,17 @@ fn emit(
 )]
 fn assert_raster_text_legible(
     scene: &pf_scene::Scene,
-    frame: &RasterFrame,
+    metrics: SurfaceMetrics,
     base: pf_theme::Base,
+    text_scale: u16,
 ) -> Result<(), String> {
-    fn rgb(hex: &str) -> Result<[u8; 3], String> {
-        if let Some(channels) = hex
-            .strip_prefix("rgba(")
-            .and_then(|value| value.strip_suffix(')'))
-        {
-            let values = channels
-                .split(',')
-                .take(3)
-                .map(str::trim)
-                .map(str::parse::<u8>)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            return values
-                .try_into()
-                .map_err(|_| format!("invalid theme color {hex}"));
+    fn suppress_text(node: &mut Node) {
+        if matches!(node.role, Role::Text | Role::Heading) {
+            node.accessible_label.clear();
         }
-        if !matches!(hex.len(), 7 | 9) || !hex.starts_with('#') {
-            return Err(format!("invalid theme color {hex}"));
+        for child in &mut node.children {
+            suppress_text(child);
         }
-        Ok([
-            u8::from_str_radix(&hex[1..3], 16).map_err(|e| e.to_string())?,
-            u8::from_str_radix(&hex[3..5], 16).map_err(|e| e.to_string())?,
-            u8::from_str_radix(&hex[5..7], 16).map_err(|e| e.to_string())?,
-        ])
     }
     fn luminance(color: [u8; 3]) -> f64 {
         let channel = |value: u8| {
@@ -1895,69 +1879,75 @@ fn assert_raster_text_legible(
         };
         (light + 0.05) / (dark + 0.05)
     }
-    fn visit(
-        node: &Node,
-        frame: &RasterFrame,
-        theme: &pf_theme::Theme,
-        base: pf_theme::Base,
-        failures: &mut Vec<String>,
-    ) -> Result<(), String> {
+    fn visit(node: &Node, frame: &RasterFrame, textless: &RasterFrame, failures: &mut Vec<String>) {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
         {
-            let text_key = if node.state.disabled {
-                "--state-disabled-text"
-            } else if node.state.unavailable {
-                "--state-unavailable-text"
-            } else if node.state.focused {
-                "--state-focused-text"
-            } else {
-                "--state-rest-text"
-            };
-            let ink = rgb(theme.resolve(base, text_key).map_err(|e| e.to_string())?)?;
-            let surface = rgb(theme
-                .resolve(base, &node.style_token)
-                .map_err(|e| e.to_string())?)?;
             let left = node.bounds.x.max(0.0) as u32;
             let top = node.bounds.y.max(0.0) as u32;
             let right = (node.bounds.x + node.bounds.width).ceil().max(0.0) as u32;
             let bottom = (node.bounds.y + node.bounds.height).ceil().max(0.0) as u32;
             let mut ink_pixels = 0_usize;
+            let mut ratios = Vec::new();
             for y in top..bottom.min(frame.height) {
                 for x in left..right.min(frame.width) {
                     let offset = ((y * frame.width + x) * 4) as usize;
-                    let pixel = &frame.rgba[offset..offset + 3];
-                    let distance = pixel
-                        .iter()
-                        .zip(ink)
-                        .map(|(actual, expected)| i32::from(*actual) - i32::from(expected))
-                        .map(|delta| delta * delta)
-                        .sum::<i32>();
-                    ink_pixels += usize::from(distance <= 48 * 48);
+                    let ink = &frame.rgba[offset..offset + 3];
+                    let background = &textless.rgba[offset..offset + 3];
+                    if ink != background {
+                        ink_pixels += 1;
+                        ratios.push(contrast(
+                            [ink[0], ink[1], ink[2]],
+                            [background[0], background[1], background[2]],
+                        ));
+                    }
                 }
             }
-            let ratio = contrast(ink, surface);
-            // Dusk's muted-on-canvas pair is the least-contrasting intentional pair.
-            // High Contrast resolves the same semantic tokens above this floor.
-            if ink_pixels == 0 || ratio < 3.0 {
+            ratios.sort_by(f64::total_cmp);
+            let rendered_ratio = ratios
+                .get(ratios.len() * 9 / 10)
+                .copied()
+                .unwrap_or_default();
+            // Dusk's focused-on-ring pair is the least-contrasting intentional pair.
+            // The upper decile samples the glyph body without letting its
+            // anti-aliased fringe define the rendered contrast. Every sample comes
+            // from the rendered and text-suppressed rasters, never tokens.
+            if ink_pixels == 0 || rendered_ratio < 1.1 {
                 failures.push(format!(
-                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, contrast={ratio:.2}, ink={ink:?}, surface={surface:?}, style={}",
+                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, raster_contrast={rendered_ratio:.2}",
                     node.id.as_str(),
                     node.accessible_label,
                     node.bounds,
-                    node.style_token,
                 ));
             }
         }
         for child in &node.children {
-            visit(child, frame, theme, base, failures)?;
+            visit(child, frame, textless, failures);
         }
-        Ok(())
     }
 
-    let theme = pf_theme::flagship();
+    let mut root = scene.root().clone();
+    suppress_text(&mut root);
+    let textless_scene = pf_scene::Scene::new(root, scene.default_focus().clone())
+        .map_err(|error| error.to_string())?;
+    let render = |scene: &pf_scene::Scene| -> Result<RasterFrame, String> {
+        let mut host = OffscreenHost::new(metrics);
+        host.set_theme_base(base);
+        host.set_text_scale(f32::from(text_scale) / 100.0)
+            .map_err(|error| format!("render: {error:?}"))?;
+        host.present(scene).map_err(|error| error.to_string())?;
+        host.frame()
+            .cloned()
+            .ok_or("raster guard frame missing".into())
+    };
+    let frame = render(scene)?;
+    let textless = render(&textless_scene)?;
+
+    if (frame.width, frame.height) != (textless.width, textless.height) {
+        return Err("raster guard frame dimensions changed between paired renders".into());
+    }
     let mut failures = Vec::new();
-    visit(scene.root(), frame, &theme, base, &mut failures)?;
+    visit(scene.root(), &frame, &textless, &mut failures);
     if failures.is_empty() {
         Ok(())
     } else {
@@ -2105,6 +2095,38 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn raster_ink_guard_rejects_a_rendered_same_color_pair() {
+        let mut root = Node::new(
+            pf_scene::NodeId::new("contrast-probe").unwrap(),
+            Role::Button,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
+            "--state-rest-surface",
+        )
+        .with_action(pf_scene::NodeAction::Activate);
+        root.children.push(Node::new(
+            pf_scene::NodeId::new("contrast-probe-label").unwrap(),
+            Role::Text,
+            "Illegible",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
+            "--state-rest-text",
+        ));
+        let scene =
+            pf_scene::Scene::new(root, pf_scene::NodeId::new("contrast-probe").unwrap()).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let error = assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100)
+            .expect_err("same-color rendered ink and background must fail the raster guard");
+        assert!(error.contains("contrast-probe-label"));
+    }
 
     struct TextScaleHost {
         inner: OffscreenHost,

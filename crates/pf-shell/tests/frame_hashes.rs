@@ -156,16 +156,16 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("2817f16c66acb58308c3c06672f6e8a90c566d7a98c1860d5eeaeb6374f1e8e4  ")
+        transcript.contains("1a6f99e108719b3fbcfb3829301914edb80640592ecc8ebc6ac6f9bb7adf0455  ")
     );
     assert!(
-        transcript.contains("87d4bc2833def29332b1dc93840ed95ca41318ae2b2ccd77911830cbb0ed2937  ")
+        transcript.contains("07f02b697fe93e8f1cdfd14509719d4395caf98de0a3b1b4ae6ba22065fe9a6a  ")
     );
     assert!(
-        transcript.contains("c836f961b4ee2c57891dbe902f7533600c7c87b658d4c78accfa808e113223b9  ")
+        transcript.contains("00ff6c38888c796b5d0bb88a655794a0a1fbe14005bc8f2d5f98dd6e30f0f71a  ")
     );
     assert!(
-        transcript.contains("3675ba020d25cc943f3417a9e69167b7b7b8100ab3f22fe6a1e7ca6bb55eb948  ")
+        transcript.contains("96281dfd5a724ba1ae2bfc53d60d03e3e7a71b5cf27eb75d338858510184823b  ")
     );
     assert!(
         transcript.contains("bd1849c34b77e2d0fb710f5312057c6613afba5f0688ab49309baf7bc7ba677f  ")

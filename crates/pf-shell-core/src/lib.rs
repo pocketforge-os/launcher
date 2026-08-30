@@ -2754,7 +2754,7 @@ impl ShellCore {
             },
             Route::Quick => unreachable!(),
         };
-        if self.route != Route::Settings {
+        if !matches!(self.route, Route::Settings | Route::Library) {
             out.push(
                 node(
                     "route-heading",
@@ -3806,7 +3806,11 @@ impl ShellCore {
                     nav.bounds.y + 10.0,
                     nav.bounds.width - 24.0,
                     30.0,
-                    "--color-surface-raised",
+                    if focused {
+                        "--state-focused-ring"
+                    } else {
+                        "--color-surface-raised"
+                    },
                 );
                 nav_label.state.focused = focused;
                 nav.children.push(nav_label);
@@ -3902,7 +3906,13 @@ impl ShellCore {
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
             }
-            let row_surface = "--color-surface-raised";
+            let row_surface = if focused {
+                "--state-focused-ring"
+            } else if interactive {
+                "--state-rest-surface"
+            } else {
+                "--state-disabled-border"
+            };
             let lines = row.label.lines().collect::<Vec<_>>();
             let mut fills = Vec::new();
             let mut text = Vec::new();
@@ -8812,7 +8822,14 @@ mod tests {
             find(settings.root(), "settings-nav-accessibility-label")
                 .unwrap()
                 .style_token,
-            "--color-surface-raised"
+            "--state-focused-ring"
+        );
+        assert!(
+            find(settings.root(), "settings-nav-accessibility")
+                .unwrap()
+                .state
+                .focused,
+            "the navigation label must declare the surface painted by its focused parent"
         );
     }
 

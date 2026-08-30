@@ -589,9 +589,6 @@ fn emit_f10_evidence(
         }),
     }]);
     core.action(&ShellAction::Custom("Room.next".into()));
-    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-    core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "library")?;
     core.action(&ShellAction::Custom("Search".into()));
     core.set_search_query("ridgeline");
@@ -3037,7 +3034,7 @@ exec="./launch"
     }
 
     #[test]
-    fn variant_pin_cas_failure_changes_redraw_key_for_toast() {
+    fn chooser_favorite_action_does_not_write_variant_memory() {
         let mut snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let item = snapshot
@@ -3053,32 +3050,21 @@ exec="./launch"
             .clone();
         second.id = "handheld".into();
         item.variants.push(second);
-        let catalog = AlwaysConflictingFavorites {
-            snapshot: snapshot.clone(),
-        };
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
         core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         core.action(&ShellAction::Activate);
-        let Effect::SetPinnedVariant {
-            item_id,
-            variant_id,
-        } = core
+        let Effect::ToggleFavorite { item_id, favorite } = core
             .action(&ShellAction::Custom("Favorite".into()))
-            .expect("chooser exposes the mapped default affordance")
+            .expect("chooser keeps the ordinary item favorite affordance")
         else {
-            panic!("chooser action must emit a pin effect");
+            panic!("chooser must not emit a variant-memory effect");
         };
-        let before_failure = redraw_state(&core);
-        let status = commit_pinned_variant(&catalog, &item_id, variant_id.as_deref()).unwrap_err();
-        core.pinned_variant_failed(status);
-        assert_ne!(before_failure, redraw_state(&core));
-        assert_eq!(
-            core.session_status(),
-            Some("Default version changed elsewhere; try again")
-        );
+        assert_eq!(item_id, "glass-harbor");
+        assert!(favorite);
+        assert!(snapshot.user_projection.pinned_variant_ids.is_empty());
     }
 
     #[test]

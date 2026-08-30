@@ -2422,6 +2422,75 @@ mod durable_tests {
     }
 
     #[test]
+    fn fixture_library_has_six_distinct_scenic_ready_covers_and_honest_hero_fact() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        assert_eq!(snapshot.items.len(), 6);
+        assert!(snapshot.items.iter().all(|item| {
+            item.variants
+                .iter()
+                .any(|variant| matches!(variant.availability, pf_catalog::Availability::Ready))
+        }));
+        assert!(
+            snapshot
+                .items
+                .iter()
+                .all(|item| item.tags.iter().any(|tag| tag.starts_with("playtime:")))
+        );
+
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let mut palettes = std::collections::BTreeSet::new();
+        let expected_layers = [3, 4, 2, 5, 3, 4];
+        for (item, expected) in snapshot.items.iter().zip(expected_layers) {
+            let card = scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == format!("item-{}", item.id))
+                .unwrap();
+            let art = card
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == format!("home-card-art-{}", item.id))
+                .unwrap();
+            palettes.insert(art.style_token.clone());
+            assert_eq!(
+                card.children
+                    .iter()
+                    .filter(|node| { node.id.as_str().starts_with("home-card-scene-") })
+                    .count(),
+                expected,
+                "{} scenic layer count",
+                item.id
+            );
+        }
+        assert_eq!(palettes.len(), 6);
+        assert_eq!(
+            scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == "hero-status")
+                .unwrap()
+                .accessible_label,
+            "● Ready · Game · Installed · 34 hours on the trail"
+        );
+    }
+
+    #[test]
     fn safe_return_active_session_sends_exactly_one_request() {
         use std::os::unix::net::UnixListener;
 
@@ -3766,6 +3835,7 @@ exec="./launch"
         let mut snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         snapshot.items[0].presentation.icon_reference = Some("art/corrupt.png".into());
+        snapshot.items[0].presentation.icon_decodable = true;
         let theme = pf_theme::flagship();
         let mut core = fixture_core(&snapshot, &theme, false);
         core.authority_snapshot(false);

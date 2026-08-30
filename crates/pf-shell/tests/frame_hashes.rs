@@ -107,22 +107,22 @@ fn rendered_chrome_contains_sparse_shaped_glyph_ink() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "bbaea2bb9480d927ae20f296e47df4da6379ec78eaee55f588e7e7f629db8de4  ",
-        "5186400f44fe21ee57f71ba45e088d7b9ee68537819f1ce50eb7b29890e8419b  ",
-        "e7e8c308aa3531e639d0f048ba41435ef79e37a16132c9510dc7790b7e2d7c87  ",
-        "90be3d027f1b439a862691bdd429ebc853177ddb7f5fbd368eda8a39663bfc50  ",
+        "2b4f696045b121f4c2fcc29b683a8eef61d313a8b93595b3db22be97a58a1e79  ",
+        "7787aa4b8400f8368bce424d413754be3c9487f221d9e8b910c178e4a237a906  ",
+        "f4a71f46d9b93b9338252a7294a5ea04e2fab2cfe11c63cf48b23181efeefd55  ",
+        "3d1e9c32a8fdb2eb8d0d3910f8fa9d9f36be2a082d388614722b97dc0a31ab2d  ",
         "4b6d2ffe193bab49a645ed8978d803b354d11884fe22965010d35d712efbfd51  ",
-        "3594646a49212ff0a2516bd5838a6c032edf08f2b08749ec5ffeb01d578f98c4  ",
+        "0ffcdd0f704e2dab48c098e046d80edc1ab4afca9858f19a0d0157730f9f57e4  ",
         "9deb5d54235f106b8e0b314d79dcce0cfbd238f00b8b5b0db915f7fac0b814de  ",
-        "f48303ac97853d9c9676faba34a49a8ddf949a44359b2b36aa945acb5b4ac750  ",
-        "0c9e2dba2301532c174a2c9738bb8975ce1a6de6dd24fc0a3d946b6b79f86961  ",
+        "ae8bb54e53c8ef6796534eacf0d5a911895836d07701d0e01239d4289a345a67  ",
+        "8f87fea4ece796c834f4d1293e83d10eebe961baf1c7624261f213ff8a9a0721  ",
         "8a0f7b4cdbb95c8e043fe41b6189def734b5fe8a2cd44adcf5721919d96edea8  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("5186400"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("7787aa4"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("90be3d0"),
+        lines.lines().nth(3).unwrap().starts_with("3d1e9c3"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -196,6 +196,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("dc275afe0fb5f24dddd558dbbeb1e8fe624793397a3c36633d2485f4d790835e  ")
+        transcript.contains("11a403c7bd8183966d916bd4c6762fc5e9fbed6932de223286302aba4cab4cf6  ")
     );
 }

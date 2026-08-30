@@ -532,6 +532,7 @@ struct Item {
     title: String,
     kind: AppKind,
     tags: Vec<String>,
+    playtime_fact: Option<String>,
     art: Option<ImageSource>,
     art_failed: bool,
     variants: Vec<Variant>,
@@ -670,6 +671,10 @@ impl ShellCore {
                     title: item.title.clone(),
                     kind: item.kind.clone(),
                     tags: item.tags.clone(),
+                    playtime_fact: item
+                        .tags
+                        .iter()
+                        .find_map(|tag| tag.strip_prefix("playtime:").map(str::to_owned)),
                     art,
                     art_failed: false,
                     variants: item.variants.clone(),
@@ -2817,11 +2822,17 @@ impl ShellCore {
                 node(
                     "hero-status",
                     Role::Text,
-                    if matches!(self.presentation, Presentation::Starting) {
-                        "● Starting · Game · Installed"
-                    } else {
-                        "● Ready · Game · Installed"
-                    },
+                    &format!(
+                        "{}{}",
+                        if matches!(self.presentation, Presentation::Starting) {
+                            "● Starting · Game · Installed"
+                        } else {
+                            "● Ready · Game · Installed"
+                        },
+                        focused
+                            .and_then(|item| item.playtime_fact.as_deref())
+                            .map_or(String::new(), |fact| format!(" · {fact}"))
+                    ),
                     48.0,
                     224.0,
                     480.0,
@@ -4733,26 +4744,83 @@ fn procedural_art_nodes(
     art_height: f32,
     focused: bool,
 ) -> Vec<Node> {
+    type ScenicLayer = (&'static str, f32, f32, f32, f32);
     let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
     });
-    let motif = match (hash / 6) % 6 {
-        0 => "╱  ╱  ╱\n  ╱  ╱",
-        1 => "≈ ≈ ≈\n ≈ ≈ ≈",
-        2 => "· · · ·\n · · ·",
-        3 => "○   ◌\n  ◉",
-        4 => "⌁ ⌁ ⌁\n ⌁ ⌁",
-        _ => "\\ | /\n— ◉ —",
+    let (motif, scenic_layers): (&str, &[ScenicLayer]) = match id {
+        "ridgeline" => (
+            "    ●",
+            &[
+                ("--deco-plate-b-bg", 0.00, 0.48, 1.00, 0.52),
+                ("--color-surface-scrim", 0.00, 0.64, 0.72, 0.36),
+                ("--color-surface-raised", 0.36, 0.72, 0.64, 0.28),
+            ],
+        ),
+        "hollow-tides" => (
+            "≈  ◒  ≈",
+            &[
+                ("--deco-plate-e-bg", 0.00, 0.52, 1.00, 0.48),
+                ("--color-surface-scrim", 0.00, 0.72, 1.00, 0.28),
+                ("--color-surface-raised", 0.42, 0.63, 0.24, 0.07),
+                ("--color-surface-raised", 0.53, 0.55, 0.03, 0.16),
+            ],
+        ),
+        "sunwake" => (
+            "  ☼\n⌁   ⌁",
+            &[
+                ("--deco-plate-a-bg", 0.00, 0.58, 1.00, 0.42),
+                ("--color-surface-raised", 0.00, 0.78, 1.00, 0.22),
+            ],
+        ),
+        "glass-harbor" => (
+            "",
+            &[
+                ("--deco-plate-f-bg", 0.00, 0.46, 1.00, 0.54),
+                ("--color-surface-scrim", 0.00, 0.68, 1.00, 0.32),
+                ("--color-surface-raised", 0.13, 0.48, 0.08, 0.30),
+                ("--color-surface-raised", 0.76, 0.42, 0.07, 0.36),
+                ("--deco-plate-c-bg", 0.44, 0.58, 0.13, 0.10),
+            ],
+        ),
+        "lantern-vale" => (
+            "·  ✦  ·\n  ·  ·",
+            &[
+                ("--color-surface-scrim", 0.00, 0.56, 1.00, 0.44),
+                ("--deco-plate-d-bg", 0.38, 0.30, 0.24, 0.42),
+                ("--color-surface-raised", 0.46, 0.70, 0.08, 0.30),
+            ],
+        ),
+        "paper-comet" => (
+            "✦  ·  ·\n  ╲",
+            &[
+                ("--deco-plate-c-bg", 0.00, 0.62, 1.00, 0.38),
+                ("--color-surface-raised", 0.00, 0.82, 1.00, 0.18),
+                ("--color-surface-scrim", 0.56, 0.22, 0.08, 0.54),
+                ("--deco-plate-a-bg", 0.18, 0.47, 0.30, 0.06),
+            ],
+        ),
+        _ => (
+            "·  ◉  ·",
+            &[("--color-surface-scrim", 0.0, 0.68, 1.0, 0.32)],
+        ),
     };
-    let token = [
-        "--deco-plate-a-bg",
-        "--deco-plate-b-bg",
-        "--deco-plate-c-bg",
-        "--deco-plate-d-bg",
-        "--deco-plate-e-bg",
-        "--deco-plate-f-bg",
-    ][(hash % 6) as usize];
-    let monogram = title.chars().next().unwrap_or('·').to_string();
+    let token = match id {
+        "ridgeline" => "--deco-plate-a-bg",
+        "hollow-tides" => "--deco-plate-b-bg",
+        "sunwake" => "--deco-plate-c-bg",
+        "glass-harbor" => "--deco-plate-d-bg",
+        "lantern-vale" => "--deco-plate-e-bg",
+        "paper-comet" => "--deco-plate-f-bg",
+        _ => [
+            "--deco-plate-a-bg",
+            "--deco-plate-b-bg",
+            "--deco-plate-c-bg",
+            "--deco-plate-d-bg",
+            "--deco-plate-e-bg",
+            "--deco-plate-f-bg",
+        ][(hash % 6) as usize],
+    };
     let home = context == "home-card";
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
@@ -4821,7 +4889,32 @@ fn procedural_art_nodes(
             },
             token,
         ),
-        node(
+    ];
+    let scene_height = if detail {
+        art_height
+    } else if home {
+        158.0
+    } else if favorite {
+        64.0
+    } else {
+        136.0
+    };
+    nodes.extend(scenic_layers.iter().enumerate().map(
+        |(index, (layer_token, left, top, layer_width, layer_height))| {
+            node(
+                &format!("{context}-scene-{index}-{id}"),
+                Role::Group,
+                "",
+                art_x + art_width * left,
+                (if favorite { y + 4.0 } else { y }) + scene_height * top,
+                art_width * layer_width,
+                scene_height * layer_height,
+                layer_token,
+            )
+        },
+    ));
+    if !motif.is_empty() {
+        nodes.push(node(
             &format!("{context}-motif-{id}"),
             Role::Text,
             motif,
@@ -4829,24 +4922,9 @@ fn procedural_art_nodes(
             if favorite { y + 4.0 } else { y },
             art_width,
             if favorite { 28.0 } else { 60.0 },
-            "--color-surface-raised",
-        ),
-        node(
-            &format!("{context}-initial-{id}"),
-            Role::Text,
-            &monogram,
-            if favorite {
-                art_x + 16.0
-            } else {
-                x + width * 0.27
-            },
-            if favorite { y + 30.0 } else { y + 72.0 },
-            if favorite { 24.0 } else { width * 0.46 },
-            if favorite { 28.0 } else { 58.0 },
-            "--color-surface-raised",
-        )
-        .with_type_role(TypeRole::Plate),
-    ];
+            "--color-surface-canvas",
+        ));
+    }
     if let Some(edition) = edition.filter(|_| !home) {
         nodes.push(
             node(
@@ -4862,6 +4940,18 @@ fn procedural_art_nodes(
             .with_type_role(TypeRole::Eyebrow),
         );
     }
+    if detail {
+        nodes.push(node(
+            &format!("{context}-title-scrim-{id}"),
+            Role::Group,
+            "",
+            x,
+            label_y,
+            width,
+            28.0,
+            "--color-surface-scrim",
+        ));
+    }
     nodes.push(
         node(
             &format!("{context}-title-{id}"),
@@ -4871,7 +4961,9 @@ fn procedural_art_nodes(
             label_y,
             if favorite { width - 72.0 } else { width },
             if favorite { 32.0 } else { 28.0 },
-            if context == "home-card" {
+            if detail {
+                "--color-surface-scrim"
+            } else if context == "home-card" {
                 "--color-surface-canvas"
             } else if focused {
                 "--state-focused-text"
@@ -8503,7 +8595,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "initial"] {
+        for part in ["art", "scene-0"] {
             assert!(
                 favorite
                     .children

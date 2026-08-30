@@ -17,7 +17,7 @@ use pf_ports::{
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::{RasterFrame, RenderNote};
-use pf_scene::{Insets, Orientation, SurfaceMetrics};
+use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
@@ -597,6 +597,24 @@ fn emit_f10_evidence(
     emit(host, &mut core, footer, out, "search")?;
     core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "details")?;
+
+    let mut unavailable_snapshot = snapshot.clone();
+    let unavailable_item = unavailable_snapshot
+        .items
+        .iter_mut()
+        .find(|item| item.id == "glass-harbor")
+        .ok_or("unavailable details fixture item missing")?;
+    unavailable_item
+        .variants
+        .retain(|variant| !matches!(variant.availability, pf_catalog::Availability::Ready));
+    let mut unavailable = fixture_core(&unavailable_snapshot, theme, false);
+    unavailable.authority_snapshot(false);
+    unavailable.action(&ShellAction::Custom("Room.next".into()));
+    for _ in 0..8 {
+        unavailable.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+    }
+    unavailable.action(&ShellAction::Activate);
+    emit(host, &mut unavailable, footer, out, "details-unavailable")?;
 
     let mut chooser_snapshot = snapshot.clone();
     let item = chooser_snapshot
@@ -1801,8 +1819,14 @@ fn emit(
     out: &Path,
     name: &str,
 ) -> Result<(), String> {
-    present(host, core, prompt)?;
+    let scene = core
+        .scene(host.metrics(), prompt)
+        .ok_or("shell has no frame")?;
+    present_scene(host, core, prompt, &scene)?;
     let frame = host.frame().ok_or("frame missing")?;
+    if env::var_os("PF_RASTER_INK_GUARD").is_some() {
+        assert_raster_text_legible(&scene, frame, core.theme_base())?;
+    }
     let path = out.join(format!("{name}.png"));
     let file = fs::File::create(&path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
@@ -1815,6 +1839,130 @@ fn emit(
         .map_err(|e| e.to_string())?;
     println!("{}  {}", hex(&Sha256::digest(&frame.rgba)), path.display());
     Ok(())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+fn assert_raster_text_legible(
+    scene: &pf_scene::Scene,
+    frame: &RasterFrame,
+    base: pf_theme::Base,
+) -> Result<(), String> {
+    fn rgb(hex: &str) -> Result<[u8; 3], String> {
+        if let Some(channels) = hex
+            .strip_prefix("rgba(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            let values = channels
+                .split(',')
+                .take(3)
+                .map(str::trim)
+                .map(str::parse::<u8>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            return values
+                .try_into()
+                .map_err(|_| format!("invalid theme color {hex}"));
+        }
+        if !matches!(hex.len(), 7 | 9) || !hex.starts_with('#') {
+            return Err(format!("invalid theme color {hex}"));
+        }
+        Ok([
+            u8::from_str_radix(&hex[1..3], 16).map_err(|e| e.to_string())?,
+            u8::from_str_radix(&hex[3..5], 16).map_err(|e| e.to_string())?,
+            u8::from_str_radix(&hex[5..7], 16).map_err(|e| e.to_string())?,
+        ])
+    }
+    fn luminance(color: [u8; 3]) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color[0]) + 0.7152 * channel(color[1]) + 0.0722 * channel(color[2])
+    }
+    fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let (light, dark) = if luminance(a) >= luminance(b) {
+            (luminance(a), luminance(b))
+        } else {
+            (luminance(b), luminance(a))
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+    fn visit(
+        node: &Node,
+        frame: &RasterFrame,
+        theme: &pf_theme::Theme,
+        base: pf_theme::Base,
+        failures: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if matches!(node.role, Role::Text | Role::Heading)
+            && !node.accessible_label.trim().is_empty()
+        {
+            let text_key = if node.state.disabled {
+                "--state-disabled-text"
+            } else if node.state.unavailable {
+                "--state-unavailable-text"
+            } else if node.state.focused {
+                "--state-focused-text"
+            } else {
+                "--state-rest-text"
+            };
+            let ink = rgb(theme.resolve(base, text_key).map_err(|e| e.to_string())?)?;
+            let surface = rgb(theme
+                .resolve(base, &node.style_token)
+                .map_err(|e| e.to_string())?)?;
+            let left = node.bounds.x.max(0.0) as u32;
+            let top = node.bounds.y.max(0.0) as u32;
+            let right = (node.bounds.x + node.bounds.width).ceil().max(0.0) as u32;
+            let bottom = (node.bounds.y + node.bounds.height).ceil().max(0.0) as u32;
+            let mut ink_pixels = 0_usize;
+            for y in top..bottom.min(frame.height) {
+                for x in left..right.min(frame.width) {
+                    let offset = ((y * frame.width + x) * 4) as usize;
+                    let pixel = &frame.rgba[offset..offset + 3];
+                    let distance = pixel
+                        .iter()
+                        .zip(ink)
+                        .map(|(actual, expected)| i32::from(*actual) - i32::from(expected))
+                        .map(|delta| delta * delta)
+                        .sum::<i32>();
+                    ink_pixels += usize::from(distance <= 48 * 48);
+                }
+            }
+            let ratio = contrast(ink, surface);
+            // Dusk's muted-on-canvas pair is the least-contrasting intentional pair.
+            // High Contrast resolves the same semantic tokens above this floor.
+            if ink_pixels == 0 || ratio < 3.0 {
+                failures.push(format!(
+                    "{} ({:?}, {:?}): ink_pixels={ink_pixels}, contrast={ratio:.2}, ink={ink:?}, surface={surface:?}, style={}",
+                    node.id.as_str(),
+                    node.accessible_label,
+                    node.bounds,
+                    node.style_token,
+                ));
+            }
+        }
+        for child in &node.children {
+            visit(child, frame, theme, base, failures)?;
+        }
+        Ok(())
+    }
+
+    let theme = pf_theme::flagship();
+    let mut failures = Vec::new();
+    visit(scene.root(), frame, &theme, base, &mut failures)?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("raster ink guard failed:\n{}", failures.join("\n")))
+    }
 }
 
 fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {

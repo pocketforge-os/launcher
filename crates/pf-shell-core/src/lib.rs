@@ -6624,8 +6624,16 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(chooser_nodes.len(), 5);
                 for node in chooser_nodes {
-                    assert_eq!(node.bounds.x, expected_left, "{}", node.id.as_str());
-                    assert_eq!(node.bounds.width, expected_width, "{}", node.id.as_str());
+                    assert!(
+                        (node.bounds.x - expected_left).abs() < f32::EPSILON,
+                        "{}",
+                        node.id.as_str()
+                    );
+                    assert!(
+                        (node.bounds.width - expected_width).abs() < f32::EPSILON,
+                        "{}",
+                        node.id.as_str()
+                    );
                     assert!(node.bounds.width > 0.0, "{}", node.id.as_str());
                     assert!(node.bounds.x >= 0.0, "{}", node.id.as_str());
                     assert!(

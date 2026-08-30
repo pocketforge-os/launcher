@@ -1612,7 +1612,9 @@ mod durable_tests {
         // physical releases, so this must travel through the normal transition path.
         host.events
             .push_back(key_event(1, 0xff52, KeyState::Released, Key::Up));
-        input.started = Instant::now() - Duration::from_secs(1);
+        input.started = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before now should be representable");
         assert_eq!(
             input
                 .next_action(&mut host, Deadline(MonotonicTime::ZERO))

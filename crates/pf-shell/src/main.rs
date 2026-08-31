@@ -2705,7 +2705,7 @@ mod durable_tests {
         );
         assert!(matches!(
             snapshot.items[4].variants[0].availability,
-            pf_catalog::Availability::NeedsNetwork { .. }
+            pf_catalog::Availability::Ready
         ));
         assert_eq!(
             snapshot
@@ -2789,11 +2789,37 @@ mod durable_tests {
                 .root()
                 .children
                 .iter()
+                .find(|node| node.id.as_str() == "home-shelf-label")
+                .unwrap()
+                .accessible_label,
+            "READY NOW · 6"
+        );
+        assert_eq!(
+            scene
+                .root()
+                .children
+                .iter()
                 .find(|node| node.id.as_str() == "hero-status")
                 .unwrap()
                 .accessible_label,
             "● Ready · Game · Installed · 34 hours on the trail"
         );
+
+        assert!(
+            snapshot
+                .items
+                .iter()
+                .all(|item| item.variants.iter().all(|variant| {
+                    !matches!(
+                        variant.availability,
+                        pf_catalog::Availability::NeedsSetup { .. }
+                    )
+                }))
+        );
+        assert!(matches!(
+            snapshot.items[7].variants[0].availability,
+            pf_catalog::Availability::IncompatibleRuntime { .. }
+        ));
     }
 
     #[test]

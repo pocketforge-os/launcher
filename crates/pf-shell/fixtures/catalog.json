@@ -169,8 +169,7 @@
           "id": "default",
           "provider_id": "fixture",
           "availability": {
-            "state": "needs_network",
-            "reason": "Connect to your PC to stream"
+            "state": "ready"
           },
           "requirements": [],
           "provenance": {
@@ -423,8 +422,7 @@
           "id": "default",
           "provider_id": "fixture",
           "availability": {
-            "state": "needs_setup",
-            "reason": "Choose a profile to continue"
+            "state": "ready"
           },
           "requirements": [],
           "provenance": {

@@ -3198,8 +3198,8 @@ impl ShellCore {
                 card.children = art_nodes(
                     item,
                     "library-card",
-                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    card.bounds.x,
+                    card.bounds.y,
                     geometry.card_width,
                     CARD_ART_HEIGHT,
                     self.focus == i + 5,
@@ -3209,8 +3209,8 @@ impl ShellCore {
                     item,
                     availability,
                     "library-card",
-                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    card.bounds.x,
+                    card.bounds.y,
                     geometry.card_width,
                     None,
                 );
@@ -3258,9 +3258,6 @@ impl ShellCore {
                         .with_type_role(TypeRole::Label),
                     );
                 }
-                card.children.retain(|child| {
-                    child.bounds.y + child.bounds.height <= h - PROMPTS_AREA_HEIGHT
-                });
                 out.push(card);
             }
         } else if self.route == Route::Search {
@@ -5127,20 +5124,10 @@ fn plate_art_nodes(
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
         });
-    let palette = match identity {
-        "steam-link" => 0,
-        "tidelines" => 3,
-        "button-tester" => 5,
-        _ => (hash % 6) as usize,
-    };
-    let background = [
-        "--deco-plate-a-bg",
-        "--deco-plate-b-bg",
-        "--deco-plate-c-bg",
-        "--deco-plate-d-bg",
-        "--deco-plate-e-bg",
-        "--deco-plate-f-bg",
-    ][palette];
+    // Text nodes paint their surface before their glyphs. Keep the plate and its two text
+    // nodes on one opaque surface so the centered monogram and kind remain plain ink rather
+    // than producing darker, chip-shaped alpha overlays.
+    let background = "--color-surface-raised";
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
     let art_x = if favorite { x + 4.0 } else { x };
@@ -5174,12 +5161,17 @@ fn plate_art_nodes(
     for line in 0..5 {
         let (left, top, motif_width, motif_height) = match motif {
             0 => (
-                0.08 + line as f32 * 0.10,
+                if line % 2 == 0 { 0.08 } else { 0.70 },
                 0.12 + line as f32 * 0.16,
-                art_width * 0.74,
+                art_width * 0.22,
                 1.0,
             ),
-            1 => (0.08, 0.14 + line as f32 * 0.17, art_width * 0.84, 1.0),
+            1 => (
+                if line % 2 == 0 { 0.08 } else { 0.67 },
+                0.14 + line as f32 * 0.17,
+                art_width * 0.25,
+                1.0,
+            ),
             2 => (0.14 + line as f32 * 0.15, 0.08, 1.0, art_height * 0.84),
             3 => (
                 0.10 + line as f32 * 0.08,
@@ -7305,6 +7297,56 @@ mod tests {
     }
 
     #[test]
+    fn second_library_row_keeps_every_card_child_inside_its_card() {
+        let items = (0..7)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let card = node_by_id(scene.root(), "library-item-item-6").unwrap();
+
+        for required in [
+            "library-card-art-item-6",
+            "library-card-initial-plate-item-6",
+            "library-card-plate-kind-item-6",
+            "library-card-plate-frame-top-item-6",
+            "library-card-plate-frame-bottom-item-6",
+            "library-card-plate-frame-left-item-6",
+            "library-card-plate-frame-right-item-6",
+        ] {
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
+        }
+        assert!(card.children.iter().all(|child| {
+            child.bounds.x >= card.bounds.x
+                && child.bounds.y >= card.bounds.y
+                && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
+                && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
+        }));
+    }
+
+    #[test]
     fn library_filter_counts_match_the_catalog_snapshot() {
         let mut tool = item(
             "tool",
@@ -7396,6 +7438,50 @@ mod tests {
                 .accessible_label,
             "⊘ Finish setup — choose a profile"
         );
+    }
+
+    #[test]
+    fn identity_plate_centers_its_initial_and_kind_stack_without_an_inner_box() {
+        let mut plate = item(
+            "steam-link",
+            "Steam Link",
+            vec![variant("stream", "steam-link", Availability::Ready)],
+        );
+        plate.kind = AppKind::Stream;
+        plate.tags.push("kind-label:Stream".into());
+        let core = fixture_core(vec![plate]);
+        let nodes = plate_art_nodes(
+            &core.items[0],
+            "home-card",
+            48.0,
+            388.0,
+            CARD_ART_WIDTH,
+            CARD_ART_HEIGHT,
+        );
+        let art = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-art-steam-link")
+            .unwrap();
+        let initial = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-initial-plate-steam-link")
+            .unwrap();
+        let kind = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-plate-kind-steam-link")
+            .unwrap();
+        let art_center_x = art.bounds.x + art.bounds.width / 2.0;
+        let art_center_y = art.bounds.y + art.bounds.height / 2.0;
+        let stack_center_y = (initial.bounds.y + kind.bounds.y + kind.bounds.height) / 2.0;
+
+        assert!(((initial.bounds.x + initial.bounds.width / 2.0) - art_center_x).abs() <= 1.0);
+        assert!(((kind.bounds.x + kind.bounds.width / 2.0) - art_center_x).abs() <= 1.0);
+        assert!((stack_center_y - art_center_y).abs() <= 1.0);
+        assert!((kind.bounds.y - (initial.bounds.y + initial.bounds.height) - 8.0).abs() <= 1.0);
+        assert!(nodes.iter().all(|node| {
+            let id = node.id.as_str();
+            !id.contains("plate-chip") && !id.contains("plate-box")
+        }));
     }
 
     #[test]

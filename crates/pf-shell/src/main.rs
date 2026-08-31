@@ -2666,6 +2666,7 @@ mod durable_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn fixture_library_matches_the_full_mockup_roster_and_home_six() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
@@ -2728,6 +2729,13 @@ mod durable_tests {
                 "{} art source",
                 item.id
             );
+            assert!(
+                card.children
+                    .iter()
+                    .all(|node| !node.id.as_str().starts_with("action-name-")),
+                "{} must use its canvas caption as explicit action-name ink",
+                item.id
+            );
         }
         for (id, initial, kind) in [("steam-link", "S", "Stream"), ("tidelines", "T", "Web app")] {
             assert!(scene.root().children.iter().any(|card| {
@@ -2740,6 +2748,21 @@ mod durable_tests {
                 })
             }));
         }
+        let steam = scene
+            .root()
+            .children
+            .iter()
+            .find(|node| node.id.as_str() == "item-steam-link")
+            .unwrap();
+        assert!(steam.children.iter().any(|node| {
+            node.id.as_str() == "home-card-badge-steam-link" && node.accessible_label == "⌁ Network"
+        }));
+        assert!(
+            steam
+                .children
+                .iter()
+                .all(|node| !node.id.as_str().contains("reason"))
+        );
         assert_eq!(
             scene
                 .root()

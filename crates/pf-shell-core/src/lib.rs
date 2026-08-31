@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime};
 
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
-const HOME_SHELF_LIMIT: usize = 8;
+const HOME_SHELF_LIMIT: usize = 6;
 const LIBRARY_SIDE_MARGIN: f32 = 48.0;
 const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
@@ -2939,11 +2939,7 @@ impl ShellCore {
                     390.0,
                     card_width,
                     200.0,
-                    if i == self.focus {
-                        "--state-focused-ring"
-                    } else {
-                        "--color-surface-canvas"
-                    },
+                    "--color-surface-canvas",
                 );
                 n.action = Some(NodeAction::Activate);
                 n.state.focused = i == self.focus;
@@ -3227,7 +3223,7 @@ impl ShellCore {
                         &format!("library-title-{}", item.id),
                         Role::Text,
                         &item.title,
-                        card.bounds.x - 8.0,
+                        card.bounds.x,
                         card.bounds.y + 170.0,
                         geometry.card_width,
                         34.0,
@@ -5127,14 +5123,6 @@ fn plate_art_nodes(
         "--deco-plate-e-bg",
         "--deco-plate-f-bg",
     ][palette];
-    let foreground = [
-        "--deco-plate-a-fg",
-        "--deco-plate-b-fg",
-        "--deco-plate-c-fg",
-        "--deco-plate-d-fg",
-        "--deco-plate-e-fg",
-        "--deco-plate-f-fg",
-    ][palette];
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
     let art_x = if favorite { x + 4.0 } else { x + 8.0 };
@@ -5156,6 +5144,50 @@ fn plate_art_nodes(
         art_height,
         background,
     )];
+    // The reference uses one of six low-contrast line motifs behind each monogram. Native
+    // scene nodes deliberately keep the motif token-soft: the identity text, frame, and badge
+    // remain the only contrast-bearing content.
+    let motif = (hash / 6) % 6;
+    for line in 0..5 {
+        let (left, top, motif_width, motif_height) = match motif {
+            0 => (
+                0.08 + line as f32 * 0.10,
+                0.12 + line as f32 * 0.16,
+                art_width * 0.74,
+                1.0,
+            ),
+            1 => (0.08, 0.14 + line as f32 * 0.17, art_width * 0.84, 1.0),
+            2 => (0.14 + line as f32 * 0.15, 0.08, 1.0, art_height * 0.84),
+            3 => (
+                0.10 + line as f32 * 0.08,
+                0.16 + line as f32 * 0.13,
+                art_width * 0.72,
+                1.0,
+            ),
+            4 => (
+                0.12 + line as f32 * 0.17,
+                0.12 + (line % 2) as f32 * 0.12,
+                2.0,
+                2.0,
+            ),
+            _ => (
+                0.12,
+                0.18 + line as f32 * 0.14,
+                art_width * (0.76 - line as f32 * 0.08),
+                1.0,
+            ),
+        };
+        nodes.push(node(
+            &format!("{context}-plate-motif-{line}-{}", item.id),
+            Role::Group,
+            "",
+            art_x + art_width * left,
+            art_y + art_height * top,
+            motif_width,
+            motif_height,
+            background,
+        ));
+    }
     // CSS reference: `.plate .frame { inset: space-2; border: 1px; border-radius:
     // calc(radius-m - 4px) }`. Four one-pixel scene edges preserve the exact 4 px inset
     // without covering the translucent plate fill.
@@ -5185,7 +5217,7 @@ fn plate_art_nodes(
             edge_y,
             edge_width,
             edge_height,
-            foreground,
+            "--color-border-hairline",
         ));
     }
     nodes.push(
@@ -5193,9 +5225,9 @@ fn plate_art_nodes(
             &format!("{context}-initial-plate-{}", item.id),
             Role::Text,
             &initial,
-            art_x,
+            art_x + (art_width - 72.0) / 2.0,
             art_y + art_height * 0.28,
-            art_width,
+            72.0,
             72.0,
             background,
         )
@@ -5206,9 +5238,9 @@ fn plate_art_nodes(
             &format!("{context}-plate-kind-{}", item.id),
             Role::Text,
             kind,
-            art_x,
+            art_x + (art_width - 88.0) / 2.0,
             art_y + art_height * 0.62,
-            art_width,
+            88.0,
             24.0,
             background,
         )
@@ -5221,7 +5253,13 @@ fn plate_art_nodes(
                 Role::Text,
                 &item.title,
                 if favorite { x + 68.0 } else { x },
-                if favorite { y + 32.0 } else { y + 176.0 },
+                if favorite {
+                    y + 32.0
+                } else if context == "home-card" {
+                    y + 166.0
+                } else {
+                    y + 176.0
+                },
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
                 "--color-surface-canvas",
@@ -5315,6 +5353,12 @@ fn add_unavailable_card_cues(
         return;
     }
     let home = context == "home-card";
+    // Home is a six-item ready rail in the approved composition. Should live data place an
+    // unavailable item in that rail, its hero status remains truthful without adding a second
+    // state treatment or reason line to the compact card.
+    if home {
+        return;
+    }
     let art_height = if home { 158.0 } else { 136.0 };
     let badge = match availability {
         Availability::NeedsNetwork { .. } => "Network",
@@ -5570,11 +5614,11 @@ fn add_explicit_action_name(action_node: &mut Node) {
             &format!("action-name-{}", action_node.id.as_str()),
             Role::Text,
             &action_node.accessible_label,
-            action_node.bounds.x + 12.0,
-            action_node.bounds.y + (action_node.bounds.height - 28.0).max(0.0) / 2.0,
-            (action_node.bounds.width - 24.0).max(1.0),
+            action_node.bounds.x,
+            action_node.bounds.y + (action_node.bounds.height - 34.0).max(0.0),
+            action_node.bounds.width.max(1.0),
             28.0_f32.min(action_node.bounds.height),
-            "--state-rest-surface",
+            "--color-surface-canvas",
         )
         .with_type_role(TypeRole::Label);
         label.state = action_node.state;
@@ -8454,8 +8498,8 @@ mod tests {
             .unwrap()
         );
 
-        assert!(scene.contains("Not supported on this device"));
-        assert!(scene.contains('…'));
+        assert!(scene.contains("Unavailable"));
+        assert!(!scene.contains("home-card-reason-empty"));
         assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
@@ -9492,7 +9536,7 @@ mod tests {
     }
 
     #[test]
-    fn home_card_focus_owner_is_actionable_and_long_caption_fits_above_footer() {
+    fn home_card_focus_owner_is_actionable_without_a_duplicate_reason_caption() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
                 .then_some(node)
@@ -9526,8 +9570,6 @@ mod tests {
             .unwrap();
         let card = find(scene.root(), "item-setup").unwrap();
         let art = find(scene.root(), "home-card-art-setup").unwrap();
-        let caption = find(scene.root(), "home-card-reason-setup").unwrap();
-        let footer = find(scene.root(), "prompt-bar").unwrap();
 
         assert_eq!(card.role, Role::ListItem);
         assert!(card.bounds.width >= art.bounds.width);
@@ -9538,7 +9580,7 @@ mod tests {
             !card.accessible_label.trim().is_empty(),
             "the focus owner must have an accessible label"
         );
-        assert_eq!(card.style_token, "--state-focused-ring");
+        assert_eq!(card.style_token, "--color-surface-canvas");
         let focus_bounds = find(scene.root(), scene.default_focus().as_str())
             .unwrap()
             .bounds;
@@ -9549,15 +9591,9 @@ mod tests {
             find(scene.root(), "home-card-veil-setup").is_none(),
             "an unavailable artless plate retains its identity instead of receiving a veil"
         );
-        assert!(caption.accessible_label.ends_with('…'));
         assert!(
-            caption.bounds.height > 48.0,
-            "the caption must wrap to three lines"
-        );
-        assert!(caption.bounds.y + caption.bounds.height <= footer.bounds.y);
-        assert!(
-            caption.bounds.y + caption.bounds.height < footer.bounds.y,
-            "the final line needs guard-visible breathing room above the footer"
+            find(scene.root(), "home-card-reason-setup").is_none(),
+            "Home cards must not repeat availability reasons below the canvas label"
         );
         assert!(
             find(card, "home-card-title-setup").is_some(),

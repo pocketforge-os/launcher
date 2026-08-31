@@ -113,12 +113,12 @@ fn rendered_chrome_contains_sparse_shaped_glyph_ink() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "f5560c1ab1c705e3a2cd33bed7e1636579c457c732795f6513eb8dc1a97743fb  ",
-        "845278df835f4cadbee94087a69cb1db1bc8a2025bb5fd30e560261ce3c76cbb  ",
-        "86960891f6c2a136c40481c323c5e70301a089e695749a7d94a9ba536de95cb7  ",
-        "c30d090bf368b7a64d511bda6c37f4386ecc8a948ff77c8a3d4915532081aff2  ",
+        "7f115137f775a9d569ccb1f80a026d9b1103a26f219c75f2a86cbb3e23af1993  ",
+        "181fde72e69ed0e6cd4be871a39ada77a34a0274e33650d546fb6b989c98715c  ",
+        "923e1160168673d1e0f6b92785302a16df8384a92d1574dec5c6ac5b66d67131  ",
+        "b7395d524fc397a4f1b9120de907f3d30cbd8727c58e80636edf4ce6d93a9203  ",
         "faf20b49c99414d7ee61a769794d3d0793856e8dee7ca17d6bb1ac49f63ebed4  ",
-        "745226fc264e4b74ecd8a718d6652ade01d0aea191757fb499ef3c104e580226  ",
+        "73a5206f9e00d4abc361b73353b0bc0bfeb15f8436229a9688fb9e53e17d1b34  ",
         "c2ab62425d7c2af70ec65c00b2ee1070b27b5df36601b2e1c44133d9ca330042  ",
         "ffcc126ddbe5b26f0cbe3ec81e05661cecd113ea6d14cf2659d573f9157bef65  ",
         "f6cd80b138da2655bc9ff18dcf91d9cbe586ebf282468d1260cf5ce1bbdbcb6f  ",
@@ -126,9 +126,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("845278d"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("181fde7"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("c30d090"),
+        lines.lines().nth(3).unwrap().starts_with("b7395d5"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -203,6 +203,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("1118c6a91b35c13005d6f71650a78cdc8534c8454ba0433a13af5f7be7c347fd  ")
+        transcript.contains("ff860fd814fa6aa38b2d07b91dc9a677a4fdf8fd8e41ffdc8e1793784e74e4ad  ")
     );
 }

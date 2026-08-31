@@ -282,6 +282,14 @@ fn read_catalog_art(manifest_dir: &Path, reference: &str) -> Option<Arc<[u8]>> {
     fs::read(path).ok().map(Arc::from)
 }
 
+fn resolve_art(base: Option<&Path>, reference: &str) -> Option<Arc<[u8]>> {
+    if reference.starts_with("fixture-art:") {
+        vendored_art(reference)
+    } else {
+        read_catalog_art(base?, reference)
+    }
+}
+
 fn manifest_art_core(
     snapshot: &CatalogSnapshot,
     theme: &pf_theme::Theme,
@@ -289,7 +297,7 @@ fn manifest_art_core(
     policy: ArtBase,
 ) -> ShellCore {
     ShellCore::boot_with_art(snapshot, theme, reduced, move |item, reference| {
-        read_catalog_art(art_base_path(item, &policy)?, reference)
+        resolve_art(art_base_path(item, &policy), reference)
     })
 }
 
@@ -305,8 +313,24 @@ fn snapshot_core(
 ) -> ShellCore {
     let directory = snapshot_path.parent().unwrap_or_else(|| Path::new(""));
     ShellCore::boot_with_art(snapshot, theme, reduced, move |_, reference| {
-        vendored_art(reference).or_else(|| read_catalog_art(directory, reference))
+        resolve_art(Some(directory), reference)
     })
+}
+
+fn selected_core(
+    snapshot: &CatalogSnapshot,
+    snapshot_path: Option<&Path>,
+    fixture_mode: bool,
+    theme: &pf_theme::Theme,
+    reduced: bool,
+) -> ShellCore {
+    if let Some(path) = snapshot_path {
+        snapshot_core(snapshot, path, theme, reduced)
+    } else if fixture_mode {
+        fixture_core(snapshot, theme, reduced)
+    } else {
+        catalog_core(snapshot, theme, reduced)
+    }
 }
 struct SnapshotCatalog(CatalogSnapshot);
 
@@ -492,13 +516,13 @@ fn main() -> Result<(), String> {
             footer.push_str(glyph);
         }
     }
-    let mut core = if fixture_mode {
-        fixture_core(&snapshot, &theme, reduced)
-    } else if let Some(path) = &snapshot_path {
-        snapshot_core(&snapshot, path, &theme, reduced)
-    } else {
-        catalog_core(&snapshot, &theme, reduced)
-    };
+    let mut core = selected_core(
+        &snapshot,
+        snapshot_path.as_deref(),
+        fixture_mode,
+        &theme,
+        reduced,
+    );
     core.set_control_bindings(control_bindings(&glyphs));
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
@@ -3751,6 +3775,33 @@ exec="./launch"
     }
 
     #[test]
+    fn relative_art_uses_disk_even_when_its_basename_is_vendored() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("art")).unwrap();
+        let disk_bytes = b"not the vendored ridgeline bytes";
+        fs::write(dir.path().join("art/ridgeline.png"), disk_bytes).unwrap();
+
+        let resolved = resolve_art(Some(dir.path()), "art/ridgeline.png").unwrap();
+        assert_eq!(resolved.as_ref(), disk_bytes);
+        assert_ne!(resolved, vendored_art("fixture-art:ridgeline.png").unwrap());
+    }
+
+    #[test]
+    fn fixture_art_namespace_is_vendored_without_disk_access() {
+        assert_eq!(
+            resolve_art(None, "fixture-art:ridgeline.png"),
+            vendored_art("fixture-art:ridgeline.png")
+        );
+    }
+
+    #[test]
+    fn unresolved_non_fixture_art_does_not_fall_back_to_vendored_basename() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(resolve_art(Some(dir.path()), "art/ridgeline.png").is_none());
+    }
+
+    #[test]
     fn catalog_art_resolver_rejects_oversized_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("large.png");
@@ -3802,6 +3853,37 @@ exec="./launch"
             actual, expected,
             "snapshot must render the adjacent file's pixels"
         );
+    }
+
+    #[test]
+    fn snapshot_resolver_is_selected_in_fixture_and_interactive_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("catalog.json");
+        fs::create_dir(dir.path().join("art")).unwrap();
+        fs::write(
+            dir.path().join("art/cover.png"),
+            include_bytes!("../fixtures/art/hollow-tides.png"),
+        )
+        .unwrap();
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
+
+        for fixture_mode in [true, false] {
+            let core = selected_core(
+                &snapshot,
+                Some(&snapshot_path),
+                fixture_mode,
+                &pf_theme::flagship(),
+                false,
+            );
+            assert_eq!(
+                core.art_treatment("ridgeline"),
+                Some(pf_shell_core::ArtTreatment::CatalogArt),
+                "snapshot resolver must win when fixture_mode={fixture_mode}"
+            );
+        }
     }
 
     #[test]

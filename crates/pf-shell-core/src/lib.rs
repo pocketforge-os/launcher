@@ -36,6 +36,7 @@ use std::time::{Duration, SystemTime};
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 6;
+const HOME_SHELF_GAP: f32 = 47.2;
 const LIBRARY_SIDE_MARGIN: f32 = 48.0;
 const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
@@ -2933,14 +2934,33 @@ impl ShellCore {
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
-            let count = self.items.len().min(HOME_SHELF_LIMIT);
+            let shelf_count = self.items.len().min(HOME_SHELF_LIMIT);
             let card_width = CARD_ART_WIDTH;
-            let gap = if count > 1 {
-                (w - 96.0 - card_width * count as f32) / (count - 1) as f32
+            let available = (w - 96.0).max(0.0);
+            let mut visible_count = 1;
+            let mut occupied = card_width;
+            while visible_count < shelf_count && occupied + HOME_SHELF_GAP + card_width <= available
+            {
+                visible_count += 1;
+                occupied += HOME_SHELF_GAP + card_width;
+            }
+            let first_visible = self
+                .focus
+                .saturating_sub(visible_count - 1)
+                .min(shelf_count.saturating_sub(visible_count));
+            let gap = if visible_count > 1 {
+                (available - card_width * visible_count as f32) / (visible_count - 1) as f32
             } else {
                 0.0
             };
-            for (i, item) in self.items.iter().take(HOME_SHELF_LIMIT).enumerate() {
+            for (i, item) in self
+                .items
+                .iter()
+                .take(HOME_SHELF_LIMIT)
+                .skip(first_visible)
+                .take(visible_count)
+                .enumerate()
+            {
                 let availability = best_availability(item);
                 let x = 48.0 + i as f32 * (card_width + gap);
                 let mut n = node(
@@ -2954,7 +2974,7 @@ impl ShellCore {
                     "--color-surface-canvas",
                 );
                 n.action = Some(NodeAction::Activate);
-                n.state.focused = i == self.focus;
+                n.state.focused = i + first_visible == self.focus;
                 n.children = art_nodes(
                     item,
                     "home-card",
@@ -9551,6 +9571,62 @@ mod tests {
                 .iter()
                 .all(|node| node.id.as_str() != "favorites-label")
         );
+    }
+
+    #[test]
+    fn narrow_home_shelf_actionable_cards_do_not_overlap() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("game-{index}"),
+                    &format!("Game {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("game-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let scene = fixture_core(items)
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 480.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let cards = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.action == Some(NodeAction::Activate))
+            .collect::<Vec<_>>();
+
+        assert_eq!(cards.len(), 2, "640px surface fits exactly two shelf cards");
+        for (index, card) in cards.iter().enumerate() {
+            for other in cards.iter().skip(index + 1) {
+                assert!(
+                    !intersects(card.bounds, other.bounds),
+                    "{} {:?} overlaps {} {:?}",
+                    card.id.as_str(),
+                    card.bounds,
+                    other.id.as_str(),
+                    other.bounds
+                );
+            }
+        }
     }
 
     #[test]

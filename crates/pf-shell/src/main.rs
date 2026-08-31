@@ -2272,7 +2272,8 @@ fn assert_raster_text_legible(
     text_scale: u16,
 ) -> Result<(), String> {
     fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
-        if &node.id == target {
+        let lifted_target = format!("library-fade-lift-{}", target.as_str());
+        if &node.id == target || node.id.as_str() == lifted_target {
             node.role = Role::Group;
             return;
         }

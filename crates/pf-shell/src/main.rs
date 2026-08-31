@@ -648,6 +648,14 @@ fn main() -> Result<(), String> {
     }
     core.load_preferences(preferences, first_run_complete)
         .map_err(|e| format!("preferences: {e:?}"))?;
+    if args.iter().any(|a| a == "--high-contrast-evidence") {
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("highContrast".into()),
+            effective: PreferenceValue::Bool(true),
+            stored: PreferenceValue::Bool(true),
+            applied: true,
+        });
+    }
     let mut fake_power;
     let mut unavailable_power;
     let power: &mut dyn PowerPort = if device_fixture_mode {
@@ -804,6 +812,10 @@ fn main() -> Result<(), String> {
         emit(&mut host, &mut core, &footer, out, "system")?;
         core.reset_first_run();
         emit(&mut host, &mut core, &footer, out, "first-run")?;
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--high-contrast-evidence") {
+        emit(&mut host, &mut core, &footer, out, "high-contrast")?;
         return Ok(());
     }
     emit(&mut host, &mut core, &footer, out, "boot-home")?;

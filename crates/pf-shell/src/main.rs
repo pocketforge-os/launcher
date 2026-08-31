@@ -1875,7 +1875,7 @@ fn assert_raster_text_legible(
 ) -> Result<(), String> {
     fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
         if &node.id == target {
-            node.accessible_label.clear();
+            node.role = Role::Group;
             return;
         }
         for child in &mut node.children {
@@ -2150,8 +2150,8 @@ fn present_scene(
     scene: &pf_scene::Scene,
 ) -> Result<(), String> {
     host.set_theme_base(core.theme_base());
-    let painted_scene = scene_without_composite_container_labels(scene)?;
-    host.present(&painted_scene).map_err(|e| e.to_string())?;
+    ensure_action_labels(scene)?;
+    host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
         .render_notes()
         .is_some_and(|notes| core.reject_art_sources(failed_source_ids(notes)));
@@ -2159,31 +2159,24 @@ fn present_scene(
         let fallback = core
             .scene(host.metrics(), prompt)
             .ok_or("shell has no fallback frame")?;
-        let painted_fallback = scene_without_composite_container_labels(&fallback)?;
-        host.present(&painted_fallback).map_err(|e| e.to_string())?;
+        ensure_action_labels(&fallback)?;
+        host.present(&fallback).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-fn scene_without_composite_container_labels(
-    scene: &pf_scene::Scene,
-) -> Result<pf_scene::Scene, String> {
-    fn suppress(node: &mut Node) {
-        let child_paints_text = node.children.iter().any(|child| {
-            matches!(child.role, Role::Text | Role::Heading)
-                && !child.accessible_label.trim().is_empty()
-        });
-        if node.action.is_some() && child_paints_text {
-            node.accessible_label.clear();
+fn ensure_action_labels(scene: &pf_scene::Scene) -> Result<(), String> {
+    fn visit(node: &Node) -> Result<(), String> {
+        if node.action.is_some() && node.accessible_label.trim().is_empty() {
+            return Err(format!(
+                "action has no accessible label on {}",
+                node.id.as_str()
+            ));
         }
-        for child in &mut node.children {
-            suppress(child);
-        }
+        node.children.iter().try_for_each(visit)
     }
 
-    let mut root = scene.root().clone();
-    suppress(&mut root);
-    pf_scene::Scene::new(root, scene.default_focus().clone()).map_err(|error| error.to_string())
+    visit(scene.root())
 }
 
 fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {

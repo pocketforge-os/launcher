@@ -191,6 +191,45 @@ fn vendored_art(reference: &str) -> Option<Arc<[u8]>> {
         "art/petrichor.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/petrichor.png")[..],
         )),
+        "art/lumen-vale.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/lumen-vale.png")[..],
+        )),
+        "art/redshift-alley.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/redshift-alley.png")[..],
+        )),
+        "art/quiet-machines.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/quiet-machines.png")[..],
+        )),
+        "art/low-orbit.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/low-orbit.png")[..],
+        )),
+        "art/paper-armada.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/paper-armada.png")[..],
+        )),
+        "art/vega-crossing.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/vega-crossing.png")[..],
+        )),
+        "art/iron-meridian.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/iron-meridian.png")[..],
+        )),
+        "art/signal-decay.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/signal-decay.png")[..],
+        )),
+        "art/milewide.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/milewide.png")[..],
+        )),
+        "art/orchard-of-glass.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/orchard-of-glass.png")[..],
+        )),
+        "art/cinder-loop.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/cinder-loop.png")[..],
+        )),
+        "art/halfmoon-harbor.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/halfmoon-harbor.png")[..],
+        )),
+        "art/fern-and-fathom.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/fern-and-fathom.png")[..],
+        )),
         "art/corrupt.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/corrupt.png")[..],
         )),
@@ -2240,10 +2279,35 @@ fn present_scene(
 }
 
 fn ensure_action_labels(scene: &pf_scene::Scene) -> Result<(), String> {
+    fn contains(outer: pf_scene::Bounds, inner: pf_scene::Bounds) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width
+            && inner.y + inner.height <= outer.y + outer.height
+    }
+
+    fn has_name_ink(node: &Node, action_bounds: pf_scene::Bounds) -> bool {
+        node.children.iter().any(|child| {
+            (matches!(child.role, Role::Text | Role::Heading)
+                && !child.accessible_label.trim().is_empty()
+                && contains(action_bounds, child.bounds))
+                || has_name_ink(child, action_bounds)
+        })
+    }
+
     fn visit(node: &Node) -> Result<(), String> {
         if node.action.is_some() && node.accessible_label.trim().is_empty() {
             return Err(format!(
                 "action has no accessible label on {}",
+                node.id.as_str()
+            ));
+        }
+        if node.action.is_some()
+            && !node.accessible_label.trim().is_empty()
+            && !has_name_ink(node, node.bounds)
+        {
+            return Err(format!(
+                "action has no explicit in-bounds name ink on {}",
                 node.id.as_str()
             ));
         }
@@ -2582,14 +2646,15 @@ mod durable_tests {
     }
 
     #[test]
-    fn fixture_library_matches_the_six_item_mockup_roster_and_art_treatments() {
+    fn fixture_library_matches_the_full_mockup_roster_and_home_six() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
-        assert_eq!(snapshot.items.len(), 6);
+        assert_eq!(snapshot.items.len(), 23);
         assert_eq!(
             snapshot
                 .items
                 .iter()
+                .take(6)
                 .map(|item| item.title.as_str())
                 .collect::<Vec<_>>(),
             [
@@ -2608,7 +2673,7 @@ mod durable_tests {
         );
         assert!(matches!(
             snapshot.items[4].variants[0].availability,
-            pf_catalog::Availability::NeedsNetwork { .. }
+            pf_catalog::Availability::Ready
         ));
 
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
@@ -2625,7 +2690,7 @@ mod durable_tests {
                 "",
             )
             .unwrap();
-        for item in &snapshot.items {
+        for item in snapshot.items.iter().take(6) {
             let card = scene
                 .root()
                 .children
@@ -2663,7 +2728,7 @@ mod durable_tests {
                 .find(|node| node.id.as_str() == "hero-status")
                 .unwrap()
                 .accessible_label,
-            "● Ready · Game · Installed on this device · 34 hours on the trail"
+            "● Ready · Game · Installed · 34 hours on the trail"
         );
     }
 
@@ -2705,7 +2770,7 @@ mod durable_tests {
         let catalog_scene = catalog_core(&catalog, &pf_theme::flagship(), false)
             .scene(metrics, "")
             .unwrap();
-        for fixture_item in &fixture.items {
+        for fixture_item in fixture.items.iter().take(6) {
             let catalog_id = format!("installed-applications:{}", fixture_item.id);
             assert_eq!(
                 composition(&fixture_scene, &fixture_item.id),
@@ -3569,6 +3634,7 @@ exec="./launch"
             &snapshot
                 .items
                 .iter()
+                .take(6)
                 .find(|item| item.id.ends_with(id))
                 .unwrap()
                 .variants[0]
@@ -3749,6 +3815,7 @@ exec="./launch"
             snapshot
                 .items
                 .iter()
+                .take(6)
                 .map(|item| item.title.as_str())
                 .collect::<Vec<_>>(),
             [

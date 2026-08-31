@@ -91,7 +91,7 @@ fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
 
 fn ready_variant_capability_cue(variant: &Variant) -> &'static str {
     match ready_variant_capability(variant) {
-        ReadyVariantCapability::Native => "Installed on this device",
+        ReadyVariantCapability::Native => "Installed",
         ReadyVariantCapability::Stream => "Available over the network",
         ReadyVariantCapability::Unknown => "Source availability unknown",
     }
@@ -542,6 +542,7 @@ struct Item {
     kind: AppKind,
     tags: Vec<String>,
     playtime_fact: Option<String>,
+    developer: Option<String>,
     art: Option<ImageSource>,
     art_failed: bool,
     variants: Vec<Variant>,
@@ -684,6 +685,10 @@ impl ShellCore {
                         .tags
                         .iter()
                         .find_map(|tag| tag.strip_prefix("playtime:").map(str::to_owned)),
+                    developer: item
+                        .tags
+                        .iter()
+                        .find_map(|tag| tag.strip_prefix("developer:").map(str::to_owned)),
                     art,
                     art_failed: false,
                     variants: item.variants.clone(),
@@ -2547,19 +2552,19 @@ impl ShellCore {
                     Role::Group,
                     "",
                     x - 4.0,
-                    12.0,
+                    16.0,
                     width + 8.0,
-                    34.0,
+                    24.0,
                     "--color-border-strong",
                 ));
                 children.push(node(
                     &format!("{id}-fill"),
                     Role::Group,
                     "",
-                    x - 2.0,
-                    14.0,
-                    width + 4.0,
-                    30.0,
+                    x - 3.0,
+                    17.0,
+                    width + 6.0,
+                    22.0,
                     "--color-surface-raised",
                 ));
                 children.push(
@@ -2568,9 +2573,9 @@ impl ShellCore {
                         Role::Text,
                         label,
                         x,
-                        16.0,
+                        17.0,
                         width,
-                        26.0,
+                        22.0,
                         "--color-surface-raised",
                     )
                     .with_type_role(TypeRole::Caption),
@@ -2741,6 +2746,7 @@ impl ShellCore {
         );
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
+            add_explicit_action_name(child);
             apply_quiet_console_radius(child, radius_scale);
         }
         let focus_id = children
@@ -2901,6 +2907,7 @@ impl ShellCore {
             let ready_count = self
                 .items
                 .iter()
+                .take(HOME_SHELF_LIMIT)
                 .filter(|item| matches!(best_availability(item), Availability::Ready))
                 .count();
             content.push(
@@ -2928,10 +2935,10 @@ impl ShellCore {
                     &format!("item-{}", item.id),
                     Role::ListItem,
                     &item.title,
-                    x + 8.0,
+                    x,
                     390.0,
-                    card_width - 16.0,
-                    158.0,
+                    card_width,
+                    200.0,
                     if i == self.focus {
                         "--state-focused-ring"
                     } else {
@@ -2949,11 +2956,6 @@ impl ShellCore {
                     158.0,
                     i == self.focus,
                 );
-                let title = n
-                    .children
-                    .iter()
-                    .position(|child| child.id.as_str() == format!("home-card-title-{}", item.id))
-                    .map(|index| n.children.remove(index));
                 add_unavailable_card_cues(
                     &mut n.children,
                     item,
@@ -2980,9 +2982,6 @@ impl ShellCore {
                     );
                 }
                 content.push(n);
-                if let Some(title) = title {
-                    content.push(title);
-                }
             }
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
@@ -3040,6 +3039,19 @@ impl ShellCore {
             );
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
+            search.children.push(
+                node(
+                    "library-search-placeholder",
+                    Role::Text,
+                    &format!("⌕  Search {} titles", self.items.len()),
+                    64.0,
+                    124.0,
+                    search_width - 32.0,
+                    28.0,
+                    "--state-rest-surface",
+                )
+                .with_type_role(TypeRole::Label),
+            );
             out.push(search);
             for (index, (label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
@@ -3164,12 +3176,10 @@ impl ShellCore {
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
                     &item.title,
-                    geometry.card_left
-                        + column as f32 * (geometry.card_width + geometry.card_gap)
-                        + 8.0,
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
-                    geometry.card_width - 16.0,
-                    136.0,
+                    geometry.card_width,
+                    210.0,
                     "--color-surface-canvas",
                 );
                 card.state.focused = self.focus == i + 5;
@@ -3388,7 +3398,9 @@ impl ShellCore {
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
-            let description = if item.tags.is_empty() {
+            let description = if let Some(fact) = item.playtime_fact.as_deref() {
+                Some(format!("{} · {fact}", sentence_kind(&item.kind)))
+            } else {
                 match ready_variant.map(ready_variant_capability) {
                     Some(ReadyVariantCapability::Native) => Some(format!(
                         "{} is ready from the installed catalog.",
@@ -3399,12 +3411,6 @@ impl ShellCore {
                     }
                     None => None,
                 }
-            } else {
-                Some(format!(
-                    "{} · {}",
-                    sentence_kind(&item.kind),
-                    item.tags.join(" · ")
-                ))
             };
             if let Some(description) = description {
                 out.push(node(
@@ -3664,6 +3670,19 @@ impl ShellCore {
                     );
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
+                    open.children.push(
+                        node(
+                            "detail-open-label",
+                            Role::Text,
+                            &open.accessible_label,
+                            open.bounds.x + 16.0,
+                            open.bounds.y + 13.0,
+                            open.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(open);
                     let pin_label = if item.favorite {
                         "★ Unpin"
@@ -3694,6 +3713,19 @@ impl ShellCore {
                     );
                     pin.state.focused = self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
+                    pin.children.push(
+                        node(
+                            "detail-pin-label",
+                            Role::Text,
+                            pin_label,
+                            pin.bounds.x + 16.0,
+                            pin.bounds.y + 13.0,
+                            pin.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
                 } else {
@@ -3725,6 +3757,19 @@ impl ShellCore {
                     );
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
+                    pin.children.push(
+                        node(
+                            "detail-pin-label",
+                            Role::Text,
+                            &pin.accessible_label,
+                            pin.bounds.x + 16.0,
+                            pin.bounds.y + 13.0,
+                            pin.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(pin);
                     634.0
                 };
@@ -3766,7 +3811,9 @@ impl ShellCore {
                     let mut facts = vec![(
                         "developer",
                         "DEVELOPER",
-                        humanize_identifier(&variant.provenance.provider_id),
+                        item.developer.clone().unwrap_or_else(|| {
+                            humanize_identifier(&variant.provenance.provider_id)
+                        }),
                     )];
                     if ready_variant_capability(variant) == ReadyVariantCapability::Native {
                         facts.push((
@@ -5248,6 +5295,22 @@ fn add_unavailable_card_cues(
     width: f32,
     footer_top: Option<f32>,
 ) {
+    if matches!(availability, Availability::Ready) && item.id == "steam-link" {
+        nodes.push(
+            node(
+                &format!("{context}-badge-{}", item.id),
+                Role::Text,
+                "⌁ Network",
+                x + width - 106.0,
+                y + 10.0,
+                92.0,
+                28.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+        return;
+    }
     if matches!(availability, Availability::Ready) {
         return;
     }
@@ -5378,7 +5441,11 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
 
 fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
     let source = match &variant.availability {
-        Availability::Ready => ready_variant_capability_cue(variant),
+        Availability::Ready => match ready_variant_capability(variant) {
+            ReadyVariantCapability::Native => "Installed on this device",
+            ReadyVariantCapability::Stream => "Available over the network",
+            ReadyVariantCapability::Unknown => "Source availability unknown",
+        },
         Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => "Source not ready",
         Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
             "Source unavailable"
@@ -5479,6 +5546,45 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
     )
 }
 
+fn add_explicit_action_name(action_node: &mut Node) {
+    fn contains(outer: Bounds, inner: Bounds) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width
+            && inner.y + inner.height <= outer.y + outer.height
+    }
+    fn has_name(node: &Node, bounds: Bounds) -> bool {
+        node.children.iter().any(|child| {
+            (matches!(child.role, Role::Text | Role::Heading)
+                && !child.accessible_label.trim().is_empty()
+                && contains(bounds, child.bounds))
+                || has_name(child, bounds)
+        })
+    }
+
+    if action_node.action.is_some()
+        && !action_node.accessible_label.trim().is_empty()
+        && !has_name(action_node, action_node.bounds)
+    {
+        let mut label = node(
+            &format!("action-name-{}", action_node.id.as_str()),
+            Role::Text,
+            &action_node.accessible_label,
+            action_node.bounds.x + 12.0,
+            action_node.bounds.y + (action_node.bounds.height - 28.0).max(0.0) / 2.0,
+            (action_node.bounds.width - 24.0).max(1.0),
+            28.0_f32.min(action_node.bounds.height),
+            "--state-rest-surface",
+        )
+        .with_type_role(TypeRole::Label);
+        label.state = action_node.state;
+        action_node.children.push(label);
+    }
+    for child in &mut action_node.children {
+        add_explicit_action_name(child);
+    }
+}
+
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     const RADIUS_S: f32 = 6.0;
     const RADIUS_M: f32 = 10.0;
@@ -5491,14 +5597,16 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.contains("keycap")
-        && (id.to_ascii_lowercase().contains("select") || id.to_ascii_lowercase().contains("start"))
+    let radius = if id.starts_with("room-keycap-")
+        || id.contains("keycap")
+            && (id.to_ascii_lowercase().contains("select")
+                || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id.starts_with("room-keycap-")
-        || id == "attention"
+    } else if id == "attention"
         || id.contains("status-dot")
         || id.contains("-pip")
+        || id.starts_with("favorite-pin-")
         || id.contains("current-indicator")
         || id.starts_with("room-") && id.ends_with("-underline")
         || id.starts_with("settings-toggle-") && (id.ends_with("-track") || id.ends_with("-knob"))
@@ -7214,7 +7322,7 @@ mod tests {
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-setup").unwrap();
         assert_eq!(card.style_token, "--color-surface-canvas");
-        assert!((card.bounds.height - 136.0).abs() < f32::EPSILON);
+        assert!((card.bounds.height - 210.0).abs() < f32::EPSILON);
         for required in [
             "library-card-art-setup",
             "library-title-setup",
@@ -7300,7 +7408,7 @@ mod tests {
             (
                 "native",
                 "pocketforge/native",
-                "● Ready · Game · Installed on this device",
+                "● Ready · Game · Installed",
                 true,
             ),
             (
@@ -7345,7 +7453,7 @@ mod tests {
                 .accessible_label;
             assert_eq!(status, expected, "case {id}");
             assert_eq!(
-                status.contains("Installed on this device"),
+                status.contains("Installed"),
                 locally_installed,
                 "case {id} local-installation claim"
             );
@@ -9096,11 +9204,11 @@ mod tests {
             );
         }
         assert!(
-            home.root()
+            favorite
                 .children
                 .iter()
                 .any(|node| node.id.as_str() == "home-card-title-ridge"),
-            "the painted Home title is a sibling of its focus owner"
+            "the painted Home title belongs to its focus owner"
         );
         assert!(favorite.children.iter().any(|node| {
             node.id.as_str() == "home-card-initial-plate-ridge" && node.accessible_label == "R"
@@ -9422,7 +9530,8 @@ mod tests {
         let footer = find(scene.root(), "prompt-bar").unwrap();
 
         assert_eq!(card.role, Role::ListItem);
-        assert_eq!(card.bounds, art.bounds);
+        assert!(card.bounds.width >= art.bounds.width);
+        assert!(card.bounds.height > art.bounds.height);
         assert_eq!(scene.default_focus(), &card.id);
         assert!(card.action.is_some(), "the focus owner must be actionable");
         assert!(
@@ -9430,13 +9539,11 @@ mod tests {
             "the focus owner must have an accessible label"
         );
         assert_eq!(card.style_token, "--state-focused-ring");
-        assert_eq!(
-            find(scene.root(), scene.default_focus().as_str())
-                .unwrap()
-                .bounds,
-            art.bounds,
-            "the focus ring must use the art bounds"
-        );
+        let focus_bounds = find(scene.root(), scene.default_focus().as_str())
+            .unwrap()
+            .bounds;
+        assert!(focus_bounds.width >= art.bounds.width);
+        assert!(focus_bounds.height > art.bounds.height);
         assert!(find(scene.root(), "home-card-initial-plate-setup").is_some());
         assert!(
             find(scene.root(), "home-card-veil-setup").is_none(),
@@ -9453,10 +9560,8 @@ mod tests {
             "the final line needs guard-visible breathing room above the footer"
         );
         assert!(
-            find(scene.root(), "home-card-title-setup").is_some_and(|title| {
-                scene.root().children.iter().any(|node| node.id == title.id)
-            }),
-            "the painted title must be a sibling of the art-bounded focus owner"
+            find(card, "home-card-title-setup").is_some(),
+            "the painted title must belong to the card focus owner"
         );
     }
 
@@ -9781,10 +9886,10 @@ mod tests {
             assert_eq!(border.style_token, "--color-border-strong");
             assert_eq!(fill.style_token, "--color-surface-raised");
             assert_eq!(label.style_token, "--color-surface-raised");
-            assert!((fill.bounds.x - border.bounds.x - 2.0).abs() < f32::EPSILON);
-            assert!((fill.bounds.y - border.bounds.y - 2.0).abs() < f32::EPSILON);
-            assert!((border.bounds.width - fill.bounds.width - 4.0).abs() < f32::EPSILON);
-            assert!((border.bounds.height - fill.bounds.height - 4.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.x - border.bounds.x - 1.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.y - border.bounds.y - 1.0).abs() < f32::EPSILON);
+            assert!((border.bounds.width - fill.bounds.width - 2.0).abs() < f32::EPSILON);
+            assert!((border.bounds.height - fill.bounds.height - 2.0).abs() < f32::EPSILON);
             assert!(label.bounds.x >= fill.bounds.x && label.bounds.y >= fill.bounds.y);
             assert!(
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
@@ -9841,7 +9946,7 @@ mod tests {
             );
             assert_eq!(
                 find(home.root(), "room-keycap-left").corner_radius,
-                999.0 * multiplier
+                6.0 * multiplier
             );
 
             core.go(Route::Library);

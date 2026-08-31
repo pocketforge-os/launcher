@@ -84,6 +84,18 @@ fn caption_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
 }
 
+// Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
+// by the same Cosmic Text shaping configuration that paints the Label role. Keeping
+// the finite prompt vocabulary exact avoids turning conservative layout reserve into
+// invisible trailing space at the right-aligned edge.
+fn library_prompt_verb_width(text: &str) -> f32 {
+    match text {
+        "Search" | "Details" => 52.0,
+        "Filter" => 37.0,
+        _ => label_text_width(text),
+    }
+}
+
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
@@ -5997,11 +6009,64 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         node.bounds.x -= index as f32 * SPACE_2;
         node.bounds.y = centered_y;
     }
+    let prompt_count = nodes
+        .iter()
+        .filter_map(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-verb-")
+                .and_then(|index| index.parse::<usize>().ok())
+        })
+        .max()
+        .map_or(0, |index| index + 1);
+    let mut x = nodes
+        .iter()
+        .map(|node| node.bounds.x)
+        .fold(f32::INFINITY, f32::min);
+    for index in 0..prompt_count {
+        let prefix = format!("home-prompt-keycap-{index}");
+        let keycap_x = nodes
+            .iter()
+            .find(|node| node.id.as_str() == prefix)
+            .map(|node| node.bounds.x)
+            .expect("prompt keycap text");
+        let keycap_width = nodes
+            .iter()
+            .find(|node| node.id.as_str() == format!("{prefix}-border"))
+            .map(|node| node.bounds.width)
+            .expect("prompt keycap border");
+        for node in nodes.iter_mut().filter(|node| {
+            node.id.as_str() == prefix
+                || node.id.as_str() == format!("{prefix}-border")
+                || node.id.as_str() == format!("{prefix}-fill")
+        }) {
+            node.bounds.x += x - keycap_x;
+        }
+        x += keycap_width + SPACE_2;
+
+        let verb = nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == format!("home-prompt-verb-{index}"))
+            .expect("prompt verb");
+        verb.bounds.x = x;
+        verb.bounds.width = library_prompt_verb_width(&verb.accessible_label);
+        x += verb.bounds.width + SPACE_5;
+    }
     let right = nodes
         .iter()
         .map(|node| node.bounds.x + node.bounds.width)
         .fold(0.0_f32, f32::max);
-    let offset = surface_width - LIBRARY_SIDE_MARGIN - right;
+    let last_verb_ink_inset = nodes
+        .iter()
+        .filter(|node| node.id.as_str().starts_with("home-prompt-verb-"))
+        .max_by_key(|node| node.id.as_str())
+        .map_or(0.0, |node| match node.accessible_label.as_str() {
+            // Swash leaves this much of the shaped advance unpainted after the final
+            // `s`; compensate the ink bearing, not the semantic node boundary.
+            "Details" => 7.0,
+            _ => 0.0,
+        });
+    let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
     for node in &mut nodes {
         node.bounds.x += offset;
     }
@@ -10421,12 +10486,11 @@ mod tests {
                 .iter()
                 .any(|node| node.accessible_label == "·" || node.id.as_str().contains("separator"))
         );
-        let right = prompts
-            .children
-            .iter()
-            .map(|node| node.bounds.x + node.bounds.width)
-            .fold(0.0_f32, f32::max);
-        assert!((right - (1280.0 - SPACE_7)).abs() < f32::EPSILON);
+        let last_verb = node_by_id(prompts, "home-prompt-verb-2").unwrap();
+        assert!(
+            (last_verb.bounds.x + last_verb.bounds.width - 7.0 - (1280.0 - SPACE_7)).abs()
+                < f32::EPSILON
+        );
         let expected_top =
             720.0 - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
         assert!(
@@ -10434,6 +10498,90 @@ mod tests {
                 .children
                 .iter()
                 .all(|node| (node.bounds.y - expected_top).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn desktop_library_footer_last_verb_ink_is_margin_anchored_on_one_row() {
+        fn clear_label(node: &mut Node, id: &str) -> bool {
+            if node.id.as_str() == id {
+                node.accessible_label.clear();
+                return true;
+            }
+            node.children.iter_mut().any(|child| clear_label(child, id))
+        }
+
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "item-0", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "shell".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        let mut suppressed_root = scene.root().clone();
+        assert!(clear_label(&mut suppressed_root, "home-prompt-verb-2"));
+        let suppressed = Scene::new(suppressed_root, scene.default_focus().clone()).unwrap();
+        let rendered = pf_render::Rasterizer::new()
+            .render(&scene, metrics)
+            .unwrap();
+        let without_last_verb = pf_render::Rasterizer::new()
+            .render(&suppressed, metrics)
+            .unwrap();
+
+        let mut ink = rendered
+            .rgba
+            .chunks_exact(4)
+            .zip(without_last_verb.rgba.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(pixel, (painted, blank))| {
+                (painted != blank).then_some((
+                    pixel % rendered.width as usize,
+                    pixel / rendered.width as usize,
+                ))
+            });
+        let first = ink.next().expect("Details must produce raster ink");
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.0, first.0, first.1, first.1);
+        for (x, y) in ink {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        assert!(
+            max_x.abs_diff(1231) <= 2,
+            "rightmost Details ink must meet the 1232px content margin, got x={min_x}..={max_x}"
+        );
+        assert!(
+            max_y - min_y < 15,
+            "Details ink must remain on one label row, got y={min_y}..={max_y}"
         );
     }
 
@@ -10651,7 +10799,7 @@ mod tests {
             node_by_id(scene.root(), "prompts")
                 .unwrap()
                 .accessible_label,
-            "SELECT Search · Y Filter · A Details"
+            "SELECT Search     Y Filter     A Details"
         );
 
         core.action(&ShellAction::Custom("Filter.next".into()));

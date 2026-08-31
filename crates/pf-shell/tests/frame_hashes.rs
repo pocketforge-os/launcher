@@ -15,7 +15,7 @@ fn render_offscreen() -> (tempfile::TempDir, String) {
 }
 
 #[test]
-fn every_evidence_route_has_rasterized_contrasting_text_ink() {
+fn every_presented_evidence_route_has_action_labels_and_rasterized_text_ink() {
     for extra_args in [Vec::<&str>::new(), vec!["--settings-evidence"]] {
         let out = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pf-shell"));
@@ -113,26 +113,27 @@ fn rendered_chrome_contains_sparse_shaped_glyph_ink() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "2b4f696045b121f4c2fcc29b683a8eef61d313a8b93595b3db22be97a58a1e79  ",
-        "7787aa4b8400f8368bce424d413754be3c9487f221d9e8b910c178e4a237a906  ",
-        "f4a71f46d9b93b9338252a7294a5ea04e2fab2cfe11c63cf48b23181efeefd55  ",
-        "3d1e9c32a8fdb2eb8d0d3910f8fa9d9f36be2a082d388614722b97dc0a31ab2d  ",
-        "4b6d2ffe193bab49a645ed8978d803b354d11884fe22965010d35d712efbfd51  ",
-        "ca93211b27214a9de4ff88159c5da68bd5dbb5b1208c8cb630f06d98b6e4a94f  ",
-        "9deb5d54235f106b8e0b314d79dcce0cfbd238f00b8b5b0db915f7fac0b814de  ",
-        "ae8bb54e53c8ef6796534eacf0d5a911895836d07701d0e01239d4289a345a67  ",
-        "8f87fea4ece796c834f4d1293e83d10eebe961baf1c7624261f213ff8a9a0721  ",
-        "8a0f7b4cdbb95c8e043fe41b6189def734b5fe8a2cd44adcf5721919d96edea8  ",
+        "410eacd02b4061a9ff30147b092c00a0fb85a3c68d5b3e3607cc403434a50c5e  ",
+        "c881869a3078ecae98377557e407215fa12461df069aa30c614f4f596e3c1cca  ",
+        "2d2cbb90a19232841ebf136750a178d1a9c4d221955a39edf3d2d8db9996b1ce  ",
+        "eacaa528cadc308493da784ffafdbf2584ca37950e65d49666e78cf31cb0b256  ",
+        "b482d49b652ea5e3585d2adddb8d9a0fcf99288fb7c62f34391fb0ca83a0035c  ",
+        "4ec1ba5ee69b2d1662357e02655fd4d0f37910b6c9ae0989a7db2d87e11a2b60  ",
+        "f3933d98add20cd575cad19e5193fa72a548ff87542e2c478069fcc91f0fe990  ",
+        "b426c07f1870ef5fa3892c4c240214b0ba42499022bd5490dfe4a40111118019  ",
+        "5bf29afaccbaa5b665d2ecc7cb972cafc8f88663f6be72fa73bb528e86e34a5d  ",
+        "18d53912bf92db5e0d421b0cf6c7d95299efe1ffdaade33734923b0bb0b54e39  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("7787aa4"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("c881869"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("3d1e9c3"),
+        lines.lines().nth(3).unwrap().starts_with("eacaa52"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
         "library.png",
+        "library-focused-search.png",
         "search.png",
         "details.png",
         "details-unavailable.png",
@@ -162,19 +163,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("e381bee34567e1bcb1e7e689167e0db575bc589decd034280d7b9cac0b4f1848  ")
+        transcript.contains("92576fd30803641f2c2c92306c0421806cfe380cd90e04fed46d10e20f8dcce7  ")
     );
     assert!(
-        transcript.contains("d3be44730f104b4bf9ead7aef2cb66d4d2e8db272aa1c5e3f2510ea9a2755ad0  ")
+        transcript.contains("8ce105c119eb577ba3b0c75425af80c8649013f3b4a391e096bb803f0e747d5d  ")
     );
     assert!(
-        transcript.contains("720a54816daa35f71c59652e0fc8697a07a2de53ea7cc6c85ea2e301b9a597a2  ")
+        transcript.contains("10ae356157c6d4df0e96dcc39a0d9e37227c6ba1f240c87450164061ddc148de  ")
     );
     assert!(
-        transcript.contains("dddc642bf719a535cc5b8ace92637bace4f44bdf13f79f6f0bcf786ec0a25e0b  ")
+        transcript.contains("91f477e3dd5553a1ea1e8f322dc4bc2870fac54681776e785324c5ce49b4f801  ")
     );
     assert!(
-        transcript.contains("f885eede7587428b04680f32bbc0ba9c6cd71204ed2b5d802d31eb2301db576b  ")
+        transcript.contains("543905d7f8545d2c13b6699ea804825a150e21d0453f66f04f51f99a1a6e0483  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());
@@ -202,6 +203,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("11a403c7bd8183966d916bd4c6762fc5e9fbed6932de223286302aba4cab4cf6  ")
+        transcript.contains("560ed8d949c982a49ea06d7d6b2cdd98a68298a8b1eca110d8c8f924ab4b84fb  ")
     );
 }

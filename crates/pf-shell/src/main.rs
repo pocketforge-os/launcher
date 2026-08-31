@@ -592,6 +592,7 @@ fn emit_f10_evidence(
     }]);
     core.action(&ShellAction::Custom("Room.next".into()));
     emit(host, &mut core, footer, out, "library")?;
+    emit(host, &mut core, footer, out, "library-focused-search")?;
     core.action(&ShellAction::Custom("Search".into()));
     core.set_search_query("ridgeline");
     emit(host, &mut core, footer, out, "search")?;
@@ -1874,7 +1875,7 @@ fn assert_raster_text_legible(
 ) -> Result<(), String> {
     fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
         if &node.id == target {
-            node.accessible_label.clear();
+            node.role = Role::Group;
             return;
         }
         for child in &mut node.children {
@@ -1972,23 +1973,25 @@ fn assert_raster_text_legible(
                     }
                 }
             }
-            let occluded = if ink_pixels == 0 {
-                // A node that paints in isolation but has no per-node diff in the route
-                // is covered by later content, not an inkless glyph. A genuinely
-                // inkless node also has no isolated diff.
-                let isolated_scene = pf_scene::Scene::new(node.clone(), node.id.clone())
-                    .map_err(|error| error.to_string())?;
-                let isolated = render(&isolated_scene)?;
-                let mut isolated_root = node.clone();
-                suppress_text(&mut isolated_root, &node.id);
-                let isolated_suppressed_scene =
-                    pf_scene::Scene::new(isolated_root, node.id.clone())
-                        .map_err(|error| error.to_string())?;
-                let isolated_suppressed = render(&isolated_suppressed_scene)?;
-                isolated.rgba != isolated_suppressed.rgba
-            } else {
-                false
-            };
+            // Compare the route contribution with the node's own isolated ink.  A
+            // rounded later fill can leave a few corner pixels visible; treating that
+            // sliver as legible merely because it is non-zero misses the real failure.
+            let isolated_scene = pf_scene::Scene::new(node.clone(), node.id.clone())
+                .map_err(|error| error.to_string())?;
+            let isolated = render(&isolated_scene)?;
+            let mut isolated_root = node.clone();
+            suppress_text(&mut isolated_root, &node.id);
+            let isolated_suppressed_scene = pf_scene::Scene::new(isolated_root, node.id.clone())
+                .map_err(|error| error.to_string())?;
+            let isolated_suppressed = render(&isolated_suppressed_scene)?;
+            let isolated_ink_pixels = isolated
+                .rgba
+                .chunks_exact(4)
+                .zip(isolated_suppressed.rgba.chunks_exact(4))
+                .filter(|(painted, suppressed)| painted != suppressed)
+                .count();
+            let occluded =
+                isolated_ink_pixels > 0 && ink_pixels.saturating_mul(5) < isolated_ink_pixels;
             let rendered_ratio = core_ink_low_tail(&samples).unwrap_or_default();
             // High coverage structurally removes the anti-aliased fringe. The low
             // decile then requires the glyph body, rather than a high-contrast
@@ -1998,7 +2001,7 @@ fn assert_raster_text_legible(
             // contrast floor, but it must still produce visible raster ink.
             if occluded {
                 failures.push(format!(
-                    "{} ({:?}, {:?}): occluded-by-later-paint, ink_pixels=0",
+                    "{} ({:?}, {:?}): occluded-by-later-paint, ink_pixels={ink_pixels}, isolated_ink_pixels={isolated_ink_pixels}",
                     node.id.as_str(),
                     node.accessible_label,
                     node.bounds,
@@ -2147,19 +2150,33 @@ fn present_scene(
     scene: &pf_scene::Scene,
 ) -> Result<(), String> {
     host.set_theme_base(core.theme_base());
+    ensure_action_labels(scene)?;
     host.present(scene).map_err(|e| e.to_string())?;
     let rejected = host
         .render_notes()
         .is_some_and(|notes| core.reject_art_sources(failed_source_ids(notes)));
     if rejected {
-        host.present(
-            core.scene(host.metrics(), prompt)
-                .as_ref()
-                .ok_or("shell has no fallback frame")?,
-        )
-        .map_err(|e| e.to_string())?;
+        let fallback = core
+            .scene(host.metrics(), prompt)
+            .ok_or("shell has no fallback frame")?;
+        ensure_action_labels(&fallback)?;
+        host.present(&fallback).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn ensure_action_labels(scene: &pf_scene::Scene) -> Result<(), String> {
+    fn visit(node: &Node) -> Result<(), String> {
+        if node.action.is_some() && node.accessible_label.trim().is_empty() {
+            return Err(format!(
+                "action has no accessible label on {}",
+                node.id.as_str()
+            ));
+        }
+        node.children.iter().try_for_each(visit)
+    }
+
+    visit(scene.root())
 }
 
 fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -2346,6 +2363,46 @@ mod durable_tests {
         );
     }
 
+    #[test]
+    fn raster_ink_guard_rejects_a_nearly_occluded_text_sliver() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root_id = pf_scene::NodeId::new("sliver-occlusion-probe").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("sliver-label").unwrap(),
+                Role::Text,
+                "Nearly covered",
+                bounds,
+                "--color-surface-canvas",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("later-rounded-fill").unwrap(),
+                Role::Group,
+                "",
+                pf_scene::Bounds::new(24.0, 20.0, 176.0, 48.0),
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(failure.contains("sliver-label") && failure.contains("occluded-by-later-paint"));
+    }
+
     struct TextScaleHost {
         inner: OffscreenHost,
         scales: Vec<f32>,
@@ -2510,7 +2567,68 @@ mod durable_tests {
                 .find(|node| node.id.as_str() == "hero-status")
                 .unwrap()
                 .accessible_label,
-            "● Ready · Game · Installed · 34 hours on the trail"
+            "● Ready · Game · Installed on this device · 34 hours on the trail"
+        );
+    }
+
+    #[test]
+    fn catalog_and_fixture_paths_share_authored_and_hashed_cover_compositions() {
+        fn composition(scene: &pf_scene::Scene, item_id: &str) -> Vec<(String, pf_scene::Bounds)> {
+            scene
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == format!("item-{item_id}"))
+                .unwrap()
+                .children
+                .iter()
+                .filter(|node| {
+                    node.id.as_str().contains("-art-")
+                        || node.id.as_str().contains("-scene-")
+                        || node.id.as_str().contains("-motif-")
+                })
+                .map(|node| (node.style_token.clone(), node.bounds))
+                .collect()
+        }
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let fixture: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut catalog = fixture.clone();
+        for item in &mut catalog.items {
+            item.id = format!("installed-applications:{}", item.id);
+        }
+        let fixture_scene = fixture_core(&fixture, &pf_theme::flagship(), false)
+            .scene(metrics, "")
+            .unwrap();
+        let catalog_scene = catalog_core(&catalog, &pf_theme::flagship(), false)
+            .scene(metrics, "")
+            .unwrap();
+        for fixture_item in &fixture.items {
+            let catalog_id = format!("installed-applications:{}", fixture_item.id);
+            assert_eq!(
+                composition(&fixture_scene, &fixture_item.id),
+                composition(&catalog_scene, &catalog_id),
+                "{} must keep its authored composition through catalog namespacing",
+                fixture_item.id
+            );
+        }
+
+        let mut unknowns = fixture.clone();
+        unknowns.items.truncate(2);
+        unknowns.items[0].id = "installed-applications:unknown-alpha".into();
+        unknowns.items[1].id = "installed-applications:unknown-beta".into();
+        let unknown_scene = catalog_core(&unknowns, &pf_theme::flagship(), false)
+            .scene(metrics, "")
+            .unwrap();
+        assert_ne!(
+            composition(&unknown_scene, &unknowns.items[0].id),
+            composition(&unknown_scene, &unknowns.items[1].id)
         );
     }
 
@@ -3984,6 +4102,37 @@ exec="./launch"
                 PreferenceValue::Text("100%".into())
             );
         }
+    }
+
+    #[test]
+    fn fresh_preferences_and_first_run_render_at_one_hundred_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = DurablePreferences::open(dir.path()).unwrap();
+        let observed = preferences
+            .read(&PreferenceKey("textScale".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.effective, PreferenceValue::Text("100%".into()));
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(&preferences, false).unwrap();
+        core.reset_first_run();
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(format!("{scene:?}").contains("100%"));
+        assert!(!format!("{scene:?}").contains("Current value 150%"));
     }
 
     #[test]

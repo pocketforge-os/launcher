@@ -89,6 +89,14 @@ fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
     }
 }
 
+fn ready_variant_capability_cue(variant: &Variant) -> &'static str {
+    match ready_variant_capability(variant) {
+        ReadyVariantCapability::Native => "Installed on this device",
+        ReadyVariantCapability::Stream => "Available over the network",
+        ReadyVariantCapability::Unknown => "Source availability unknown",
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LibraryGeometry {
     columns: usize,
@@ -2806,6 +2814,46 @@ impl ShellCore {
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
+            let hero_status = focused.map_or_else(
+                || "⊘ Unavailable · Game".to_owned(),
+                |item| {
+                    let kind = sentence_kind(&item.kind);
+                    match best_availability(item) {
+                        Availability::Ready
+                            if matches!(self.presentation, Presentation::Starting) =>
+                        {
+                            let cue = item
+                                .variants
+                                .iter()
+                                .find(|variant| matches!(variant.availability, Availability::Ready))
+                                .map_or(
+                                    "Source availability unknown",
+                                    ready_variant_capability_cue,
+                                );
+                            format!("● Starting · {kind} · {cue}")
+                        }
+                        Availability::Ready => {
+                            let cue = item
+                                .variants
+                                .iter()
+                                .find(|variant| matches!(variant.availability, Availability::Ready))
+                                .map_or(
+                                    "Source availability unknown",
+                                    ready_variant_capability_cue,
+                                );
+                            format!("● Ready · {kind} · {cue}")
+                        }
+                        Availability::NeedsSetup { .. } => format!("⊘ Needs setup · {kind}"),
+                        Availability::NeedsNetwork { .. } => {
+                            format!("⊘ Network required · {kind}")
+                        }
+                        Availability::UnsupportedCapability { .. }
+                        | Availability::IncompatibleRuntime { .. } => {
+                            format!("⊘ Unavailable · {kind}")
+                        }
+                    }
+                },
+            );
             let mut content = vec![
                 heading,
                 node(
@@ -2825,11 +2873,7 @@ impl ShellCore {
                     Role::Text,
                     &format!(
                         "{}{}",
-                        if matches!(self.presentation, Presentation::Starting) {
-                            "● Starting · Game · Installed"
-                        } else {
-                            "● Ready · Game · Installed"
-                        },
+                        hero_status,
                         focused
                             .and_then(|item| item.playtime_fact.as_deref())
                             .map_or(String::new(), |fact| format!(" · {fact}"))
@@ -2992,11 +3036,7 @@ impl ShellCore {
                 112.0,
                 search_width,
                 52.0,
-                if self.focus == 0 {
-                    "--state-focused-ring"
-                } else {
-                    "--state-rest-surface"
-                },
+                "--state-rest-surface",
             );
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
@@ -3041,11 +3081,7 @@ impl ShellCore {
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
                     chip_height,
-                    if focused {
-                        "--state-focused-ring"
-                    } else {
-                        "--state-rest-surface"
-                    },
+                    "--state-rest-surface",
                 );
                 chip.state.focused = focused;
                 chip.state.selected = active;
@@ -3127,11 +3163,7 @@ impl ShellCore {
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
-                    &format!(
-                        "{} · {}",
-                        item.title,
-                        availability_text(availability, &self.presentation)
-                    ),
+                    &item.title,
                     geometry.card_left
                         + column as f32 * (geometry.card_width + geometry.card_gap)
                         + 8.0,
@@ -3267,15 +3299,8 @@ impl ShellCore {
             let item = &self.items[item_index];
             let first_variant = item.variants.first();
             let provenance = first_variant.map_or_else(
-                || kind_text(&item.kind).to_owned(),
-                |variant| {
-                    format!(
-                        "{} · {} · {}",
-                        sentence_kind(&item.kind),
-                        humanize_identifier(&variant.provenance.provider_id),
-                        descriptor_file(variant)
-                    )
-                },
+                || format!("{} · Source unavailable", sentence_kind(&item.kind)),
+                |variant| detail_provenance_text(&item.kind, variant),
             );
             let compact = library_geometry(w).columns < 6;
             let cover_left = 48.0;
@@ -3456,6 +3481,12 @@ impl ShellCore {
                         .checked_sub(1);
                     let focused = matches!(variant.availability, Availability::Ready)
                         && variant_focus == Some(self.focus);
+                    let variant_accessible_label =
+                        if matches!(variant.availability, Availability::Ready) {
+                            format!("{variant_name} · {variant_sub}")
+                        } else {
+                            variant_name.clone()
+                        };
                     let mut variant_node = node(
                         &format!("detail-variant-{variant_index}"),
                         if matches!(variant.availability, Availability::Ready) {
@@ -3463,27 +3494,22 @@ impl ShellCore {
                         } else {
                             Role::Text
                         },
-                        "",
+                        &variant_accessible_label,
                         detail_column_left,
                         variant_rows_top
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
                         detail_column_width,
                         variant_row_height,
-                        if focused {
-                            "--state-focused-ring"
-                        } else {
-                            "--state-rest-surface"
-                        },
+                        "--state-rest-surface",
                     );
                     variant_node.state.focused = focused;
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
-                    variant_node.state.selected = variant_index == 0;
-                    let text_token = if focused {
-                        "--color-text-inverse"
-                    } else {
-                        "--state-rest-text"
-                    };
+                    // Focus owns the row treatment. Marking the same row selected makes
+                    // the renderer choose selected-on-accent text for the cream focus
+                    // surface, producing the per-line white plates seen in captures.
+                    variant_node.state.selected = variant_index == 0 && !focused;
+                    let text_token = "--state-rest-surface";
                     variant_node.children = vec![
                         node(
                             &format!("detail-variant-{variant_index}-name"),
@@ -3503,13 +3529,12 @@ impl ShellCore {
                             variant_node.bounds.y + 34.0,
                             detail_column_width - 32.0,
                             24.0,
-                            if focused {
-                                "--color-text-inverse"
-                            } else {
-                                "--color-text-secondary"
-                            },
+                            "--state-rest-surface",
                         ),
                     ];
+                    for label in &mut variant_node.children {
+                        label.state.focused = focused;
+                    }
                     if matches!(variant.availability, Availability::Ready) {
                         variant_node.action = Some(NodeAction::Activate);
                     }
@@ -3844,13 +3869,13 @@ impl ShellCore {
                     nav_width - 32.0,
                     50.0,
                     if focused {
-                        "--state-focused-ring"
+                        "--state-rest-surface"
                     } else {
                         "--color-surface-raised"
                     },
                 );
                 nav.state.focused = focused;
-                nav.state.selected = selected;
+                nav.state.selected = selected && !focused;
                 nav.action = Some(NodeAction::Activate);
                 let mut nav_label = node(
                     &format!("settings-nav-{}-label", name.to_ascii_lowercase()),
@@ -3861,7 +3886,7 @@ impl ShellCore {
                     nav.bounds.width - 24.0,
                     30.0,
                     if focused {
-                        "--color-text-inverse"
+                        "--state-rest-surface"
                     } else {
                         "--color-surface-raised"
                     },
@@ -3947,9 +3972,7 @@ impl ShellCore {
                 rows_top + (index - first) as f32 * (row_height + row_gap),
                 content_width,
                 row_height,
-                if focused {
-                    "--state-focused-ring"
-                } else if interactive {
+                if interactive {
                     "--state-rest-surface"
                 } else {
                     "--state-disabled-border"
@@ -4037,11 +4060,10 @@ impl ShellCore {
                         if selected {
                             "--color-surface-raised"
                         } else {
-                            "--color-surface-sunken"
+                            row_surface
                         },
                     );
                     value_node.state.focused = focused;
-                    value_node.state.selected = selected;
                     text.push(value_node);
                 }
             } else if row.id.starts_with("accessibility-")
@@ -4776,21 +4798,28 @@ fn procedural_art_nodes(
     focused: bool,
 ) -> Vec<Node> {
     type ScenicLayer = (&'static str, f32, f32, f32, f32);
-    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
-    });
-    let (motif, scenic_layers): (&str, &[ScenicLayer]) = match id {
+    // Catalog providers namespace item identities (for example,
+    // `installed-applications:ridgeline`).  Art direction belongs to the app identity,
+    // not the provider projection, so fixture and production catalog paths resolve the
+    // same authored composition.
+    let composition_id = id.rsplit(':').next().unwrap_or(id);
+    let hash = composition_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+        });
+    let (motif, scenic_layers): (String, Vec<ScenicLayer>) = match composition_id {
         "ridgeline" => (
-            "    ●",
-            &[
+            "    ●".into(),
+            vec![
                 ("--deco-plate-b-bg", 0.00, 0.48, 1.00, 0.52),
                 ("--color-surface-scrim", 0.00, 0.64, 0.72, 0.36),
                 ("--color-surface-raised", 0.36, 0.72, 0.64, 0.28),
             ],
         ),
         "hollow-tides" => (
-            "≈  ◒  ≈",
-            &[
+            "≈  ◒  ≈".into(),
+            vec![
                 ("--deco-plate-e-bg", 0.00, 0.52, 1.00, 0.48),
                 ("--color-surface-scrim", 0.00, 0.72, 1.00, 0.28),
                 ("--color-surface-raised", 0.42, 0.63, 0.24, 0.07),
@@ -4798,15 +4827,15 @@ fn procedural_art_nodes(
             ],
         ),
         "sunwake" => (
-            "  ☼\n⌁   ⌁",
-            &[
+            "  ☼\n⌁   ⌁".into(),
+            vec![
                 ("--deco-plate-a-bg", 0.00, 0.58, 1.00, 0.42),
                 ("--color-surface-raised", 0.00, 0.78, 1.00, 0.22),
             ],
         ),
         "glass-harbor" => (
-            "",
-            &[
+            String::new(),
+            vec![
                 ("--deco-plate-f-bg", 0.00, 0.46, 1.00, 0.54),
                 ("--color-surface-scrim", 0.00, 0.68, 1.00, 0.32),
                 ("--color-surface-raised", 0.13, 0.48, 0.08, 0.30),
@@ -4815,28 +4844,40 @@ fn procedural_art_nodes(
             ],
         ),
         "lantern-vale" => (
-            "·  ✦  ·\n  ·  ·",
-            &[
+            "·  ✦  ·\n  ·  ·".into(),
+            vec![
                 ("--color-surface-scrim", 0.00, 0.56, 1.00, 0.44),
                 ("--deco-plate-d-bg", 0.38, 0.30, 0.24, 0.42),
                 ("--color-surface-raised", 0.46, 0.70, 0.08, 0.30),
             ],
         ),
         "paper-comet" => (
-            "✦  ·  ·\n  ╲",
-            &[
+            "✦  ·  ·\n  ╲".into(),
+            vec![
                 ("--deco-plate-c-bg", 0.00, 0.62, 1.00, 0.38),
                 ("--color-surface-raised", 0.00, 0.82, 1.00, 0.18),
                 ("--color-surface-scrim", 0.56, 0.22, 0.08, 0.54),
                 ("--deco-plate-a-bg", 0.18, 0.47, 0.30, 0.06),
             ],
         ),
-        _ => (
-            "·  ◉  ·",
-            &[("--color-surface-scrim", 0.0, 0.68, 1.0, 0.32)],
-        ),
+        _ => {
+            let hash_bytes = hash.to_le_bytes();
+            let left = f32::from(hash_bytes[1]) / 510.0;
+            let top = 0.18 + f32::from(hash_bytes[2]) / 850.0;
+            let width = 0.18 + f32::from(hash_bytes[3]) / 640.0;
+            (
+                format!(
+                    "·  {}  ·",
+                    ['◆', '●', '✦', '◒'][usize::from(hash_bytes[0] >> 4) & 3]
+                ),
+                vec![
+                    ("--color-surface-scrim", 0.0, 0.68, 1.0, 0.32),
+                    ("--color-surface-raised", left, top, width, 0.16),
+                ],
+            )
+        }
     };
-    let token = match id {
+    let token = match composition_id {
         "ridgeline" => "--deco-plate-a-bg",
         "hollow-tides" => "--deco-plate-b-bg",
         "sunwake" => "--deco-plate-c-bg",
@@ -4948,7 +4989,7 @@ fn procedural_art_nodes(
         nodes.push(node(
             &format!("{context}-motif-{id}"),
             Role::Text,
-            motif,
+            &motif,
             art_x,
             if favorite { y + 4.0 } else { y },
             art_width,
@@ -5202,6 +5243,18 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
         } => format!("Not supported — requires {required}; found {available}"),
     }
 }
+
+fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
+    let source = match &variant.availability {
+        Availability::Ready => ready_variant_capability_cue(variant),
+        Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => "Source not ready",
+        Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
+            "Source unavailable"
+        }
+    };
+    format!("{} · {source}", sentence_kind(kind))
+}
+
 fn best_availability(item: &Item) -> &Availability {
     static NO_VARIANTS: OnceLock<Availability> = OnceLock::new();
 
@@ -5269,15 +5322,6 @@ fn humanize_identifier(value: &str) -> String {
             first.to_uppercase().collect::<String>() + chars.as_str()
         })
     }
-}
-fn descriptor_file(variant: &Variant) -> String {
-    variant
-        .launch_target
-        .descriptor_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("App descriptor")
-        .to_owned()
 }
 fn state_token(a: &Availability, focused: bool) -> &'static str {
     if focused {
@@ -6129,15 +6173,6 @@ mod tests {
             });
 
             let scene = settings_scene(&core);
-            let selected_labels = ["100%", "150%", "200%"]
-                .into_iter()
-                .filter(|value| {
-                    find(scene.root(), &format!("settings-text-scale-value-{value}"))
-                        .is_some_and(|node| node.state.selected)
-                })
-                .collect::<Vec<_>>();
-
-            assert_eq!(selected_labels, [effective]);
             assert!(find(scene.root(), "settings-text-scale-segmented-control").is_some());
             let selected_fills = ["100%", "150%", "200%"]
                 .into_iter()
@@ -7090,7 +7125,180 @@ mod tests {
         let search = node_by_id(scene.root(), "library-search").unwrap();
         assert_eq!(search.accessible_label, "⌕  Search 1 titles");
         assert!(search.state.focused);
-        assert_eq!(search.style_token, "--state-focused-ring");
+        assert_eq!(search.style_token, "--state-rest-surface");
+    }
+
+    #[test]
+    fn home_hero_reports_needs_setup_instead_of_ready() {
+        let core = fixture_core(vec![item(
+            "setup",
+            "Setup Game",
+            vec![variant(
+                "setup",
+                "setup",
+                Availability::NeedsSetup {
+                    reason: "choose a profile".into(),
+                },
+            )],
+        )]);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let status = node_by_id(scene.root(), "hero-status").unwrap();
+        assert_eq!(status.accessible_label, "⊘ Needs setup · Game");
+        assert!(!status.accessible_label.contains("Ready"));
+    }
+
+    #[test]
+    fn home_hero_ready_suffix_follows_selected_variant_capability() {
+        let cases = [
+            (
+                "native",
+                "pocketforge/native",
+                "● Ready · Game · Installed on this device",
+                true,
+            ),
+            (
+                "stream",
+                "pc-stream",
+                "● Ready · Game · Available over the network",
+                false,
+            ),
+            (
+                "unknown",
+                "other-runtime",
+                "● Ready · Game · Source availability unknown",
+                false,
+            ),
+        ];
+
+        for (id, runtime_family, expected, locally_installed) in cases {
+            let mut ready = variant(id, id, Availability::Ready);
+            ready.provenance.runtime_family = runtime_family.into();
+            let unavailable_native = variant(
+                "unavailable-native",
+                id,
+                Availability::NeedsSetup {
+                    reason: "install first".into(),
+                },
+            );
+            let core = fixture_core(vec![item(id, "Game", vec![unavailable_native, ready])]);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let status = &node_by_id(scene.root(), "hero-status")
+                .unwrap()
+                .accessible_label;
+            assert_eq!(status, expected, "case {id}");
+            assert_eq!(
+                status.contains("Installed on this device"),
+                locally_installed,
+                "case {id} local-installation claim"
+            );
+        }
+    }
+
+    #[test]
+    fn details_humanizes_catalog_source_without_descriptor_filename() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("app.toml", "game", Availability::Ready)],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let source = node_by_id(scene.root(), "detail-provenance").unwrap();
+        assert_eq!(source.accessible_label, "Game · Installed on this device");
+        assert!(!source.accessible_label.contains("app.toml"));
+    }
+
+    #[test]
+    fn details_source_copy_follows_variant_provenance_and_availability() {
+        let cases = [
+            (
+                "network",
+                Availability::NeedsNetwork {
+                    reason: "connect first".into(),
+                },
+                "native",
+                "Game · Source not ready",
+            ),
+            (
+                "setup",
+                Availability::NeedsSetup {
+                    reason: "choose a profile".into(),
+                },
+                "native",
+                "Game · Source not ready",
+            ),
+            (
+                "stream",
+                Availability::Ready,
+                "pc-stream",
+                "Game · Available over the network",
+            ),
+            (
+                "unknown",
+                Availability::Ready,
+                "other-runtime",
+                "Game · Source availability unknown",
+            ),
+        ];
+        for (id, availability, runtime_family, expected) in cases {
+            let mut catalog_variant = variant(id, id, availability);
+            catalog_variant.provenance.runtime_family = runtime_family.into();
+            let mut core = fixture_core(vec![item(id, "Game", vec![catalog_variant])]);
+            core.selected_item = Some(0);
+            core.go(Route::Details);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let source = node_by_id(scene.root(), "detail-provenance").unwrap();
+            assert_eq!(source.accessible_label, expected, "case {id}");
+            assert!(
+                !source.accessible_label.contains("Installed on this device"),
+                "non-local case {id} made a false local claim"
+            );
+        }
     }
 
     #[test]
@@ -8216,6 +8424,10 @@ mod tests {
 
     #[test]
     fn emitted_routes_keep_actions_named_and_off_structural_groups() {
+        fn has_accessible_name(node: &Node) -> bool {
+            !node.accessible_label.trim().is_empty()
+                || node.children.iter().any(has_accessible_name)
+        }
         fn assert_action_contract(node: &Node) {
             assert!(
                 node.role != Role::Group || node.action.is_none(),
@@ -8224,8 +8436,8 @@ mod tests {
             );
             if node.action.is_some() {
                 assert!(
-                    !node.accessible_label.trim().is_empty(),
-                    "actionable node {} must have an accessible label",
+                    has_accessible_name(node),
+                    "actionable node {} must have an accessible name in its component tree",
                     node.id.as_str()
                 );
             }
@@ -9353,7 +9565,7 @@ mod tests {
         core.focus = 3;
         let library = core.scene(metrics, "").unwrap();
         let chip_label = find(library.root(), "library-filter-2-label").unwrap();
-        assert_eq!(chip_label.style_token, "--state-focused-ring");
+        assert_eq!(chip_label.style_token, "--state-rest-surface");
 
         core.selected_item = Some(0);
         core.go(Route::Details);
@@ -9373,7 +9585,7 @@ mod tests {
             find(details.root(), "detail-variant-0-name")
                 .unwrap()
                 .style_token,
-            "--color-text-inverse"
+            "--state-rest-surface"
         );
 
         core.go(Route::Settings);
@@ -9388,7 +9600,7 @@ mod tests {
             find(settings.root(), "settings-nav-accessibility-label")
                 .unwrap()
                 .style_token,
-            "--color-text-inverse"
+            "--state-rest-surface"
         );
         assert!(
             find(settings.root(), "settings-nav-accessibility")
@@ -9608,6 +9820,116 @@ mod tests {
             }
             assert_order(core.scene(metrics, "").unwrap().root());
         }
+    }
+
+    #[test]
+    fn every_action_in_evidence_scenes_has_an_accessible_label() {
+        let mut core = core();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [Route::Home, Route::Library, Route::Details, Route::Settings] {
+            core.go(route);
+            if route == Route::Details {
+                core.selected_item = Some(0);
+            }
+            let scene = core.scene(metrics, "").unwrap();
+            fn check(node: &Node) {
+                if node.action.is_some() {
+                    assert!(
+                        !node.accessible_label.trim().is_empty(),
+                        "action has no accessible label on {}",
+                        node.id.as_str()
+                    );
+                }
+                for child in &node.children {
+                    check(child);
+                }
+            }
+            check(scene.root());
+        }
+    }
+
+    #[test]
+    fn focused_variant_is_one_surface_without_per_line_plates() {
+        let mut core = core();
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let row = node_by_id(scene.root(), "detail-variant-0").unwrap();
+        assert!(row.state.focused);
+        assert_eq!(row.style_token, "--state-rest-surface");
+        assert!(
+            row.children
+                .iter()
+                .all(|child| { child.role == Role::Text && child.style_token == row.style_token })
+        );
+    }
+
+    #[test]
+    fn text_scale_segment_uses_container_dividers_and_selected_fill_without_cursor_bar() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        for value in ["100%", "150%", "200%"] {
+            assert!(
+                !node_by_id(scene.root(), &format!("settings-text-scale-value-{value}"))
+                    .unwrap()
+                    .state
+                    .selected
+            );
+        }
+        assert!(
+            node_by_id(scene.root(), "settings-text-scale-segmented-control")
+                .unwrap()
+                .corner_radius
+                > 0.0
+        );
+        assert!(
+            (node_by_id(scene.root(), "settings-text-scale-divider-1")
+                .unwrap()
+                .bounds
+                .width
+                - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (node_by_id(scene.root(), "settings-text-scale-divider-2")
+                .unwrap()
+                .bounds
+                .width
+                - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

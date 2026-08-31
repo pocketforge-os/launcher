@@ -2927,12 +2927,7 @@ impl ShellCore {
             apply_quiet_console_radius(child, radius_scale);
         }
         if self.route == Route::Library {
-            let fade_top = h - 96.0;
-            let mut lifted = Vec::new();
-            for child in &mut children {
-                lift_library_fade_text(child, fade_top, &mut lifted);
-            }
-            children.extend(lifted);
+            layer_library_fade(&mut children);
         }
         let focus_id = children
             .iter()
@@ -6139,21 +6134,35 @@ fn add_explicit_action_name(action_node: &mut Node) {
     }
 }
 
-fn lift_library_fade_text(node: &mut Node, fade_top: f32, lifted: &mut Vec<Node>) {
-    if node.role == Role::Text
-        && node.bounds.y + node.bounds.height > fade_top
-        && !node.accessible_label.is_empty()
+fn layer_library_fade(children: &mut Vec<Node>) {
+    let Some(fade_index) = children
+        .iter()
+        .position(|node| node.id.as_str() == "library-grid-footer-fade")
+    else {
+        return;
+    };
+    let fade = children.remove(fade_index);
+    let mut labels = Vec::new();
+    for node in children
+        .iter_mut()
+        .filter(|node| node.id.as_str().starts_with("library-item-") && node.action.is_some())
     {
-        let mut copy = node.clone();
-        copy.id = NodeId::new(format!("library-fade-lift-{}", node.id.as_str())).unwrap();
-        copy.action = None;
-        copy.children.clear();
+        let mut label_layer = node.clone();
+        label_layer.id = NodeId::new(format!("library-label-layer-{}", node.id.as_str())).unwrap();
+        label_layer.style_token = SCENE_TRANSPARENT_TOKEN.into();
+        label_layer
+            .children
+            .retain(|child| matches!(child.role, Role::Text | Role::Heading));
+        label_layer.action = node.action.take();
+        label_layer.state = node.state;
+
         node.accessible_label.clear();
-        lifted.push(copy);
+        node.children
+            .retain(|child| !matches!(child.role, Role::Text | Role::Heading));
+        labels.push(label_layer);
     }
-    for child in &mut node.children {
-        lift_library_fade_text(child, fade_top, lifted);
-    }
+    children.push(fade);
+    children.extend(labels);
 }
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
@@ -10078,58 +10087,108 @@ mod tests {
     }
 
     #[test]
-    fn library_fade_lift_keeps_one_accessible_label_per_second_row_title() {
-        fn label_count(node: &Node, label: &str) -> usize {
-            usize::from(node.accessible_label == label)
-                + node
-                    .children
-                    .iter()
-                    .map(|child| label_count(child, label))
-                    .sum::<usize>()
-        }
-        let mut row = node(
-            "library-row-2",
-            Role::Group,
-            "",
-            0.0,
-            600.0,
-            200.0,
-            100.0,
-            SCENE_TRANSPARENT_TOKEN,
-        );
-        row.children.push(node(
-            "library-title-row-2",
-            Role::Text,
-            "Row 2 title",
-            0.0,
-            650.0,
-            200.0,
-            34.0,
-            COLOR_SURFACE_CANVAS_TOKEN,
-        ));
-        let mut lifted = Vec::new();
-        lift_library_fade_text(&mut row, 624.0, &mut lifted);
-        let root = Node::new(
-            NodeId::new("library-test-root").unwrap(),
-            Role::Group,
-            "",
-            Bounds::new(0.0, 0.0, 1280.0, 720.0),
-            SCENE_TRANSPARENT_TOKEN,
-        )
-        .with_children(vec![row, lifted.pop().unwrap()]);
+    fn actionable_fade_band_item_keeps_its_single_in_bounds_name_ink_above_the_fade() {
+        let mut items = (0..12)
+            .map(|index| {
+                let (id, title) = if index == 7 {
+                    ("low-orbit".to_owned(), "Low Orbit".to_owned())
+                } else {
+                    (format!("item-{index}"), format!("Item {index}"))
+                };
+                item(
+                    &id,
+                    &title,
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        items[7].presentation.icon_reference = Some("fixture-art:low-orbit.png".into());
+        items[7].presentation.icon_decodable = true;
+        let snapshot = CatalogSnapshot {
+            revision: 10,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items,
+            user_projection: UserProjection::default(),
+        };
+        let art = encoded_png(1, 1, &[0x33, 0x44, 0x55, 0xff]);
+        let mut core = ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, _| {
+            Some(art.clone())
+        });
+        core.authority_snapshot(false);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let action = node_by_id(root, "library-label-layer-library-item-low-orbit").unwrap();
+        let name_ink = action
+            .children
+            .iter()
+            .find(|child| {
+                matches!(child.role, Role::Text | Role::Heading)
+                    && child.accessible_label == "Low Orbit"
+            })
+            .unwrap();
+        let fade_index = root
+            .children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let action_index = root
+            .children
+            .iter()
+            .position(|node| node.id == action.id)
+            .unwrap();
 
-        assert_eq!(label_count(&root, "Row 2 title"), 1);
-        assert_eq!(
-            node_by_id(&root, "library-title-row-2")
-                .unwrap()
-                .accessible_label,
-            ""
+        assert!(action.action.is_some());
+        assert!(name_ink.bounds.x >= action.bounds.x);
+        assert!(name_ink.bounds.y >= action.bounds.y);
+        assert!(name_ink.bounds.x + name_ink.bounds.width <= action.bounds.x + action.bounds.width);
+        assert!(
+            name_ink.bounds.y + name_ink.bounds.height <= action.bounds.y + action.bounds.height
         );
         assert_eq!(
-            node_by_id(&root, "library-fade-lift-library-title-row-2")
-                .unwrap()
-                .accessible_label,
-            "Row 2 title"
+            action
+                .children
+                .iter()
+                .filter(|child| child.accessible_label == "Low Orbit")
+                .count(),
+            1,
+            "the actionable subtree must expose one painted name node"
+        );
+        assert!(
+            fade_index < action_index,
+            "name ink must paint above the fade"
+        );
+        assert!(
+            root.children[..fade_index].iter().any(|node| {
+                node.id.as_str() == "library-item-low-orbit"
+                    && node
+                        .children
+                        .iter()
+                        .any(|child| child.id.as_str() == "library-card-art-low-orbit")
+            }),
+            "art must paint below the fade"
+        );
+        assert!(
+            !root
+                .children
+                .iter()
+                .any(|node| { node.id.as_str().starts_with("library-fade-lift-") })
         );
     }
 

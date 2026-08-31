@@ -3108,6 +3108,9 @@ mod durable_tests {
                 core.action(&ShellAction::Custom("Room.next".into()));
             }
             let scene = core.scene(metrics, "").unwrap();
+            ensure_action_labels(&scene).unwrap_or_else(|error| {
+                panic!("{route} fixture action-name guard refused the scene: {error}")
+            });
             let mut host = OffscreenHost::new(metrics);
             host.present(&scene).unwrap();
             assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");

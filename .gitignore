@@ -12,6 +12,7 @@ CMakeFiles/
 
 # Binary output
 pocketforge-launcher
+/target/
 
 # Editor
 .vscode/

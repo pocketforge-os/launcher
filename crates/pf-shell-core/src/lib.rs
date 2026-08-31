@@ -34,6 +34,24 @@ use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+mod design_generated;
+mod design_manual;
+
+use design_generated::{
+    CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
+    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
+    COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
+    COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
+    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
+    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH,
+    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
+    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
+    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+};
+use design_manual::{
+    CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceStatus {
     pub battery_percent: u8,
@@ -44,30 +62,24 @@ pub trait DeviceStatusPort {
     fn status(&self) -> Result<DeviceStatus, String>;
 }
 
-const STATUS_BAR_HEIGHT: f32 = 64.0;
-const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 6;
 const HOME_SHELF_GAP: f32 = 47.2;
 const LIBRARY_SIDE_MARGIN: f32 = 48.0;
 const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
-const CHIP_HORIZONTAL_PADDING: f32 = 24.0;
-const CHIP_COUNT_GAP: f32 = 8.0;
-const CARD_ART_WIDTH: f32 = 158.0;
-const CARD_ART_HEIGHT: f32 = 210.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
 fn label_text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * 8.0
+    text.chars().count() as f32 * LABEL_GLYPH_ADVANCE
 }
 
 // The flagship caption role is 12 px Manrope medium. This conservative advance is
 // calibrated against the deterministic Cosmic Text/Manrope rasterizer.
 fn caption_text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * 6.5
+    text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
@@ -2566,7 +2578,7 @@ impl ShellCore {
                     22.0,
                     20.0,
                     20.0,
-                    "--color-transparent",
+                    SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(wifi_glyph_source(), ImageFit::Contain),
             );
@@ -2581,7 +2593,7 @@ impl ShellCore {
                     24.0,
                     24.0,
                     14.0,
-                    "--color-border-strong",
+                    COLOR_BORDER_STRONG_TOKEN,
                 ),
                 node(
                     "battery-cavity",
@@ -2591,7 +2603,7 @@ impl ShellCore {
                     26.0,
                     18.0,
                     10.0,
-                    "--color-surface-raised",
+                    COLOR_SURFACE_RAISED_TOKEN,
                 ),
                 node(
                     "battery-level",
@@ -2601,7 +2613,7 @@ impl ShellCore {
                     27.0,
                     16.0 * f32::from(battery_percent) / 100.0,
                     8.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ),
                 node(
                     "battery-terminal",
@@ -2611,7 +2623,7 @@ impl ShellCore {
                     28.0,
                     2.0,
                     6.0,
-                    "--color-border-strong",
+                    COLOR_BORDER_STRONG_TOKEN,
                 ),
             ]);
         }
@@ -2641,7 +2653,7 @@ impl ShellCore {
                     16.0,
                     152.0,
                     32.0,
-                    "--color-transparent",
+                    SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Caption),
             );
@@ -2656,7 +2668,7 @@ impl ShellCore {
                 12.0,
                 424.0,
                 40.0,
-                "--color-transparent",
+                SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Label),
         );
@@ -2686,7 +2698,7 @@ impl ShellCore {
                     16.0,
                     width + 8.0,
                     24.0,
-                    "--color-border-strong",
+                    COLOR_BORDER_STRONG_TOKEN,
                 ));
                 children.push(node(
                     &format!("{id}-fill"),
@@ -2696,7 +2708,7 @@ impl ShellCore {
                     17.0,
                     width + 6.0,
                     22.0,
-                    "--color-surface-raised",
+                    COLOR_SURFACE_RAISED_TOKEN,
                 ));
                 children.push(
                     node(
@@ -2707,7 +2719,7 @@ impl ShellCore {
                         17.0,
                         width,
                         22.0,
-                        "--color-surface-raised",
+                        COLOR_SURFACE_RAISED_TOKEN,
                     )
                     .with_type_role(TypeRole::Caption),
                 );
@@ -2721,7 +2733,7 @@ impl ShellCore {
                         16.0,
                         width,
                         32.0,
-                        "--color-transparent",
+                        SCENE_TRANSPARENT_TOKEN,
                     )
                     .with_type_role(TypeRole::Label),
                 );
@@ -2734,7 +2746,7 @@ impl ShellCore {
                         49.0,
                         width,
                         3.0,
-                        "--state-selected-accent",
+                        STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
@@ -2748,7 +2760,7 @@ impl ShellCore {
                 266.0,
                 520.0,
                 32.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
         }
         match self.presentation {
@@ -2852,7 +2864,7 @@ impl ShellCore {
             h - PROMPTS_AREA_HEIGHT,
             w,
             PROMPTS_AREA_HEIGHT,
-            "--color-surface-raised",
+            COLOR_SURFACE_RAISED_TOKEN,
         ));
         let mut prompt_node = node(
             "prompts",
@@ -2874,7 +2886,7 @@ impl ShellCore {
                 552.0
             },
             32.0,
-            "--color-surface-raised",
+            COLOR_SURFACE_RAISED_TOKEN,
         )
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
@@ -2896,7 +2908,7 @@ impl ShellCore {
             Role::Group,
             "",
             Bounds::new(0.0, 0.0, w, h),
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_children(children);
         Some(
@@ -2947,7 +2959,7 @@ impl ShellCore {
                     112.0,
                     500.0,
                     48.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
@@ -2956,8 +2968,8 @@ impl ShellCore {
             let mut heading = out
                 .pop()
                 .expect("Home route heading was just added")
-                .with_ink_token("--color-text-muted");
-            heading.style_token = "--color-transparent".into();
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN);
+            heading.style_token = SCENE_TRANSPARENT_TOKEN.into();
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
@@ -3010,7 +3022,7 @@ impl ShellCore {
                     0.0,
                     w,
                     344.0,
-                    "--color-transparent",
+                    SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(hero_wash_source(), ImageFit::Cover),
                 heading,
@@ -3022,11 +3034,11 @@ impl ShellCore {
                     144.0,
                     w - 96.0,
                     72.0,
-                    "--color-transparent",
+                    SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Hero)
                 .with_line_height(1.04)
-                .with_ink_token("--color-text-primary"),
+                .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
                 node(
                     "hero-status",
                     Role::Text,
@@ -3041,10 +3053,10 @@ impl ShellCore {
                     224.0,
                     480.0,
                     32.0,
-                    "--color-transparent",
+                    SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Label)
-                .with_ink_token("--color-status-ready"),
+                .with_ink_token(COLOR_STATUS_READY_TOKEN),
             ];
             let attention = self.attention_message.as_deref().or_else(|| {
                 (self.presentation == Presentation::ForcedClose)
@@ -3068,7 +3080,7 @@ impl ShellCore {
                     PILL_TOP,
                     pill_width,
                     PILL_HEIGHT,
-                    "--color-border-hairline",
+                    COLOR_BORDER_HAIRLINE_TOKEN,
                 ));
                 content.push(node(
                     "attention-pill",
@@ -3078,7 +3090,7 @@ impl ShellCore {
                     PILL_TOP + 1.0,
                     pill_width - 2.0,
                     PILL_HEIGHT - 2.0,
-                    "--color-surface-raised",
+                    COLOR_SURFACE_RAISED_TOKEN,
                 ));
                 content.push(node(
                     "attention-dot",
@@ -3088,7 +3100,7 @@ impl ShellCore {
                     PILL_TOP + (PILL_HEIGHT - DOT_SIZE) / 2.0,
                     DOT_SIZE,
                     DOT_SIZE,
-                    "--color-status-attention",
+                    COLOR_STATUS_ATTENTION_TOKEN,
                 ));
                 content.push(
                     node(
@@ -3099,10 +3111,10 @@ impl ShellCore {
                         PILL_TOP,
                         text_width,
                         PILL_HEIGHT,
-                        "--color-transparent",
+                        SCENE_TRANSPARENT_TOKEN,
                     )
                     .with_type_role(TypeRole::Caption)
-                    .with_ink_token("--color-text-secondary"),
+                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
                 );
             }
             let ready_items = self
@@ -3121,7 +3133,7 @@ impl ShellCore {
                     344.0,
                     220.0,
                     28.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
@@ -3162,7 +3174,7 @@ impl ShellCore {
                     388.0,
                     card_width,
                     CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + CARD_CAPTION_GAP + 14.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 n.action = Some(NodeAction::Activate);
                 n.state.focused = i + first_visible == self.focus;
@@ -3195,7 +3207,7 @@ impl ShellCore {
                             398.0,
                             20.0,
                             20.0,
-                            "--color-surface-scrim",
+                            COLOR_SURFACE_SCRIM_TOKEN,
                         )
                         .with_type_role(TypeRole::Caption),
                     );
@@ -3212,7 +3224,7 @@ impl ShellCore {
                     w,
                     h - STATUS_BAR_HEIGHT - PROMPTS_AREA_HEIGHT,
                 ),
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
             out.extend(content);
         } else if self.route == Route::Library {
@@ -3254,7 +3266,7 @@ impl ShellCore {
                 112.0,
                 search_width,
                 52.0,
-                "--state-rest-surface",
+                STATE_REST_SURFACE_TOKEN,
             );
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
@@ -3267,7 +3279,7 @@ impl ShellCore {
                     124.0,
                     search_width - 32.0,
                     28.0,
-                    "--state-rest-surface",
+                    STATE_REST_SURFACE_TOKEN,
                 )
                 .with_type_role(TypeRole::Label),
             );
@@ -3301,7 +3313,7 @@ impl ShellCore {
                 };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
-                let chip_height = 36.0;
+                let chip_height = CHIP_HEIGHT;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
                 let label_width = label_text_width(&label) + 20.0;
                 let mut chip = node(
@@ -3312,7 +3324,7 @@ impl ShellCore {
                     toolbar_top + chip_row as f32 * 68.0,
                     chip_width,
                     chip_height,
-                    "--state-rest-surface",
+                    STATE_REST_SURFACE_TOKEN,
                 );
                 chip.state.focused = focused;
                 chip.state.selected = active;
@@ -3322,7 +3334,7 @@ impl ShellCore {
                         &format!("library-filter-{index}-label"),
                         Role::Text,
                         &label,
-                        chip.bounds.x + 12.0,
+                        chip.bounds.x + CHIP_HORIZONTAL_PADDING,
                         chip.bounds.y + 5.0,
                         label_width,
                         26.0,
@@ -3338,7 +3350,7 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width - 12.0 - count_width - 12.0,
+                            chip.bounds.x + chip_width - CHIP_HORIZONTAL_PADDING - count_width,
                             chip.bounds.y + 5.0,
                             count_width + 12.0,
                             26.0,
@@ -3355,11 +3367,11 @@ impl ShellCore {
                         &format!("library-selected-underline-{index}"),
                         Role::Group,
                         "",
-                        chip_x + 12.0,
+                        chip_x + CHIP_HORIZONTAL_PADDING,
                         toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
-                        chip_width - 24.0,
+                        chip_width - 2.0 * CHIP_HORIZONTAL_PADDING,
                         3.0,
-                        "--state-selected-accent",
+                        STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
@@ -3399,7 +3411,7 @@ impl ShellCore {
                     } else {
                         CARD_ART_HEIGHT
                     },
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 card.state.focused = self.focus == i + 5;
                 // Availability is painted explicitly as an art veil plus badge so the status
@@ -3435,7 +3447,7 @@ impl ShellCore {
                         .iter_mut()
                         .find(|child| child.id.as_str() == format!("library-card-art-{}", item.id))
                 {
-                    art.style_token = "--state-focused-ring".into();
+                    art.style_token = STATE_FOCUSED_RING_TOKEN.into();
                     art.state.focused = true;
                 }
                 if item.favorite {
@@ -3448,7 +3460,7 @@ impl ShellCore {
                             card.bounds.y + 8.0,
                             20.0,
                             20.0,
-                            "--color-surface-scrim",
+                            COLOR_SURFACE_SCRIM_TOKEN,
                         )
                         .with_type_role(TypeRole::Caption),
                     );
@@ -3464,7 +3476,7 @@ impl ShellCore {
                             title_y,
                             geometry.card_width,
                             34.0,
-                            "--color-surface-canvas",
+                            COLOR_SURFACE_CANVAS_TOKEN,
                         )
                         .with_type_role(TypeRole::Label),
                     );
@@ -3482,7 +3494,7 @@ impl ShellCore {
                 h - PROMPTS_AREA_HEIGHT,
                 w,
                 PROMPTS_AREA_HEIGHT,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
         } else if self.route == Route::Search {
             out.push(node(
@@ -3496,7 +3508,7 @@ impl ShellCore {
                 165.0,
                 w - 96.0,
                 54.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
             if self.search_results.is_empty() {
                 out.push(node(
@@ -3511,7 +3523,7 @@ impl ShellCore {
                     250.0,
                     w - 96.0,
                     70.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
             for (result, &item_index) in self.search_results.iter().enumerate() {
@@ -3531,7 +3543,7 @@ impl ShellCore {
                     w * 0.48,
                     58.0,
                     if self.focus == result {
-                        "--state-focused-ring"
+                        STATE_FOCUSED_RING_TOKEN
                     } else {
                         state_token(availability, false)
                     },
@@ -3565,7 +3577,7 @@ impl ShellCore {
                 112.0,
                 detail_column_width,
                 30.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
             out.push(node(
                 "detail-title",
@@ -3575,7 +3587,7 @@ impl ShellCore {
                 148.0,
                 detail_column_width,
                 64.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
             let mut cover = node(
                 "detail-cover",
@@ -3585,7 +3597,7 @@ impl ShellCore {
                 cover_top,
                 cover_width,
                 cover_height,
-                "--color-surface-raised",
+                COLOR_SURFACE_RAISED_TOKEN,
             )
             .with_elevation(Elevation::Elev2);
             cover.children = art_nodes(
@@ -3627,7 +3639,7 @@ impl ShellCore {
                 218.0,
                 detail_column_width,
                 30.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             );
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
@@ -3655,7 +3667,7 @@ impl ShellCore {
                     252.0,
                     detail_column_width,
                     42.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 ));
             }
             out.push(
@@ -3667,7 +3679,7 @@ impl ShellCore {
                     294.0,
                     detail_column_width,
                     28.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
@@ -3744,7 +3756,7 @@ impl ShellCore {
                             + variant_index as f32 * (variant_row_height + variant_row_gap),
                         detail_column_width,
                         variant_row_height,
-                        "--state-rest-surface",
+                        STATE_REST_SURFACE_TOKEN,
                     );
                     variant_node.state.focused = focused;
                     variant_node.state.unavailable =
@@ -3753,7 +3765,7 @@ impl ShellCore {
                     // the renderer choose selected-on-accent text for the cream focus
                     // surface, producing the per-line white plates seen in captures.
                     variant_node.state.selected = variant_index == 0 && !focused;
-                    let text_token = "--state-rest-surface";
+                    let text_token = STATE_REST_SURFACE_TOKEN;
                     variant_node.children = vec![
                         node(
                             &format!("detail-variant-{variant_index}-name"),
@@ -3773,7 +3785,7 @@ impl ShellCore {
                             variant_node.bounds.y + 34.0,
                             detail_column_width - 32.0,
                             24.0,
-                            "--state-rest-surface",
+                            STATE_REST_SURFACE_TOKEN,
                         ),
                     ];
                     for label in &mut variant_node.children {
@@ -3798,7 +3810,7 @@ impl ShellCore {
                                 * (variant_row_height + variant_row_gap),
                         detail_column_width,
                         28.0,
-                        "--color-text-muted",
+                        COLOR_TEXT_MUTED_TOKEN,
                     ));
                 }
             }
@@ -3826,7 +3838,7 @@ impl ShellCore {
                     235.0,
                     chooser_width,
                     40.0,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 ));
                 out.push(node(
                     "chooser-scroll-region",
@@ -3837,7 +3849,7 @@ impl ShellCore {
                     chooser_width,
                     chooser_capacity as f32 * chooser_row_height
                         + chooser_capacity.saturating_sub(1) as f32 * chooser_row_gap,
-                    "--color-surface-canvas",
+                    COLOR_SURFACE_CANVAS_TOKEN,
                 ));
                 for (choice, &variant_index) in ready
                     .iter()
@@ -3857,9 +3869,9 @@ impl ShellCore {
                         chooser_width,
                         chooser_row_height,
                         if self.focus == choice {
-                            "--state-focused-ring"
+                            STATE_FOCUSED_RING_TOKEN
                         } else {
-                            "--state-rest-surface"
+                            STATE_REST_SURFACE_TOKEN
                         },
                     );
                     row.state.focused = self.focus == choice;
@@ -3897,9 +3909,9 @@ impl ShellCore {
                         button_width,
                         54.0,
                         if self.focus == play_focus {
-                            "--state-focused-ring"
+                            STATE_FOCUSED_RING_TOKEN
                         } else {
-                            "--state-rest-surface"
+                            STATE_REST_SURFACE_TOKEN
                         },
                     );
                     open.state.focused = self.focus == play_focus;
@@ -3913,7 +3925,7 @@ impl ShellCore {
                             open.bounds.y + 13.0,
                             open.bounds.width - 32.0,
                             28.0,
-                            "--state-rest-surface",
+                            STATE_REST_SURFACE_TOKEN,
                         )
                         .with_type_role(TypeRole::Label),
                     );
@@ -3940,9 +3952,9 @@ impl ShellCore {
                         button_width,
                         54.0,
                         if self.focus == self.detail_pin_focus() {
-                            "--state-focused-ring"
+                            STATE_FOCUSED_RING_TOKEN
                         } else {
-                            "--state-rest-surface"
+                            STATE_REST_SURFACE_TOKEN
                         },
                     );
                     pin.state.focused = self.focus == self.detail_pin_focus();
@@ -3956,7 +3968,7 @@ impl ShellCore {
                             pin.bounds.y + 13.0,
                             pin.bounds.width - 32.0,
                             28.0,
-                            "--state-rest-surface",
+                            STATE_REST_SURFACE_TOKEN,
                         )
                         .with_type_role(TypeRole::Label),
                     );
@@ -3971,7 +3983,7 @@ impl ShellCore {
                         510.0,
                         detail_column_width,
                         60.0,
-                        "--state-unavailable-text",
+                        STATE_UNAVAILABLE_TEXT_TOKEN,
                     );
                     unavailable.state.unavailable = true;
                     out.push(unavailable);
@@ -3987,7 +3999,7 @@ impl ShellCore {
                         580.0,
                         detail_column_width,
                         54.0,
-                        "--state-focused-ring",
+                        STATE_FOCUSED_RING_TOKEN,
                     );
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
@@ -4000,7 +4012,7 @@ impl ShellCore {
                             pin.bounds.y + 13.0,
                             pin.bounds.width - 32.0,
                             28.0,
-                            "--state-rest-surface",
+                            STATE_REST_SURFACE_TOKEN,
                         )
                         .with_type_role(TypeRole::Label),
                     );
@@ -4020,7 +4032,7 @@ impl ShellCore {
                             flow_top,
                             detail_column_width,
                             22.0,
-                            "--color-surface-canvas",
+                            COLOR_SURFACE_CANVAS_TOKEN,
                         )
                         .with_type_role(TypeRole::Eyebrow),
                     );
@@ -4032,7 +4044,7 @@ impl ShellCore {
                         flow_top + 26.0,
                         detail_column_width,
                         28.0,
-                        "--color-surface-canvas",
+                        COLOR_SURFACE_CANVAS_TOKEN,
                     ));
                     flow_top += block_height + block_gap;
                 }
@@ -4072,7 +4084,7 @@ impl ShellCore {
                                 flow_top,
                                 fact_width - 8.0,
                                 22.0,
-                                "--color-surface-canvas",
+                                COLOR_SURFACE_CANVAS_TOKEN,
                             )
                             .with_type_role(TypeRole::Eyebrow),
                         );
@@ -4084,7 +4096,7 @@ impl ShellCore {
                             flow_top + 26.0,
                             fact_width - 8.0,
                             28.0,
-                            "--color-surface-canvas",
+                            COLOR_SURFACE_CANVAS_TOKEN,
                         ));
                     }
                 }
@@ -4110,9 +4122,9 @@ impl ShellCore {
                     w - 96.0,
                     54.0,
                     if i == self.focus {
-                        "--state-focused-ring"
+                        STATE_FOCUSED_RING_TOKEN
                     } else {
-                        "--state-rest-surface"
+                        STATE_REST_SURFACE_TOKEN
                     },
                 );
                 n.state.focused = i == self.focus;
@@ -4154,9 +4166,9 @@ impl ShellCore {
                     nav_width - 32.0,
                     50.0,
                     if focused {
-                        "--state-rest-surface"
+                        STATE_REST_SURFACE_TOKEN
                     } else {
-                        "--color-surface-raised"
+                        COLOR_SURFACE_RAISED_TOKEN
                     },
                 );
                 nav.state.focused = focused;
@@ -4171,9 +4183,9 @@ impl ShellCore {
                     nav.bounds.width - 24.0,
                     30.0,
                     if focused {
-                        "--state-rest-surface"
+                        STATE_REST_SURFACE_TOKEN
                     } else {
-                        "--color-surface-raised"
+                        COLOR_SURFACE_RAISED_TOKEN
                     },
                 );
                 nav_label.state.focused = focused;
@@ -4202,7 +4214,7 @@ impl ShellCore {
             112.0,
             content_width,
             48.0,
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         ));
         if portrait {
             out.push(node(
@@ -4213,7 +4225,7 @@ impl ShellCore {
                 82.0,
                 content_width,
                 28.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             ));
         }
 
@@ -4240,7 +4252,7 @@ impl ShellCore {
             rows_top,
             content_width,
             rows_bottom - rows_top,
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         ));
         for (index, row) in rows.drain(..).enumerate().skip(first).take(capacity) {
             let interactive = row.action.is_some();
@@ -4258,9 +4270,9 @@ impl ShellCore {
                 content_width,
                 row_height,
                 if interactive {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 } else {
-                    "--state-disabled-border"
+                    STATE_DISABLED_BORDER_TOKEN
                 },
             );
             scene_row.state.focused = focused;
@@ -4268,11 +4280,11 @@ impl ShellCore {
                 scene_row.action = Some(NodeAction::Activate);
             }
             let row_surface = if focused {
-                "--state-focused-ring"
+                STATE_FOCUSED_RING_TOKEN
             } else if interactive {
-                "--state-rest-surface"
+                STATE_REST_SURFACE_TOKEN
             } else {
-                "--state-disabled-border"
+                STATE_DISABLED_BORDER_TOKEN
             };
             let lines = row.label.lines().collect::<Vec<_>>();
             let mut fills = Vec::new();
@@ -4305,7 +4317,7 @@ impl ShellCore {
                     scene_row.bounds.y + 20.0,
                     216.0,
                     34.0,
-                    "--state-rest-surface",
+                    STATE_REST_SURFACE_TOKEN,
                 ));
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
@@ -4319,7 +4331,7 @@ impl ShellCore {
                             scene_row.bounds.y + 20.0,
                             72.0,
                             34.0,
-                            "--color-surface-raised",
+                            COLOR_SURFACE_RAISED_TOKEN,
                         ));
                     }
                     if segment > 0 {
@@ -4329,9 +4341,9 @@ impl ShellCore {
                             "",
                             x,
                             scene_row.bounds.y + 20.0,
-                            1.0,
+                            SEGMENT_DIVIDER_WIDTH,
                             34.0,
-                            "--state-disabled-border",
+                            STATE_DISABLED_BORDER_TOKEN,
                         ));
                     }
                     let mut value_node = node(
@@ -4343,7 +4355,7 @@ impl ShellCore {
                         56.0,
                         26.0,
                         if selected {
-                            "--color-surface-raised"
+                            COLOR_SURFACE_RAISED_TOKEN
                         } else {
                             row_surface
                         },
@@ -4379,9 +4391,9 @@ impl ShellCore {
                     58.0,
                     28.0,
                     if on {
-                        "--state-selected-accent"
+                        STATE_SELECTED_ACCENT_TOKEN
                     } else {
-                        "--color-surface-sunken"
+                        COLOR_SURFACE_SUNKEN_TOKEN
                     },
                 ));
                 fills.push(node(
@@ -4393,9 +4405,9 @@ impl ShellCore {
                     20.0,
                     20.0,
                     if on {
-                        "--color-text-inverse"
+                        COLOR_TEXT_INVERSE_TOKEN
                     } else {
-                        "--color-text-primary"
+                        COLOR_TEXT_PRIMARY_TOKEN
                     },
                 ));
             } else if let Some(control) = lines.get(2) {
@@ -4429,7 +4441,7 @@ impl ShellCore {
                 72.0,
                 w - 96.0,
                 54.0,
-                "--state-rest-text",
+                STATE_REST_TEXT_TOKEN,
             ));
             let mut fields = node(
                 "manual-time-fields",
@@ -4439,7 +4451,7 @@ impl ShellCore {
                 180.0,
                 w - 96.0,
                 74.0,
-                "--state-focused-ring",
+                STATE_FOCUSED_RING_TOKEN,
             );
             fields.state.focused = true;
             fields.action = Some(NodeAction::Activate);
@@ -4452,7 +4464,7 @@ impl ShellCore {
                 280.0,
                 w - 96.0,
                 44.0,
-                "--color-text-secondary",
+                COLOR_TEXT_SECONDARY_TOKEN,
             ));
             return;
         }
@@ -4472,7 +4484,7 @@ impl ShellCore {
                 180.0,
                 w - 96.0,
                 72.0,
-                "--state-focused-ring",
+                STATE_FOCUSED_RING_TOKEN,
             );
             entry.state.focused = true;
             entry.action = Some(NodeAction::Activate);
@@ -4485,7 +4497,7 @@ impl ShellCore {
                 270.0,
                 w - 96.0,
                 44.0,
-                "--color-text-secondary",
+                COLOR_TEXT_SECONDARY_TOKEN,
             ));
             return;
         }
@@ -4652,11 +4664,11 @@ impl ShellCore {
                 w - 96.0,
                 row_height * f32::from(self.text_scale) / 100.0,
                 if !interactive {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 } else if i == self.focus {
-                    "--state-focused-ring"
+                    STATE_FOCUSED_RING_TOKEN
                 } else {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 },
             );
             n.state.focused = i == self.focus;
@@ -4675,7 +4687,7 @@ impl ShellCore {
                 590.0,
                 w - 96.0,
                 44.0,
-                "--color-text-secondary",
+                COLOR_TEXT_SECONDARY_TOKEN,
             ));
             if self.recovery_available {
                 let i = self.display_preferences.len().max(1);
@@ -4688,9 +4700,9 @@ impl ShellCore {
                     w - 96.0,
                     54.0,
                     if self.focus == i {
-                        "--state-focused-ring"
+                        STATE_FOCUSED_RING_TOKEN
                     } else {
-                        "--state-rest-surface"
+                        STATE_REST_SURFACE_TOKEN
                     },
                 );
                 recovery.state.focused = self.focus == i;
@@ -4708,7 +4720,7 @@ impl ShellCore {
                     660.0,
                     w - 96.0,
                     36.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
         }
@@ -4722,7 +4734,7 @@ impl ShellCore {
                     540.0,
                     w - 96.0,
                     44.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
         }
@@ -4740,7 +4752,7 @@ impl ShellCore {
                     500.0,
                     w - 96.0,
                     40.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
             if let Some(status) = &self.system_status {
@@ -4752,7 +4764,7 @@ impl ShellCore {
                     550.0,
                     w - 96.0,
                     44.0,
-                    "--color-text-secondary",
+                    COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
         }
@@ -4767,7 +4779,7 @@ impl ShellCore {
             32.0,
             728.0,
             584.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
         out.push(node(
             "first-run-title",
@@ -4777,7 +4789,7 @@ impl ShellCore {
             54.0,
             680.0,
             56.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
         out.push(node(
             "first-run-copy",
@@ -4787,7 +4799,7 @@ impl ShellCore {
             112.0,
             680.0,
             48.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
@@ -4800,9 +4812,9 @@ impl ShellCore {
                 680.0,
                 52.0,
                 if i == self.focus {
-                    "--state-focused-ring"
+                    STATE_FOCUSED_RING_TOKEN
                 } else {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 },
             );
             n.state.focused = i == self.focus;
@@ -4817,7 +4829,7 @@ impl ShellCore {
             470.0,
             680.0,
             48.0,
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         ));
         let mut continue_node = node(
             "continue",
@@ -4828,9 +4840,9 @@ impl ShellCore {
             680.0,
             54.0,
             if self.focus == rows.len() {
-                "--state-focused-ring"
+                STATE_FOCUSED_RING_TOKEN
             } else {
-                "--state-rest-surface"
+                STATE_REST_SURFACE_TOKEN
             },
         );
         continue_node.state.focused = self.focus == rows.len();
@@ -4852,7 +4864,7 @@ impl ShellCore {
                 180.0,
                 412.0,
                 52.0,
-                "--state-rest-text",
+                STATE_REST_TEXT_TOKEN,
             ));
             for (index, label) in ["Cancel", "Confirm"].iter().enumerate() {
                 let mut button = node(
@@ -4864,9 +4876,9 @@ impl ShellCore {
                     412.0,
                     52.0,
                     if self.focus == index {
-                        "--state-focused-ring"
+                        STATE_FOCUSED_RING_TOKEN
                     } else {
-                        "--state-rest-surface"
+                        STATE_REST_SURFACE_TOKEN
                     },
                 );
                 button.state.focused = self.focus == index;
@@ -4889,9 +4901,9 @@ impl ShellCore {
                 352.0,
                 52.0,
                 if i == self.focus {
-                    "--state-focused-ring"
+                    STATE_FOCUSED_RING_TOKEN
                 } else {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 },
             );
             n.state.focused = i == self.focus;
@@ -4906,7 +4918,7 @@ impl ShellCore {
             232.0,
             352.0,
             34.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
         let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
         if let Some(index) = self.sleep_row() {
@@ -4940,9 +4952,9 @@ impl ShellCore {
                 352.0,
                 48.0,
                 if index == self.focus {
-                    "--state-focused-ring"
+                    STATE_FOCUSED_RING_TOKEN
                 } else {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 },
             );
             row.state.focused = index == self.focus;
@@ -4962,9 +4974,9 @@ impl ShellCore {
             352.0,
             48.0,
             if screenshot_index == self.focus {
-                "--state-focused-ring"
+                STATE_FOCUSED_RING_TOKEN
             } else {
-                "--state-rest-surface"
+                STATE_REST_SURFACE_TOKEN
             },
         );
         screenshot.state.focused = screenshot_index == self.focus;
@@ -4979,7 +4991,7 @@ impl ShellCore {
                 h - 142.0,
                 352.0,
                 32.0,
-                "--color-status-attention",
+                COLOR_STATUS_ATTENTION_TOKEN,
             ));
         }
         out.push(node(
@@ -4990,7 +5002,7 @@ impl ShellCore {
             h - 110.0,
             352.0,
             60.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
@@ -5002,7 +5014,7 @@ impl ShellCore {
             72.0,
             w - 304.0,
             552.0,
-            "--color-surface-raised",
+            COLOR_SURFACE_RAISED_TOKEN,
         ));
         out.push(node(
             "crash-eyebrow",
@@ -5012,7 +5024,7 @@ impl ShellCore {
             100.0,
             w - 360.0,
             40.0,
-            "--color-status-attention",
+            COLOR_STATUS_ATTENTION_TOKEN,
         ));
         out.push(node(
             "crash-title",
@@ -5022,9 +5034,9 @@ impl ShellCore {
             150.0,
             w - 360.0,
             54.0,
-            "--state-rest-text",
+            STATE_REST_TEXT_TOKEN,
         ));
-        out.push(node("crash-copy", Role::Text, &format!("{} stopped on its own and the shelf took the screen back. Nothing else was affected, and it's ready to open again.", self.active_title), 180.0, 220.0, w - 360.0, 70.0, "--color-text-secondary"));
+        out.push(node("crash-copy", Role::Text, &format!("{} stopped on its own and the shelf took the screen back. Nothing else was affected, and it's ready to open again.", self.active_title), 180.0, 220.0, w - 360.0, 70.0, COLOR_TEXT_SECONDARY_TOKEN));
         out.push(node(
             "crash-facts",
             Role::Text,
@@ -5033,7 +5045,7 @@ impl ShellCore {
             310.0,
             w - 360.0,
             50.0,
-            "--color-status-attention",
+            COLOR_STATUS_ATTENTION_TOKEN,
         ));
         out.push(node(
             "crash-diagnostic",
@@ -5046,9 +5058,9 @@ impl ShellCore {
             370.0,
             w - 360.0,
             40.0,
-            "--color-text-secondary",
+            COLOR_TEXT_SECONDARY_TOKEN,
         ));
-        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 420.0, w - 360.0, 60.0, "--color-text-secondary"));
+        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 420.0, w - 360.0, 60.0, COLOR_TEXT_SECONDARY_TOKEN));
         for (i, label) in ["Back to Home", "Open again"].iter().enumerate() {
             let mut n = node(
                 &format!("crash-action-{i}"),
@@ -5059,9 +5071,9 @@ impl ShellCore {
                 360.0,
                 50.0,
                 if i == self.focus {
-                    "--state-focused-ring"
+                    STATE_FOCUSED_RING_TOKEN
                 } else {
-                    "--state-rest-surface"
+                    STATE_REST_SURFACE_TOKEN
                 },
             );
             n.state.focused = i == self.focus;
@@ -5099,50 +5111,50 @@ fn procedural_art_nodes(
             "    ●".into(),
             vec![
                 ("--deco-plate-b-bg", 0.00, 0.48, 1.00, 0.52),
-                ("--color-surface-scrim", 0.00, 0.64, 0.72, 0.36),
-                ("--color-surface-raised", 0.36, 0.72, 0.64, 0.28),
+                (COLOR_SURFACE_SCRIM_TOKEN, 0.00, 0.64, 0.72, 0.36),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.36, 0.72, 0.64, 0.28),
             ],
         ),
         "hollow-tides" => (
             "≈  ◒  ≈".into(),
             vec![
                 ("--deco-plate-e-bg", 0.00, 0.52, 1.00, 0.48),
-                ("--color-surface-scrim", 0.00, 0.72, 1.00, 0.28),
-                ("--color-surface-raised", 0.42, 0.63, 0.24, 0.07),
-                ("--color-surface-raised", 0.53, 0.55, 0.03, 0.16),
+                (COLOR_SURFACE_SCRIM_TOKEN, 0.00, 0.72, 1.00, 0.28),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.42, 0.63, 0.24, 0.07),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.53, 0.55, 0.03, 0.16),
             ],
         ),
         "sunwake" => (
             "  ☼\n⌁   ⌁".into(),
             vec![
                 ("--deco-plate-a-bg", 0.00, 0.58, 1.00, 0.42),
-                ("--color-surface-raised", 0.00, 0.78, 1.00, 0.22),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.00, 0.78, 1.00, 0.22),
             ],
         ),
         "glass-harbor" => (
             String::new(),
             vec![
                 ("--deco-plate-f-bg", 0.00, 0.46, 1.00, 0.54),
-                ("--color-surface-scrim", 0.00, 0.68, 1.00, 0.32),
-                ("--color-surface-raised", 0.13, 0.48, 0.08, 0.30),
-                ("--color-surface-raised", 0.76, 0.42, 0.07, 0.36),
+                (COLOR_SURFACE_SCRIM_TOKEN, 0.00, 0.68, 1.00, 0.32),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.13, 0.48, 0.08, 0.30),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.76, 0.42, 0.07, 0.36),
                 ("--deco-plate-c-bg", 0.44, 0.58, 0.13, 0.10),
             ],
         ),
         "lantern-vale" => (
             "·  ✦  ·\n  ·  ·".into(),
             vec![
-                ("--color-surface-scrim", 0.00, 0.56, 1.00, 0.44),
+                (COLOR_SURFACE_SCRIM_TOKEN, 0.00, 0.56, 1.00, 0.44),
                 ("--deco-plate-d-bg", 0.38, 0.30, 0.24, 0.42),
-                ("--color-surface-raised", 0.46, 0.70, 0.08, 0.30),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.46, 0.70, 0.08, 0.30),
             ],
         ),
         "paper-comet" => (
             "✦  ·  ·\n  ╲".into(),
             vec![
                 ("--deco-plate-c-bg", 0.00, 0.62, 1.00, 0.38),
-                ("--color-surface-raised", 0.00, 0.82, 1.00, 0.18),
-                ("--color-surface-scrim", 0.56, 0.22, 0.08, 0.54),
+                (COLOR_SURFACE_RAISED_TOKEN, 0.00, 0.82, 1.00, 0.18),
+                (COLOR_SURFACE_SCRIM_TOKEN, 0.56, 0.22, 0.08, 0.54),
                 ("--deco-plate-a-bg", 0.18, 0.47, 0.30, 0.06),
             ],
         ),
@@ -5157,8 +5169,8 @@ fn procedural_art_nodes(
                     ['◆', '●', '✦', '◒'][usize::from(hash_bytes[0] >> 4) & 3]
                 ),
                 vec![
-                    ("--color-surface-scrim", 0.0, 0.68, 1.0, 0.32),
-                    ("--color-surface-raised", left, top, width, 0.16),
+                    (COLOR_SURFACE_SCRIM_TOKEN, 0.0, 0.68, 1.0, 0.32),
+                    (COLOR_SURFACE_RAISED_TOKEN, left, top, width, 0.16),
                 ],
             )
         }
@@ -5280,7 +5292,7 @@ fn procedural_art_nodes(
             if favorite { y + 4.0 } else { y },
             art_width,
             if favorite { 28.0 } else { 60.0 },
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         ));
     }
     if let Some(edition) = edition.filter(|_| !home) {
@@ -5293,7 +5305,7 @@ fn procedural_art_nodes(
                 kind_y,
                 if favorite { width - 72.0 } else { width - 24.0 },
                 if favorite { 20.0 } else { 24.0 },
-                "--color-surface-raised",
+                COLOR_SURFACE_RAISED_TOKEN,
             )
             .with_type_role(TypeRole::Eyebrow),
         );
@@ -5307,7 +5319,7 @@ fn procedural_art_nodes(
             label_y,
             width,
             28.0,
-            "--color-surface-scrim",
+            COLOR_SURFACE_SCRIM_TOKEN,
         ));
     }
     nodes.push(
@@ -5320,13 +5332,13 @@ fn procedural_art_nodes(
             if favorite { width - 72.0 } else { width },
             if favorite { 32.0 } else { 28.0 },
             if detail {
-                "--color-surface-scrim"
+                COLOR_SURFACE_SCRIM_TOKEN
             } else if context == "home-card" {
-                "--color-surface-canvas"
+                COLOR_SURFACE_CANVAS_TOKEN
             } else if focused {
-                "--state-focused-text"
+                STATE_FOCUSED_TEXT_TOKEN
             } else {
-                "--color-text-secondary"
+                COLOR_TEXT_SECONDARY_TOKEN
             },
         )
         .with_type_role(TypeRole::Label),
@@ -5402,7 +5414,7 @@ fn plate_art_nodes(
         art_y,
         art_width,
         art_height,
-        "--color-surface-raised",
+        COLOR_SURFACE_RAISED_TOKEN,
     );
     art = art.with_image(
         ImageSource::new(format!("fixture-art:{plate_name}.png"), plate_bytes),
@@ -5418,7 +5430,7 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0,
             72.0,
             56.0,
-            "--color-transparent",
+            SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Plate)
         .with_ink_token(plate_ink)
@@ -5433,7 +5445,7 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0 + 64.0,
             88.0,
             24.0,
-            "--color-transparent",
+            SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Eyebrow)
         .with_ink_token(plate_ink)
@@ -5453,7 +5465,7 @@ fn plate_art_nodes(
                 },
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Label),
         );
@@ -5489,7 +5501,7 @@ fn art_nodes(
             if favorite { y + 4.0 } else { y },
             if favorite { 56.0 } else { width },
             art_height,
-            "--state-rest-surface",
+            STATE_REST_SURFACE_TOKEN,
         );
         image = image.with_image(art.clone(), ImageFit::Cover);
         if detail {
@@ -5505,7 +5517,7 @@ fn art_nodes(
                 label_y,
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Label),
         ];
@@ -5542,7 +5554,7 @@ fn add_unavailable_card_cues(
                 y + art_height - 46.0,
                 92.0,
                 28.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Caption),
         );
@@ -5555,7 +5567,7 @@ fn add_unavailable_card_cues(
                 y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP,
                 width,
                 20.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Caption),
         );
@@ -5570,7 +5582,7 @@ fn add_unavailable_card_cues(
                 y + art_height - 46.0,
                 84.0,
                 28.0,
-                "--color-surface-canvas",
+                COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Caption),
         );
@@ -5597,7 +5609,7 @@ fn add_unavailable_card_cues(
             y,
             width - 16.0,
             art_height,
-            "--state-unavailable-veil",
+            STATE_UNAVAILABLE_VEIL_TOKEN,
         ));
     }
     nodes.push(
@@ -5609,7 +5621,7 @@ fn add_unavailable_card_cues(
             y + art_height - 46.0,
             84.0,
             28.0,
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -5640,7 +5652,7 @@ fn add_unavailable_card_cues(
             reason_y,
             width,
             8.0 + 20.0 * reason_lines,
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -5790,15 +5802,15 @@ fn humanize_identifier(value: &str) -> String {
 }
 fn state_token(a: &Availability, focused: bool) -> &'static str {
     if focused {
-        "--state-focused-ring"
+        STATE_FOCUSED_RING_TOKEN
     } else {
         match a {
             Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => {
-                "--color-status-attention"
+                COLOR_STATUS_ATTENTION_TOKEN
             }
             Availability::Ready
             | Availability::UnsupportedCapability { .. }
-            | Availability::IncompatibleRuntime { .. } => "--state-rest-surface",
+            | Availability::IncompatibleRuntime { .. } => STATE_REST_SURFACE_TOKEN,
         }
     }
 }
@@ -5830,7 +5842,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                     y,
                     16.0,
                     24.0,
-                    "--color-surface-raised",
+                    COLOR_SURFACE_RAISED_TOKEN,
                 )
                 .with_type_role(TypeRole::Label),
             );
@@ -5846,7 +5858,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
             y,
             binding_width,
             24.0,
-            "--color-border-strong",
+            COLOR_BORDER_STRONG_TOKEN,
         ));
         nodes.push(node(
             &format!("{prefix}-fill"),
@@ -5856,7 +5868,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
             y + 1.0,
             binding_width - 2.0,
             22.0,
-            "--color-surface-raised",
+            COLOR_SURFACE_RAISED_TOKEN,
         ));
         nodes.push(
             node(
@@ -5867,7 +5879,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                 y + 1.0,
                 binding_width - 4.0,
                 22.0,
-                "--color-surface-raised",
+                COLOR_SURFACE_RAISED_TOKEN,
             )
             .with_type_role(TypeRole::Caption)
             .with_text_align(TextAlign::Center),
@@ -5883,7 +5895,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                 y,
                 verb_width,
                 24.0,
-                "--color-surface-raised",
+                COLOR_SURFACE_RAISED_TOKEN,
             )
             .with_type_role(TypeRole::Label),
         );
@@ -6030,7 +6042,7 @@ fn add_explicit_action_name(action_node: &mut Node) {
             action_node.bounds.y + (action_node.bounds.height - 34.0).max(0.0),
             action_node.bounds.width.max(1.0),
             28.0_f32.min(action_node.bounds.height),
-            "--color-surface-canvas",
+            COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Label);
         label.state = action_node.state;
@@ -6042,11 +6054,6 @@ fn add_explicit_action_name(action_node: &mut Node) {
 }
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
-    const RADIUS_S: f32 = 6.0;
-    const RADIUS_M: f32 = 10.0;
-    const RADIUS_L: f32 = 16.0;
-    const RADIUS_PILL: f32 = 999.0;
-
     let id = node.id.as_str();
     let numeric_suffix = |prefix: &str| {
         id.strip_prefix(prefix).is_some_and(|suffix| {
@@ -6416,7 +6423,7 @@ mod tests {
             assert!(scene.contains("Current map:"));
             assert!(scene.contains("settings-row-controls-remap"));
             assert!(scene.contains("settings-row-controls-safe-return"));
-            assert!(scene.contains("--state-disabled-border"));
+            assert!(scene.contains(STATE_DISABLED_BORDER_TOKEN));
             for focus in 0..core.settings_scene_rows().len() {
                 core.focus = focus;
                 assert_eq!(core.action(&ShellAction::Activate), None);
@@ -6975,7 +6982,7 @@ mod tests {
         let bottom = format!("{:?}", settings_scene(&core));
         assert!(bottom.contains("settings-row-accessibility-diagnostic"));
         assert!(!bottom.contains("settings-row-accessibility-textScale"));
-        assert!(bottom.contains("--state-disabled-border"));
+        assert!(bottom.contains(STATE_DISABLED_BORDER_TOKEN));
         assert!(bottom.contains('—'));
 
         let compact = core
@@ -7061,10 +7068,10 @@ mod tests {
         assert_eq!(core.theme_base(), Base::HighContrast);
         assert_ne!(
             pf_theme::flagship()
-                .resolve(Base::Dusk, "--color-surface-canvas")
+                .resolve(Base::Dusk, COLOR_SURFACE_CANVAS_TOKEN)
                 .unwrap(),
             pf_theme::flagship()
-                .resolve(Base::HighContrast, "--color-surface-canvas")
+                .resolve(Base::HighContrast, COLOR_SURFACE_CANVAS_TOKEN)
                 .unwrap()
         );
     }
@@ -7274,7 +7281,7 @@ mod tests {
             diagnostic.accessible_label,
             "receipt-7 · kept on this device · exit status 9"
         );
-        assert_eq!(diagnostic.style_token, "--color-text-secondary");
+        assert_eq!(diagnostic.style_token, COLOR_TEXT_SECONDARY_TOKEN);
     }
     #[test]
     fn recovery_entry_is_authority_gated() {
@@ -8027,7 +8034,7 @@ mod tests {
             )
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-setup").unwrap();
-        assert_eq!(card.style_token, "--color-surface-canvas");
+        assert_eq!(card.style_token, COLOR_SURFACE_CANVAS_TOKEN);
         assert!((card.bounds.height - 256.0).abs() < f32::EPSILON);
         for required in [
             "library-card-art-setup",
@@ -8090,8 +8097,8 @@ mod tests {
         assert!((kind.bounds.y - (initial.bounds.y + initial.bounds.height) - 8.0).abs() <= 1.0);
         assert_eq!(initial.text_align, TextAlign::Center);
         assert_eq!(kind.text_align, TextAlign::Center);
-        assert_eq!(initial.style_token, "--color-transparent");
-        assert_eq!(kind.style_token, "--color-transparent");
+        assert_eq!(initial.style_token, SCENE_TRANSPARENT_TOKEN);
+        assert_eq!(kind.style_token, SCENE_TRANSPARENT_TOKEN);
         assert_eq!(initial.ink_token.as_deref(), Some("--deco-plate-a-fg"));
         assert_eq!(kind.ink_token.as_deref(), Some("--deco-plate-a-fg"));
         assert!(matches!(art.content, pf_scene::NodeContent::Image { .. }));
@@ -8190,7 +8197,7 @@ mod tests {
                     .iter()
                     .find(|node| node.id.as_str() == format!("home-card-{suffix}-{id}"))
                     .unwrap();
-                assert_eq!(text.style_token, "--color-transparent");
+                assert_eq!(text.style_token, SCENE_TRANSPARENT_TOKEN);
                 assert_eq!(text.ink_token.as_deref(), Some(expected_ink));
             }
         }
@@ -8220,7 +8227,7 @@ mod tests {
         let search = node_by_id(scene.root(), "library-search").unwrap();
         assert_eq!(search.accessible_label, "⌕  Search 1 titles");
         assert!(search.state.focused);
-        assert_eq!(search.style_token, "--state-rest-surface");
+        assert_eq!(search.style_token, STATE_REST_SURFACE_TOKEN);
     }
 
     #[test]
@@ -9846,7 +9853,7 @@ mod tests {
         );
         assert!((clip.bounds.y - footer_top).abs() < f32::EPSILON);
         assert!((clip.bounds.height - PROMPTS_AREA_HEIGHT).abs() < f32::EPSILON);
-        assert_eq!(clip.style_token, "--color-surface-canvas");
+        assert_eq!(clip.style_token, COLOR_SURFACE_CANVAS_TOKEN);
     }
 
     #[test]
@@ -9931,7 +9938,7 @@ mod tests {
             assert_eq!(
                 find(scene.root(), &format!("home-card-title-{id}"))
                     .map(|node| (node.type_role, node.style_token.as_str())),
-                Some((TypeRole::Label, "--color-surface-canvas"))
+                Some((TypeRole::Label, COLOR_SURFACE_CANVAS_TOKEN))
             );
         }
         assert_eq!(
@@ -10008,25 +10015,25 @@ mod tests {
         assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
         assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
         assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
-        assert_eq!(pill_border.style_token, "--color-border-hairline");
+        assert_eq!(pill_border.style_token, COLOR_BORDER_HAIRLINE_TOKEN);
         assert_eq!(
             node_by_id(scene.root(), "attention-pill")
                 .unwrap()
                 .style_token,
-            "--color-surface-raised"
+            COLOR_SURFACE_RAISED_TOKEN
         );
         assert_eq!(
             node_by_id(scene.root(), "attention")
                 .unwrap()
                 .ink_token
                 .as_deref(),
-            Some("--color-text-secondary")
+            Some(COLOR_TEXT_SECONDARY_TOKEN)
         );
         assert_eq!(
             node_by_id(scene.root(), "attention-dot")
                 .unwrap()
                 .style_token,
-            "--color-status-attention"
+            COLOR_STATUS_ATTENTION_TOKEN
         );
         let wash = node_by_id(scene.root(), "hero-wash").unwrap();
         assert!(wash.accessible_label.contains("rgba(201,111,87,0.5)"));
@@ -10062,14 +10069,14 @@ mod tests {
         ] {
             assert_eq!(
                 node_by_id(scene.root(), id).unwrap().style_token,
-                "--color-transparent",
+                SCENE_TRANSPARENT_TOKEN,
                 "{id} must not paint a raised strip behind floating chrome"
             );
         }
         for id in ["room-keycap-left-fill", "room-keycap-right-fill"] {
             assert_eq!(
                 node_by_id(scene.root(), id).unwrap().style_token,
-                "--color-surface-raised",
+                COLOR_SURFACE_RAISED_TOKEN,
                 "keycaps retain their designed raised fill"
             );
         }
@@ -10100,8 +10107,8 @@ mod tests {
 
         let theme = pf_theme::flagship();
         for (base, floor) in [(Base::Dusk, 4.5), (Base::HighContrast, 7.0)] {
-            let text = theme.resolve(base, "--state-rest-text").unwrap();
-            let surface = theme.resolve(base, "--color-surface-raised").unwrap();
+            let text = theme.resolve(base, STATE_REST_TEXT_TOKEN).unwrap();
+            let surface = theme.resolve(base, COLOR_SURFACE_RAISED_TOKEN).unwrap();
             assert!(
                 contrast(text, surface) >= floor,
                 "{base:?} chrome contrast must clear {floor}:1"
@@ -10630,7 +10637,7 @@ mod tests {
             !card.accessible_label.trim().is_empty(),
             "the focus owner must have an accessible label"
         );
-        assert_eq!(card.style_token, "--color-surface-canvas");
+        assert_eq!(card.style_token, COLOR_SURFACE_CANVAS_TOKEN);
         let focus_bounds = find(scene.root(), scene.default_focus().as_str())
             .unwrap()
             .bounds;
@@ -10823,7 +10830,7 @@ mod tests {
         let ready = core.scene(metrics, "wrong caller footer").unwrap();
         assert_eq!(
             find(ready.root(), "detail-title").map(|node| node.style_token.as_str()),
-            Some("--color-surface-canvas")
+            Some(COLOR_SURFACE_CANVAS_TOKEN)
         );
         assert!(find(ready.root(), "detail-ways-heading").is_some());
         assert!(
@@ -10896,7 +10903,7 @@ mod tests {
         core.focus = 3;
         let library = core.scene(metrics, "").unwrap();
         let chip_label = find(library.root(), "library-filter-2-label").unwrap();
-        assert_eq!(chip_label.style_token, "--state-rest-surface");
+        assert_eq!(chip_label.style_token, STATE_REST_SURFACE_TOKEN);
 
         core.selected_item = Some(0);
         core.go(Route::Details);
@@ -10909,14 +10916,14 @@ mod tests {
         ] {
             assert_eq!(
                 find(details.root(), id).unwrap().style_token,
-                "--color-surface-canvas"
+                COLOR_SURFACE_CANVAS_TOKEN
             );
         }
         assert_eq!(
             find(details.root(), "detail-variant-0-name")
                 .unwrap()
                 .style_token,
-            "--state-rest-surface"
+            STATE_REST_SURFACE_TOKEN
         );
 
         core.go(Route::Settings);
@@ -10925,13 +10932,13 @@ mod tests {
             find(settings.root(), "settings-section-title")
                 .unwrap()
                 .style_token,
-            "--color-surface-canvas"
+            COLOR_SURFACE_CANVAS_TOKEN
         );
         assert_eq!(
             find(settings.root(), "settings-nav-accessibility-label")
                 .unwrap()
                 .style_token,
-            "--state-rest-surface"
+            STATE_REST_SURFACE_TOKEN
         );
         assert!(
             find(settings.root(), "settings-nav-accessibility")
@@ -10978,9 +10985,9 @@ mod tests {
             let border = &children[border_index];
             let fill = &children[fill_index];
             let label = &children[label_index];
-            assert_eq!(border.style_token, "--color-border-strong");
-            assert_eq!(fill.style_token, "--color-surface-raised");
-            assert_eq!(label.style_token, "--color-surface-raised");
+            assert_eq!(border.style_token, COLOR_BORDER_STRONG_TOKEN);
+            assert_eq!(fill.style_token, COLOR_SURFACE_RAISED_TOKEN);
+            assert_eq!(label.style_token, COLOR_SURFACE_RAISED_TOKEN);
             assert!((fill.bounds.x - border.bounds.x - 1.0).abs() < f32::EPSILON);
             assert!((fill.bounds.y - border.bounds.y - 1.0).abs() < f32::EPSILON);
             assert!((border.bounds.width - fill.bounds.width - 2.0).abs() < f32::EPSILON);
@@ -11186,7 +11193,7 @@ mod tests {
             .unwrap();
         let row = node_by_id(scene.root(), "detail-variant-0").unwrap();
         assert!(row.state.focused);
-        assert_eq!(row.style_token, "--state-rest-surface");
+        assert_eq!(row.style_token, STATE_REST_SURFACE_TOKEN);
         assert!(
             row.children
                 .iter()

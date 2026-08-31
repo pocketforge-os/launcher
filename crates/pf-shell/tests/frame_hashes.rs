@@ -177,12 +177,13 @@ fn vertical_slice_frame_hashes_are_stable() {
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
         // Library hashes intentionally rebaseline for the CSS flex row's natural-width
         // chips, divider-free 16px gaps, uniform selected border, and separator-free,
-        // right-aligned prompt groups. The approved design golden remains unchanged;
-        // the similarity ratchet rises with this fidelity correction.
-        "1b188263710705cfecac8949655749707fae47e425acb9e4380a0bd8b79931ed  ",
-        "1b188263710705cfecac8949655749707fae47e425acb9e4380a0bd8b79931ed  ",
+        // right-aligned prompt groups. These hashes include the unclipped chip and
+        // prompt text; the approved design golden remains unchanged.
+        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
+        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
         "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
         "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
+        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
         "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

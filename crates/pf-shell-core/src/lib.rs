@@ -71,6 +71,10 @@ const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
+// Start-aligned labels are painted into this inset content box by pf-render.
+// Keep node sizing expressed in terms of the per-edge paint contract so callers
+// cannot accidentally confuse a shaped advance with the containing box width.
+const TEXT_NODE_INLINE_INSET: f32 = 6.0;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
@@ -96,11 +100,16 @@ fn library_prompt_verb_width(text: &str) -> f32 {
     }
 }
 
+fn text_node_box_width(content_advance: f32) -> f32 {
+    content_advance + 2.0 * TEXT_NODE_INLINE_INSET
+}
+
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
+        + 20.0
         + count.map_or(0.0, |value| {
-            CHIP_COUNT_GAP + label_text_width(&value.to_string())
+            CHIP_COUNT_GAP + text_node_box_width(label_text_width(&value.to_string()))
         })
         + CHIP_HORIZONTAL_PADDING
 }
@@ -3428,7 +3437,7 @@ impl ShellCore {
                         &label,
                         chip.bounds.x + CHIP_HORIZONTAL_PADDING,
                         chip.bounds.y + 5.0,
-                        label_text_width(&label),
+                        label_text_width(&label) + 20.0,
                         26.0,
                         chip.style_token.as_str(),
                     )
@@ -3442,9 +3451,11 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width - CHIP_HORIZONTAL_PADDING - count_width,
+                            chip.bounds.x + chip_width
+                                - CHIP_HORIZONTAL_PADDING
+                                - text_node_box_width(count_width),
                             chip.bounds.y + 5.0,
-                            count_width,
+                            text_node_box_width(count_width),
                             26.0,
                             chip.style_token.as_str(),
                         )
@@ -6049,23 +6060,24 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
             .find(|node| node.id.as_str() == format!("home-prompt-verb-{index}"))
             .expect("prompt verb");
         verb.bounds.x = x;
-        verb.bounds.width = library_prompt_verb_width(&verb.accessible_label);
+        verb.bounds.width = text_node_box_width(library_prompt_verb_width(&verb.accessible_label));
         x += verb.bounds.width + SPACE_5;
     }
     let right = nodes
         .iter()
         .map(|node| node.bounds.x + node.bounds.width)
         .fold(0.0_f32, f32::max);
-    let last_verb_ink_inset = nodes
-        .iter()
-        .filter(|node| node.id.as_str().starts_with("home-prompt-verb-"))
-        .max_by_key(|node| node.id.as_str())
-        .map_or(0.0, |node| match node.accessible_label.as_str() {
-            // Swash leaves this much of the shaped advance unpainted after the final
-            // `s`; compensate the ink bearing, not the semantic node boundary.
-            "Details" => 7.0,
-            _ => 0.0,
-        });
+    let last_verb_ink_inset = TEXT_NODE_INLINE_INSET
+        + nodes
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("home-prompt-verb-"))
+            .max_by_key(|node| node.id.as_str())
+            .map_or(0.0, |node| match node.accessible_label.as_str() {
+                // Swash leaves this much of the shaped advance unpainted after the final
+                // `s`; compensate the ink bearing, not the semantic node boundary.
+                "Details" => 7.0,
+                _ => 0.0,
+            });
     let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
     for node in &mut nodes {
         node.bounds.x += offset;
@@ -10407,19 +10419,17 @@ mod tests {
             let inner_left = chip.bounds.x + CHIP_HORIZONTAL_PADDING;
             let inner_right = chip.bounds.x + chip.bounds.width - CHIP_HORIZONTAL_PADDING;
             let label_node = node_by_id(chip, &format!("library-filter-{index}-label")).unwrap();
+            assert!(label_node.bounds.x >= inner_left);
             assert!(
-                label_node.bounds.x >= inner_left
-                    && label_node.bounds.x + label_node.bounds.width <= inner_right,
-                "chip {index} label bounds must fit inside both horizontal paddings"
+                (label_node.bounds.width - (label_text_width(label) + 20.0)).abs() < f32::EPSILON
             );
-            assert!((label_node.bounds.width - label_text_width(label)).abs() < f32::EPSILON);
             if count.is_some() {
                 let count_node =
                     node_by_id(chip, &format!("library-filter-{index}-count")).unwrap();
                 assert!(
-                    count_node.bounds.x >= inner_left
-                        && count_node.bounds.x + count_node.bounds.width <= inner_right,
-                    "chip {index} count bounds must fit inside both horizontal paddings"
+                    count_node.bounds.x + count_node.bounds.width
+                        <= inner_right + 2.0 * TEXT_NODE_INLINE_INSET,
+                    "chip {index} count content must fit inside the right padding"
                 );
                 assert!(
                     count_node.bounds.x
@@ -10488,7 +10498,11 @@ mod tests {
         );
         let last_verb = node_by_id(prompts, "home-prompt-verb-2").unwrap();
         assert!(
-            (last_verb.bounds.x + last_verb.bounds.width - 7.0 - (1280.0 - SPACE_7)).abs()
+            (last_verb.bounds.x + last_verb.bounds.width
+                - TEXT_NODE_INLINE_INSET
+                - 7.0
+                - (1280.0 - SPACE_7))
+                .abs()
                 < f32::EPSILON
         );
         let expected_top =
@@ -10502,7 +10516,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_library_footer_last_verb_ink_is_margin_anchored_on_one_row() {
+    fn desktop_library_text_is_complete_and_footer_is_margin_anchored_on_one_row() {
         fn clear_label(node: &mut Node, id: &str) -> bool {
             if node.id.as_str() == id {
                 node.accessible_label.clear();
@@ -10511,11 +10525,74 @@ mod tests {
             node.children.iter_mut().any(|child| clear_label(child, id))
         }
 
-        let mut core = fixture_core(vec![item(
-            "item-0",
-            "Item 0",
-            vec![variant("native", "item-0", Availability::Ready)],
-        )]);
+        fn widen_label(node: &mut Node, id: &str) -> bool {
+            if node.id.as_str() == id {
+                node.bounds.width = 300.0;
+                return true;
+            }
+            node.children.iter_mut().any(|child| widen_label(child, id))
+        }
+
+        fn ink_columns_with_label_suppressed(
+            scene: &Scene,
+            id: &str,
+            metrics: SurfaceMetrics,
+        ) -> (usize, usize, usize, usize, usize) {
+            let rendered = pf_render::Rasterizer::new().render(scene, metrics).unwrap();
+            let mut suppressed_root = scene.root().clone();
+            assert!(clear_label(&mut suppressed_root, id));
+            let suppressed = Scene::new(suppressed_root, scene.default_focus().clone()).unwrap();
+            let blank = pf_render::Rasterizer::new()
+                .render(&suppressed, metrics)
+                .unwrap();
+            let mut columns = std::collections::BTreeSet::new();
+            let mut rows = std::collections::BTreeSet::new();
+            for (pixel, (painted, blank)) in rendered
+                .rgba
+                .chunks_exact(4)
+                .zip(blank.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                if painted != blank {
+                    columns.insert(pixel % rendered.width as usize);
+                    rows.insert(pixel / rendered.width as usize);
+                }
+            }
+            (
+                columns.len(),
+                *columns
+                    .first()
+                    .unwrap_or_else(|| panic!("{id} must produce raster ink")),
+                *columns.last().unwrap(),
+                *rows.first().unwrap(),
+                *rows.last().unwrap(),
+            )
+        }
+
+        fn generous_ink_columns(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> usize {
+            let mut generous_root = scene.root().clone();
+            assert!(widen_label(&mut generous_root, id));
+            let generous = Scene::new(generous_root, scene.default_focus().clone()).unwrap();
+            ink_columns_with_label_suppressed(&generous, id, metrics).0
+        }
+
+        let mut items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("item-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &mut items[21..] {
+            item.kind = AppKind::Media;
+        }
+        let mut core = fixture_core(items);
         core.set_control_bindings(vec![
             ControlBinding {
                 context: "shell".into(),
@@ -10546,35 +10623,29 @@ mod tests {
             orientation: pf_scene::Orientation::Landscape,
         };
         let scene = core.scene(metrics, "").unwrap();
-        let mut suppressed_root = scene.root().clone();
-        assert!(clear_label(&mut suppressed_root, "home-prompt-verb-2"));
-        let suppressed = Scene::new(suppressed_root, scene.default_focus().clone()).unwrap();
-        let rendered = pf_render::Rasterizer::new()
-            .render(&scene, metrics)
-            .unwrap();
-        let without_last_verb = pf_render::Rasterizer::new()
-            .render(&suppressed, metrics)
-            .unwrap();
-
-        let mut ink = rendered
-            .rgba
-            .chunks_exact(4)
-            .zip(without_last_verb.rgba.chunks_exact(4))
-            .enumerate()
-            .filter_map(|(pixel, (painted, blank))| {
-                (painted != blank).then_some((
-                    pixel % rendered.width as usize,
-                    pixel / rendered.width as usize,
-                ))
-            });
-        let first = ink.next().expect("Details must produce raster ink");
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.0, first.0, first.1, first.1);
-        for (x, y) in ink {
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
+        for id in [
+            "home-prompt-verb-0",
+            "home-prompt-verb-1",
+            "home-prompt-verb-2",
+            "library-filter-0-label",
+            "library-filter-1-label",
+            "library-filter-2-label",
+            "library-filter-2-count",
+            "library-filter-3-label",
+            "library-filter-3-count",
+        ] {
+            let label = node_by_id(scene.root(), id).unwrap();
+            let in_scene = ink_columns_with_label_suppressed(&scene, id, metrics).0;
+            let standalone = generous_ink_columns(&scene, id, metrics);
+            assert_eq!(
+                in_scene, standalone,
+                "{id} must paint every standalone ink column (label {:?})",
+                label.accessible_label
+            );
         }
+
+        let (_, min_x, max_x, min_y, max_y) =
+            ink_columns_with_label_suppressed(&scene, "home-prompt-verb-2", metrics);
         assert!(
             max_x.abs_diff(1231) <= 2,
             "rightmost Details ink must meet the 1232px content margin, got x={min_x}..={max_x}"

@@ -148,6 +148,10 @@ pub const TYPE_TITLE_WEIGHT: f32 = 800.0;
 // Mechanically extracted component values from shell.css.
 pub const STATUS_BAR_HEIGHT: f32 = 64.0;
 pub const PROMPTS_AREA_HEIGHT: f32 = 60.0;
+pub const LIB_HEAD_TOP: f32 = 76.0;
+pub const LIB_TOOLBAR_HEIGHT: f32 = 44.0;
+pub const LIB_GRID_TOP: f32 = 148.0;
+pub const LIB_CARD_ART_HEIGHT: f32 = 232.0;
 pub const CARD_ART_WIDTH: f32 = 158.0;
 pub const CARD_ART_HEIGHT: f32 = 210.0;
 pub const CHIP_HEIGHT: f32 = 44.0;

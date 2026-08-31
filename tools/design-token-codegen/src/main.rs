@@ -375,6 +375,22 @@ fn generate(design: &Path) -> Result<String, String> {
         "height",
         "PROMPTS_AREA_HEIGHT",
     )?;
+    component(&mut output, &shell, ".lib-head", "top", "LIB_HEAD_TOP")?;
+    component(
+        &mut output,
+        &shell,
+        ".searchbox",
+        "height",
+        "LIB_TOOLBAR_HEIGHT",
+    )?;
+    component(&mut output, &shell, ".lib-grid", "top", "LIB_GRID_TOP")?;
+    component(
+        &mut output,
+        &shell,
+        ".lib-grid .card .art",
+        "height",
+        "LIB_CARD_ART_HEIGHT",
+    )?;
     component(&mut output, &shell, ".card", "width", "CARD_ART_WIDTH")?;
     component(
         &mut output,
@@ -627,6 +643,10 @@ mod tests {
         for forbidden in [
             "const STATUS_BAR_HEIGHT:",
             "const PROMPTS_AREA_HEIGHT:",
+            "const LIB_HEAD_TOP:",
+            "const LIB_TOOLBAR_HEIGHT:",
+            "const LIB_GRID_TOP:",
+            "const LIB_CARD_ART_HEIGHT:",
             "const CARD_ART_WIDTH:",
             "const CARD_ART_HEIGHT:",
             "const CHIP_HORIZONTAL_PADDING:",

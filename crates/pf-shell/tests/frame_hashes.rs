@@ -175,10 +175,11 @@ fn vertical_slice_frame_hashes_are_stable() {
         "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
         "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
-        // Library art remains below the footer fade while prompts and semantic name ink
-        // paint above it.
-        "39a17aa0c06684f06b07a863fe9475e3febaec0938d8fe5227a2a17ee84fac45  ",
-        "39a17aa0c06684f06b07a863fe9475e3febaec0938d8fe5227a2a17ee84fac45  ",
+        // Library hashes intentionally rebaseline for the CSS-authoritative 76px toolbar,
+        // 160px grid content origin, six fluid columns, and 232px art height. Art remains
+        // below the footer fade while prompts and semantic name ink paint above it.
+        "8cc09323cc0982f3284b5a9681f8b410d0d02f05721215f356dc6f409d57f557  ",
+        "8cc09323cc0982f3284b5a9681f8b410d0d02f05721215f356dc6f409d57f557  ",
         "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
         "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
         "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",

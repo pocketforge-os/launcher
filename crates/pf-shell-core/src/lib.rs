@@ -43,8 +43,9 @@ use design_generated::{
     COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
     COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
     COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
-    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH,
-    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
+    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
+    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_3, SPACE_4, SPACE_5,
+    SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
     STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
     STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
@@ -64,8 +65,8 @@ pub trait DeviceStatusPort {
 
 const HOME_SHELF_LIMIT: usize = 6;
 const HOME_SHELF_GAP: f32 = 47.2;
-const LIBRARY_SIDE_MARGIN: f32 = 48.0;
-const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
+const LIBRARY_SIDE_MARGIN: f32 = SPACE_7;
+const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
@@ -173,17 +174,22 @@ impl LibraryGeometry {
 
 fn library_geometry(surface_width: f32) -> LibraryGeometry {
     let (preferred_columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
-        (6, 4, 184.0)
+        (6, 4, LIB_GRID_TOP + SPACE_3)
     } else if surface_width >= 760.0 {
         (4, 4, 252.0)
     } else {
         (3, 2, 320.0)
     };
     let card_left = LIBRARY_SIDE_MARGIN;
-    let card_width = CARD_ART_WIDTH;
+    let card_width = if preferred_columns == 6 {
+        (surface_width - 2.0 * card_left - (preferred_columns - 1) as f32 * SPACE_5)
+            / preferred_columns as f32
+    } else {
+        CARD_ART_WIDTH
+    };
     let mut columns = preferred_columns;
     while columns > 1
-        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * 16.0
+        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * SPACE_4
             > surface_width
     {
         columns -= 1;
@@ -193,10 +199,10 @@ fn library_geometry(surface_width: f32) -> LibraryGeometry {
     let card_gap = if columns == 1 {
         0.0
     } else if columns == 6 {
-        (surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32
+        SPACE_5
     } else {
         ((surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32)
-            .max(16.0)
+            .max(SPACE_4)
     };
     LibraryGeometry {
         columns,
@@ -3226,6 +3232,7 @@ impl ShellCore {
                     x,
                     388.0,
                     card_width,
+                    CARD_ART_HEIGHT,
                     Some(h - PROMPTS_AREA_HEIGHT),
                 );
                 if item.favorite {
@@ -3293,10 +3300,10 @@ impl ShellCore {
                 "library-search",
                 Role::Button,
                 &format!("⌕  Search {} titles", self.items.len()),
-                48.0,
-                112.0,
+                LIBRARY_SIDE_MARGIN,
+                LIB_HEAD_TOP,
                 search_width,
-                52.0,
+                LIB_TOOLBAR_HEIGHT,
                 STATE_REST_SURFACE_TOKEN,
             );
             search.state.focused = self.focus == 0;
@@ -3306,8 +3313,8 @@ impl ShellCore {
                     "library-search-placeholder",
                     Role::Text,
                     &format!("⌕  Search {} titles", self.items.len()),
-                    64.0,
-                    124.0,
+                    LIBRARY_SIDE_MARGIN + SPACE_4,
+                    LIB_HEAD_TOP + 8.0,
                     search_width - 32.0,
                     28.0,
                     STATE_REST_SURFACE_TOKEN,
@@ -3317,15 +3324,15 @@ impl ShellCore {
             out.push(search);
             for (index, (label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
-                    48.0
+                    LIBRARY_SIDE_MARGIN
                 } else {
                     LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
-                let toolbar_top = if compact_toolbar { 180.0 } else { 112.0 };
+                let toolbar_top = if compact_toolbar { 180.0 } else { LIB_HEAD_TOP };
                 let toolbar_width = if compact_toolbar {
-                    w - 96.0
+                    w - 2.0 * LIBRARY_SIDE_MARGIN
                 } else {
-                    w - toolbar_left - 48.0
+                    w - toolbar_left - LIBRARY_SIDE_MARGIN
                 };
                 let chip_width = if compact_toolbar {
                     (toolbar_width - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
@@ -3408,13 +3415,13 @@ impl ShellCore {
                     ));
                 }
             }
-            let row_height = 272.0;
+            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
             while if geometry.columns == 6 {
-                card_top + 8.0 + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
+                card_top + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
             } else {
-                card_top + 8.0 + visible_rows as f32 * row_height + CARD_ART_HEIGHT
+                card_top + visible_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
                     <= h - PROMPTS_AREA_HEIGHT
             } {
                 visible_rows += 1;
@@ -3429,9 +3436,9 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
-                let card_y = card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height;
+                let card_y = card_top + (row as f32 - first_visible_row as f32) * row_height;
                 let title_fits =
-                    card_y + CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
+                    card_y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
@@ -3440,9 +3447,9 @@ impl ShellCore {
                     card_y,
                     geometry.card_width,
                     if title_fits {
-                        CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
+                        LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
                     } else {
-                        CARD_ART_HEIGHT
+                        LIB_CARD_ART_HEIGHT
                     },
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
@@ -3457,7 +3464,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    CARD_ART_HEIGHT,
+                    LIB_CARD_ART_HEIGHT,
                     self.focus == i + 5,
                 );
                 add_unavailable_card_cues(
@@ -3468,6 +3475,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
+                    LIB_CARD_ART_HEIGHT,
                     None,
                 );
                 card.children.retain(|child| {
@@ -3498,7 +3506,7 @@ impl ShellCore {
                         .with_type_role(TypeRole::Caption),
                     );
                 }
-                let title_y = card.bounds.y + CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                let title_y = card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP;
                 if title_fits {
                     card.children.push(
                         node(
@@ -5567,9 +5575,9 @@ fn add_unavailable_card_cues(
     x: f32,
     y: f32,
     width: f32,
+    art_height: f32,
     footer_top: Option<f32>,
 ) {
-    let art_height = CARD_ART_HEIGHT;
     if matches!(availability, Availability::Ready)
         && best_variant(item).is_some_and(|variant| {
             variant
@@ -8278,7 +8286,10 @@ mod tests {
         let label_layer =
             node_by_id(scene.root(), "library-label-layer-library-item-setup").unwrap();
         assert_eq!(art_layer.style_token, COLOR_SURFACE_CANVAS_TOKEN);
-        assert!((art_layer.bounds.height - 256.0).abs() < f32::EPSILON);
+        assert!(
+            (art_layer.bounds.height - (LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0)).abs()
+                < f32::EPSILON
+        );
         assert!(node_by_id(art_layer, "library-card-art-setup").is_some());
         for required in [
             "library-title-setup",
@@ -10036,12 +10047,12 @@ mod tests {
                 "each emitted row must begin above the footer at {width}x{height}"
             );
 
-            let row_height = 272.0;
+            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
             let mut expected_rows = 1;
             while if geometry.columns == 6 {
-                geometry.card_top + 8.0 + expected_rows as f32 * row_height < grid_bottom
+                geometry.card_top + expected_rows as f32 * row_height < grid_bottom
             } else {
-                geometry.card_top + 8.0 + expected_rows as f32 * row_height + CARD_ART_HEIGHT
+                geometry.card_top + expected_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
                     <= grid_bottom
             } {
                 expected_rows += 1;
@@ -10089,7 +10100,7 @@ mod tests {
         let second_row_art = node_by_id(root, "library-card-art-item-6").unwrap();
         assert!(second_row_art.bounds.y < footer_top);
         assert!(second_row_art.bounds.y + second_row_art.bounds.height > footer_top);
-        assert!((second_row_art.bounds.height - CARD_ART_HEIGHT).abs() < f32::EPSILON);
+        assert!((second_row_art.bounds.height - LIB_CARD_ART_HEIGHT).abs() < f32::EPSILON);
 
         let fade = node_by_id(root, "library-grid-footer-fade").unwrap();
         assert!((fade.bounds.y - (720.0 - 96.0)).abs() < f32::EPSILON);
@@ -10365,6 +10376,134 @@ mod tests {
         }
         let toolbar_gap = chips[0].bounds.x - search.bounds.x - search.bounds.width;
         assert!((toolbar_gap - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn desktop_library_scene_uses_generated_css_geometry() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        let toolbar = node_by_id(scene.root(), "library-search").unwrap();
+        assert!((toolbar.bounds.y - LIB_HEAD_TOP).abs() < f32::EPSILON);
+        assert!((toolbar.bounds.height - LIB_TOOLBAR_HEIGHT).abs() < f32::EPSILON);
+
+        let first_art = node_by_id(scene.root(), "library-card-art-item-0").unwrap();
+        assert!((first_art.bounds.y - (LIB_GRID_TOP + SPACE_3)).abs() < f32::EPSILON);
+        assert!((first_art.bounds.height - LIB_CARD_ART_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn library_footer_ink_never_intersects_card_label_ink() {
+        fn collect<'a>(node: &'a Node, predicate: fn(&Node) -> bool, out: &mut Vec<&'a Node>) {
+            if predicate(node) {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect(child, predicate, out);
+            }
+        }
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Library Label {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.set_control_bindings(vec![ControlBinding {
+            context: "global".into(),
+            action: "Activate".into(),
+            label: "Activate".into(),
+            binding: "A".into(),
+        }]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        let prompts = node_by_id(scene.root(), "prompts").unwrap();
+        let mut footer_ink = Vec::new();
+        collect(
+            prompts,
+            |node| {
+                matches!(node.role, Role::Text | Role::Heading)
+                    || node.id.as_str().contains("keycap")
+            },
+            &mut footer_ink,
+        );
+        let mut label_ink = Vec::new();
+        for layer in scene.root().children.iter().filter(|node| {
+            node.id.as_str().starts_with("library-label-layer-")
+                || node.id.as_str().starts_with("library-title-")
+        }) {
+            collect(
+                layer,
+                |node| matches!(node.role, Role::Text | Role::Heading),
+                &mut label_ink,
+            );
+        }
+        assert!(!footer_ink.is_empty());
+        assert!(!label_ink.is_empty());
+        for footer in footer_ink {
+            for label in &label_ink {
+                assert!(
+                    !intersects(footer.bounds, label.bounds),
+                    "footer ink {} {:?} intersects label ink {} {:?}",
+                    footer.id.as_str(),
+                    footer.bounds,
+                    label.id.as_str(),
+                    label.bounds
+                );
+            }
+        }
     }
 
     #[test]

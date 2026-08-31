@@ -5136,31 +5136,37 @@ fn plate_art_nodes(
         .unwrap_or_else(|| sentence_kind(&item.kind))
         .to_uppercase();
     let initial = item.title.chars().next().unwrap_or('?').to_string();
-    let (plate_name, plate_bytes): (&str, &'static [u8]) = match identity {
+    let (plate_name, plate_bytes, plate_ink): (&str, &'static [u8], &str) = match identity {
         "steam-link" => (
             "plate-a",
             include_bytes!("../../pf-shell/fixtures/art/plate-a.png"),
+            "--deco-plate-a-fg",
         ),
         "tidelines" => (
             "plate-d",
             include_bytes!("../../pf-shell/fixtures/art/plate-d.png"),
+            "--deco-plate-d-fg",
         ),
         "button-tester" => (
             "plate-c",
             include_bytes!("../../pf-shell/fixtures/art/plate-c.png"),
+            "--deco-plate-c-fg",
         ),
         _ => [
             (
                 "plate-a",
                 &include_bytes!("../../pf-shell/fixtures/art/plate-a.png")[..],
+                "--deco-plate-a-fg",
             ),
             (
                 "plate-d",
                 &include_bytes!("../../pf-shell/fixtures/art/plate-d.png")[..],
+                "--deco-plate-d-fg",
             ),
             (
                 "plate-c",
                 &include_bytes!("../../pf-shell/fixtures/art/plate-c.png")[..],
+                "--deco-plate-c-fg",
             ),
         ][(hash % 3) as usize],
     };
@@ -5188,9 +5194,10 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0,
             72.0,
             56.0,
-            "--color-surface-raised",
+            "--color-transparent",
         )
         .with_type_role(TypeRole::Plate)
+        .with_ink_token(plate_ink)
         .with_text_align(TextAlign::Center),
     );
     nodes.push(
@@ -5202,9 +5209,10 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0 + 64.0,
             88.0,
             24.0,
-            "--color-surface-raised",
+            "--color-transparent",
         )
         .with_type_role(TypeRole::Eyebrow)
+        .with_ink_token(plate_ink)
         .with_text_align(TextAlign::Center),
     );
     if !detail {
@@ -7421,6 +7429,10 @@ mod tests {
         assert!((kind.bounds.y - (initial.bounds.y + initial.bounds.height) - 8.0).abs() <= 1.0);
         assert_eq!(initial.text_align, TextAlign::Center);
         assert_eq!(kind.text_align, TextAlign::Center);
+        assert_eq!(initial.style_token, "--color-transparent");
+        assert_eq!(kind.style_token, "--color-transparent");
+        assert_eq!(initial.ink_token.as_deref(), Some("--deco-plate-a-fg"));
+        assert_eq!(kind.ink_token.as_deref(), Some("--deco-plate-a-fg"));
         assert!(matches!(art.content, pf_scene::NodeContent::Image { .. }));
         assert!(nodes.iter().all(|node| {
             let id = node.id.as_str();
@@ -7429,6 +7441,41 @@ mod tests {
                 && !id.contains("plate-motif")
                 && !id.contains("plate-frame")
         }));
+    }
+
+    #[test]
+    fn identity_plate_text_uses_the_selected_palette_foreground() {
+        for (id, expected_ink) in [
+            ("steam-link", "--deco-plate-a-fg"),
+            ("tidelines", "--deco-plate-d-fg"),
+            ("button-tester", "--deco-plate-c-fg"),
+            // The hash-picked fallback for `setup` selects plate D.
+            ("setup", "--deco-plate-d-fg"),
+        ] {
+            let plate = item(
+                id,
+                "Plate",
+                vec![variant("native", id, Availability::Ready)],
+            );
+            let core = fixture_core(vec![plate]);
+            let nodes = plate_art_nodes(
+                &core.items[0],
+                "home-card",
+                48.0,
+                388.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+            );
+
+            for suffix in ["initial-plate", "plate-kind"] {
+                let text = nodes
+                    .iter()
+                    .find(|node| node.id.as_str() == format!("home-card-{suffix}-{id}"))
+                    .unwrap();
+                assert_eq!(text.style_token, "--color-transparent");
+                assert_eq!(text.ink_token.as_deref(), Some(expected_ink));
+            }
+        }
     }
 
     #[test]

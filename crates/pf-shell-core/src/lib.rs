@@ -64,6 +64,12 @@ fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * 8.0
 }
 
+// The flagship caption role is 12 px Manrope medium. Keep capsule geometry
+// renderer-independent while approximating its average glyph advance.
+fn caption_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 6.0
+}
+
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     label_text_width(label)
         + 20.0
@@ -2635,7 +2641,7 @@ impl ShellCore {
                     16.0,
                     152.0,
                     32.0,
-                    "--color-surface-raised",
+                    "--color-transparent",
                 )
                 .with_type_role(TypeRole::Caption),
             );
@@ -2650,7 +2656,7 @@ impl ShellCore {
                 12.0,
                 424.0,
                 40.0,
-                "--color-surface-raised",
+                "--color-transparent",
             )
             .with_type_role(TypeRole::Label),
         );
@@ -3045,34 +3051,45 @@ impl ShellCore {
                     .then_some("The previous game didn't close cleanly")
             });
             if let Some(message) = attention {
+                const PILL_RIGHT_MARGIN: f32 = 48.0;
+                const PILL_TOP: f32 = 77.0;
+                const PILL_HEIGHT: f32 = 33.0;
+                const PILL_HORIZONTAL_PADDING: f32 = 16.0;
+                const PILL_GAP: f32 = 8.0;
+                const DOT_SIZE: f32 = 6.4;
+                let pill_width = PILL_HORIZONTAL_PADDING * 2.0
+                    + DOT_SIZE
+                    + PILL_GAP
+                    + caption_text_width(message);
+                let pill_left = w - PILL_RIGHT_MARGIN - pill_width;
                 content.push(node(
                     "attention-pill-border",
                     Role::Group,
                     "",
-                    w - 328.0,
-                    76.0,
-                    280.0,
-                    36.0,
+                    pill_left,
+                    PILL_TOP,
+                    pill_width,
+                    PILL_HEIGHT,
                     "--color-border-hairline",
                 ));
                 content.push(node(
                     "attention-pill",
                     Role::Group,
                     "",
-                    w - 327.0,
-                    77.0,
-                    278.0,
-                    34.0,
+                    pill_left + 1.0,
+                    PILL_TOP + 1.0,
+                    pill_width - 2.0,
+                    PILL_HEIGHT - 2.0,
                     "--color-surface-raised",
                 ));
                 content.push(node(
                     "attention-dot",
                     Role::Group,
                     "",
-                    w - 312.0,
-                    91.0,
-                    6.0,
-                    6.0,
+                    pill_left + PILL_HORIZONTAL_PADDING,
+                    PILL_TOP + (PILL_HEIGHT - DOT_SIZE) / 2.0,
+                    DOT_SIZE,
+                    DOT_SIZE,
                     "--color-status-attention",
                 ));
                 content.push(
@@ -3080,13 +3097,14 @@ impl ShellCore {
                         "attention",
                         Role::Text,
                         message,
-                        w - 296.0,
-                        78.0,
-                        240.0,
-                        36.0,
-                        "--color-surface-raised",
+                        pill_left + PILL_HORIZONTAL_PADDING + DOT_SIZE + PILL_GAP,
+                        PILL_TOP,
+                        caption_text_width(message),
+                        PILL_HEIGHT,
+                        "--color-transparent",
                     )
-                    .with_type_role(TypeRole::Caption),
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token("--color-text-secondary"),
                 );
             }
             let ready_items = self
@@ -6089,7 +6107,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         None
     };
     if let Some(radius) = radius {
-        node.corner_radius = radius * scale;
+        node.corner_radius = (radius * scale).min(node.bounds.width.min(node.bounds.height) / 2.0);
     }
     for child in &mut node.children {
         apply_quiet_console_radius(child, scale);
@@ -6342,7 +6360,6 @@ mod tests {
             .unwrap();
         let debug = format!("{scene:?}");
         assert!(debug.contains("rooms"));
-        assert!(debug.contains("status-cluster"));
 
         let Some(Effect::ChangePreference(first)) = c.action(&ShellAction::Activate) else {
             panic!("first visible row must activate");
@@ -9987,6 +10004,32 @@ mod tests {
             node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
             Some("Controller battery low")
         );
+        let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
+        assert!((pill_border.bounds.x - 1054.0).abs() <= 2.0);
+        assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
+        assert!((pill_border.bounds.width - 178.0).abs() <= 2.0);
+        assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
+        assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
+        assert_eq!(pill_border.style_token, "--color-border-hairline");
+        assert_eq!(
+            node_by_id(scene.root(), "attention-pill")
+                .unwrap()
+                .style_token,
+            "--color-surface-raised"
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention")
+                .unwrap()
+                .ink_token
+                .as_deref(),
+            Some("--color-text-secondary")
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention-dot")
+                .unwrap()
+                .style_token,
+            "--color-status-attention"
+        );
         let wash = node_by_id(scene.root(), "hero-wash").unwrap();
         assert!(wash.accessible_label.contains("rgba(201,111,87,0.5)"));
         assert!(wash.accessible_label.contains("transparent 68%"));
@@ -9994,6 +10037,38 @@ mod tests {
         assert!(wash.accessible_label.contains("transparent 70%"));
         assert!(wash.accessible_label.contains("opacity 0.55"));
         assert!(matches!(wash.content, pf_scene::NodeContent::Image { .. }));
+    }
+
+    #[test]
+    fn chrome_navigation_and_system_status_float_on_the_wash() {
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        let scene = core.scene(metrics, "").unwrap();
+
+        for id in ["rooms", "status-cluster"] {
+            assert_eq!(
+                node_by_id(scene.root(), id).unwrap().style_token,
+                "--color-transparent",
+                "{id} must not paint a raised strip behind floating chrome"
+            );
+        }
+        for id in ["room-keycap-left-fill", "room-keycap-right-fill"] {
+            assert_eq!(
+                node_by_id(scene.root(), id).unwrap().style_token,
+                "--color-surface-raised",
+                "keycaps retain their designed raised fill"
+            );
+        }
     }
 
     #[test]
@@ -10939,6 +11014,15 @@ mod tests {
             })
         }
 
+        fn assert_radius(root: &Node, id: &str, token_radius: f32) {
+            let node = find(root, id);
+            assert_eq!(
+                node.corner_radius,
+                token_radius.min(node.bounds.width.min(node.bounds.height) / 2.0),
+                "{id} must clamp its token radius to CSS corner bounds"
+            );
+        }
+
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -10952,77 +11036,50 @@ mod tests {
             core.text_scale = text_scale;
 
             let home = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(home.root(), "item-i0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(home.root(), "home-card-art-i0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(home.root(), "room-keycap-left").corner_radius,
-                6.0 * multiplier
-            );
+            assert_radius(home.root(), "item-i0", 10.0 * multiplier);
+            assert_radius(home.root(), "home-card-art-i0", 10.0 * multiplier);
+            assert_radius(home.root(), "room-keycap-left", 6.0 * multiplier);
 
             core.go(Route::Library);
             let library = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(library.root(), "library-search").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(library.root(), "library-filter-0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(library.root(), "library-item-i0").corner_radius,
-                10.0 * multiplier
-            );
+            assert_radius(library.root(), "library-search", 10.0 * multiplier);
+            assert_radius(library.root(), "library-filter-0", 10.0 * multiplier);
+            assert_radius(library.root(), "library-item-i0", 10.0 * multiplier);
 
             core.selected_item = Some(0);
             core.go(Route::Details);
             let details = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(details.root(), "detail-cover").corner_radius,
-                16.0 * multiplier
-            );
-            assert_eq!(
-                find(details.root(), "detail-variant-0").corner_radius,
-                10.0 * multiplier
-            );
+            assert_radius(details.root(), "detail-cover", 16.0 * multiplier);
+            assert_radius(details.root(), "detail-variant-0", 10.0 * multiplier);
 
             core.load_preferences(&preferences(true), true).unwrap();
             core.text_scale = text_scale;
             core.go(Route::Settings);
             let settings = settings_scene(&core);
-            assert_eq!(
-                find(settings.root(), "settings-nav-accessibility").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-nav-accessibility",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(settings.root(), "settings-row-accessibility-textScale").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-row-accessibility-textScale",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(settings.root(), "settings-text-scale-segmented-control").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-text-scale-segmented-control",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(
-                    settings.root(),
-                    "settings-toggle-accessibility-highContrast-track"
-                )
-                .corner_radius,
-                999.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-toggle-accessibility-highContrast-track",
+                999.0 * multiplier,
             );
-            assert_eq!(
-                find(
-                    settings.root(),
-                    "settings-toggle-accessibility-highContrast-knob"
-                )
-                .corner_radius,
-                999.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-toggle-accessibility-highContrast-knob",
+                999.0 * multiplier,
             );
         }
     }

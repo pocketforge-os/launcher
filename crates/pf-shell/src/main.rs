@@ -2624,6 +2624,28 @@ fn use_device_fixtures(args: &[String], fixture_mode: bool) -> bool {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
+    const VALUE_FLAGS: [&str; 11] = [
+        "--authority-state-dir",
+        "--catalog-root",
+        "--catalog-snapshot",
+        "--desktop-sim-supervise",
+        "--device",
+        "--input",
+        "--out",
+        "--session-socket",
+        "--state-dir",
+        "--surface",
+        "--text-scale",
+    ];
+    for (index, arg) in args.iter().enumerate() {
+        if VALUE_FLAGS.contains(&arg.as_str())
+            && args
+                .get(index + 1)
+                .is_none_or(|value| value.starts_with("--"))
+        {
+            return Err(format!("usage error: {arg} requires a value"));
+        }
+    }
     if let Some(surface) = value(args, "--surface") {
         parse_surface(surface)?;
     }
@@ -2631,14 +2653,6 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         && !matches!(scale, "100" | "150" | "200")
     {
         return Err("usage error: --text-scale must be 100, 150, or 200".into());
-    }
-    if let Some(index) = args.iter().position(|arg| arg == "--catalog-snapshot") {
-        if args
-            .get(index + 1)
-            .is_none_or(|value| value.starts_with("--"))
-        {
-            return Err("usage error: --catalog-snapshot requires a path".into());
-        }
     }
     #[cfg(not(feature = "wayland"))]
     if args.iter().any(|arg| arg == "--wayland") {
@@ -4509,6 +4523,32 @@ exec="./launch"
             status.attention_message.as_deref(),
             Some("Controller battery low")
         );
+    }
+
+    #[test]
+    fn value_flags_reject_missing_or_flag_shaped_values() {
+        for args in [
+            vec!["--surface".into()],
+            vec!["--surface".into(), "--text-scale".into(), "150".into()],
+        ] {
+            let error = validate_args(&args).unwrap_err();
+
+            assert!(error.contains("--surface"));
+        }
+    }
+
+    #[test]
+    fn value_flags_accept_values() {
+        let args = vec![
+            "--surface".into(),
+            "1280x720".into(),
+            "--text-scale".into(),
+            "150".into(),
+            "--out".into(),
+            "evidence/offscreen".into(),
+        ];
+
+        assert!(validate_args(&args).is_ok());
     }
 
     fn write_power_supply(root: &Path, name: &str, capacity: &str, status: &str, scope: &str) {

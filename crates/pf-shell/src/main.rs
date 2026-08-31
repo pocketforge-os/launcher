@@ -2663,22 +2663,40 @@ mod durable_tests {
     fn fixture_library_matches_the_full_mockup_roster_and_home_six() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
-        assert_eq!(snapshot.items.len(), 23);
+        let expected_titles = [
+            "Ridgeline",
+            "Hollow Tides",
+            "Sunwake",
+            "Moth & Lantern",
+            "Steam Link",
+            "Tidelines",
+            "Button Tester",
+            "Low Orbit",
+            "Northlight",
+            "Torchbug",
+            "Petrichor",
+            "Lumen Vale",
+            "Cinder Loop",
+            "Iron Meridian",
+            "Halfmoon Harbor",
+            "Vega Crossing",
+            "Paper Armada",
+            "Orchard of Glass",
+            "Fern & Fathom",
+            "Signal Decay",
+            "Quiet Machines",
+            "Redshift Alley",
+            "Bellwether",
+            "Milewide",
+        ];
+        assert_eq!(snapshot.items.len(), expected_titles.len());
         assert_eq!(
             snapshot
                 .items
                 .iter()
-                .take(6)
                 .map(|item| item.title.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "Ridgeline",
-                "Hollow Tides",
-                "Sunwake",
-                "Moth & Lantern",
-                "Steam Link",
-                "Tidelines"
-            ]
+            expected_titles
         );
         assert!(
             snapshot.items[..4]
@@ -2687,8 +2705,20 @@ mod durable_tests {
         );
         assert!(matches!(
             snapshot.items[4].variants[0].availability,
-            pf_catalog::Availability::Ready
+            pf_catalog::Availability::NeedsNetwork { .. }
         ));
+        assert_eq!(
+            snapshot
+                .items
+                .iter()
+                .filter(|item| matches!(item.kind, pf_catalog::AppKind::Game))
+                .count(),
+            21
+        );
+        assert_eq!(
+            snapshot.user_projection.favorite_item_ids,
+            ["moth-and-lantern", "torchbug"]
+        );
 
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
@@ -2730,7 +2760,7 @@ mod durable_tests {
                 item.id
             );
         }
-        for (id, initial, kind) in [("steam-link", "S", "Stream"), ("tidelines", "T", "Web app")] {
+        for (id, initial, kind) in [("steam-link", "S", "STREAM"), ("tidelines", "T", "WEB APP")] {
             assert!(scene.root().children.iter().any(|card| {
                 card.children.iter().any(|node| {
                     node.id.as_str() == format!("home-card-initial-plate-{id}")
@@ -2748,14 +2778,12 @@ mod durable_tests {
             .find(|node| node.id.as_str() == "item-steam-link")
             .unwrap();
         assert!(steam.children.iter().any(|node| {
-            node.id.as_str() == "home-card-badge-steam-link" && node.accessible_label == "⌁ Network"
+            node.id.as_str() == "home-card-badge-steam-link" && node.accessible_label == "⊘ Network"
         }));
-        assert!(
-            steam
-                .children
-                .iter()
-                .all(|node| !node.id.as_str().contains("reason"))
-        );
+        assert!(steam.children.iter().any(|node| {
+            node.id.as_str() == "home-card-reason-steam-link"
+                && node.accessible_label == "⊘ Network required"
+        }));
         assert_eq!(
             scene
                 .root()

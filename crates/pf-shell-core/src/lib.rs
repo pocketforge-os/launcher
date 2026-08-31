@@ -41,6 +41,10 @@ const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CHIP_HORIZONTAL_PADDING: f32 = 24.0;
 const CHIP_COUNT_GAP: f32 = 8.0;
+const CARD_ART_WIDTH: f32 = 158.0;
+const CARD_ART_HEIGHT: f32 = 210.0;
+const CARD_LABEL_GAP: f32 = 12.0;
+const CARD_CAPTION_GAP: f32 = 2.0;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
@@ -144,10 +148,16 @@ fn library_geometry(surface_width: f32) -> LibraryGeometry {
     } else {
         (3, 2, 320.0)
     };
-    let card_left = 48.0;
-    let card_gap = 16.0;
-    let card_width =
-        (surface_width - 2.0 * card_left - (columns - 1) as f32 * card_gap) / columns as f32;
+    let card_left = LIBRARY_SIDE_MARGIN;
+    let card_width = CARD_ART_WIDTH;
+    // The desktop mockup fixes the cover width and distributes the remaining content
+    // width between columns. Narrower breakpoints retain their existing fluid spacing.
+    let card_gap = if columns == 6 {
+        (surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32
+    } else {
+        ((surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32)
+            .max(16.0)
+    };
     LibraryGeometry {
         columns,
         card_width,
@@ -2617,7 +2627,7 @@ impl ShellCore {
                 266.0,
                 520.0,
                 32.0,
-                "--color-text-secondary",
+                "--color-surface-canvas",
             ));
         }
         match self.presentation {
@@ -2924,10 +2934,12 @@ impl ShellCore {
                 .with_type_role(TypeRole::Eyebrow),
             );
             let count = self.items.len().min(HOME_SHELF_LIMIT);
-            let gap = 16.0;
-            let card_width = ((w - 96.0 - gap * count.saturating_sub(1) as f32)
-                / count.max(1) as f32)
-                .min(136.0);
+            let card_width = CARD_ART_WIDTH;
+            let gap = if count > 1 {
+                (w - 96.0 - card_width * count as f32) / (count - 1) as f32
+            } else {
+                0.0
+            };
             for (i, item) in self.items.iter().take(HOME_SHELF_LIMIT).enumerate() {
                 let availability = best_availability(item);
                 let x = 48.0 + i as f32 * (card_width + gap);
@@ -2936,9 +2948,9 @@ impl ShellCore {
                     Role::ListItem,
                     &item.title,
                     x,
-                    390.0,
+                    388.0,
                     card_width,
-                    200.0,
+                    CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + CARD_CAPTION_GAP + 14.0,
                     "--color-surface-canvas",
                 );
                 n.action = Some(NodeAction::Activate);
@@ -2947,9 +2959,9 @@ impl ShellCore {
                     item,
                     "home-card",
                     x,
-                    390.0,
+                    388.0,
                     card_width,
-                    158.0,
+                    CARD_ART_HEIGHT,
                     i == self.focus,
                 );
                 add_unavailable_card_cues(
@@ -2958,7 +2970,7 @@ impl ShellCore {
                     availability,
                     "home-card",
                     x,
-                    390.0,
+                    388.0,
                     card_width,
                     Some(h - PROMPTS_AREA_HEIGHT),
                 );
@@ -3140,12 +3152,15 @@ impl ShellCore {
                     ));
                 }
             }
-            let row_height = 292.0;
+            let row_height = 272.0;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
-            while card_top + (visible_rows + 1) as f32 * row_height - 18.0
-                <= h - PROMPTS_AREA_HEIGHT
-            {
+            while if geometry.columns == 6 {
+                card_top + 8.0 + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
+            } else {
+                card_top + 8.0 + visible_rows as f32 * row_height + CARD_ART_HEIGHT
+                    <= h - PROMPTS_AREA_HEIGHT
+            } {
                 visible_rows += 1;
             }
             let focused_row = self.focus.saturating_sub(5) / geometry.columns;
@@ -3158,23 +3173,27 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
+                let card_y = card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height;
+                let title_fits =
+                    card_y + CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
                     &item.title,
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    card_y,
                     geometry.card_width,
-                    210.0,
+                    if title_fits {
+                        CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
+                    } else {
+                        CARD_ART_HEIGHT
+                    },
                     "--color-surface-canvas",
                 );
                 card.state.focused = self.focus == i + 5;
-                // The renderer's unavailable state scrims the complete subtree after children.
-                // Keep it for illustrated covers; an artless identity plate carries its own
-                // badge/reason and must retain legible mono and kind text.
-                card.state.unavailable = !matches!(availability, Availability::Ready)
-                    && item.art.is_some()
-                    && !item.art_failed;
+                // Availability is painted explicitly as an art veil plus badge so the status
+                // ink itself remains legible instead of being dimmed with the cover.
+                card.state.unavailable = false;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
@@ -3182,7 +3201,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
                     geometry.card_width,
-                    136.0,
+                    CARD_ART_HEIGHT,
                     self.focus == i + 5,
                 );
                 add_unavailable_card_cues(
@@ -3208,33 +3227,41 @@ impl ShellCore {
                     art.style_token = "--state-focused-ring".into();
                     art.state.focused = true;
                 }
-                card.children.push(
-                    node(
-                        &format!("library-title-{}", item.id),
-                        Role::Text,
-                        &item.title,
-                        card.bounds.x,
-                        card.bounds.y + 170.0,
-                        geometry.card_width,
-                        34.0,
-                        "--color-surface-canvas",
-                    )
-                    .with_type_role(TypeRole::Label),
-                );
+                if item.favorite {
+                    card.children.push(
+                        node(
+                            &format!("favorite-pin-{}", item.id),
+                            Role::Text,
+                            "★",
+                            card.bounds.x + geometry.card_width - 28.0,
+                            card.bounds.y + 8.0,
+                            20.0,
+                            20.0,
+                            "--color-surface-scrim",
+                        )
+                        .with_type_role(TypeRole::Caption),
+                    );
+                }
+                let title_y = card.bounds.y + CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                if title_fits {
+                    card.children.push(
+                        node(
+                            &format!("library-title-{}", item.id),
+                            Role::Text,
+                            &item.title,
+                            card.bounds.x,
+                            title_y,
+                            geometry.card_width,
+                            34.0,
+                            "--color-surface-canvas",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
+                }
+                card.children.retain(|child| {
+                    child.bounds.y + child.bounds.height <= h - PROMPTS_AREA_HEIGHT
+                });
                 out.push(card);
-            }
-            let total_rows = self.library_items.len().div_ceil(geometry.columns);
-            if first_visible_row + visible_rows < total_rows {
-                out.push(node(
-                    "library-fold-fade",
-                    Role::Group,
-                    "More titles below",
-                    48.0,
-                    h - PROMPTS_AREA_HEIGHT - 32.0,
-                    w - 96.0,
-                    32.0,
-                    "--color-surface-scrim",
-                ));
             }
         } else if self.route == Route::Search {
             out.push(node(
@@ -5103,6 +5130,7 @@ fn plate_art_nodes(
     let palette = match identity {
         "steam-link" => 0,
         "tidelines" => 3,
+        "button-tester" => 5,
         _ => (hash % 6) as usize,
     };
     let background = [
@@ -5115,14 +5143,15 @@ fn plate_art_nodes(
     ][palette];
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
-    let art_x = if favorite { x + 4.0 } else { x + 8.0 };
+    let art_x = if favorite { x + 4.0 } else { x };
     let art_y = if favorite { y + 4.0 } else { y };
-    let art_width = if favorite { 56.0 } else { width - 16.0 };
+    let art_width = if favorite { 56.0 } else { width };
     let kind = item
         .tags
         .iter()
         .find_map(|tag| tag.strip_prefix("kind-label:"))
-        .unwrap_or_else(|| sentence_kind(&item.kind));
+        .unwrap_or_else(|| sentence_kind(&item.kind))
+        .to_uppercase();
     let initial = item.title.chars().next().unwrap_or('?').to_string();
     let mut nodes = vec![node(
         &format!("{context}-art-{}", item.id),
@@ -5134,10 +5163,14 @@ fn plate_art_nodes(
         art_height,
         background,
     )];
-    // The reference uses one of six low-contrast line motifs behind each monogram. Native
-    // scene nodes deliberately keep the motif token-soft: the identity text, frame, and badge
-    // remain the only contrast-bearing content.
-    let motif = (hash / 6) % 6;
+    // Match the authored per-kind line work. Hairline ink is the theme's translucent
+    // foreground treatment (the former background-colored motif disappeared into the plate).
+    let motif = match identity {
+        "steam-link" => 0,
+        "tidelines" => 1,
+        "button-tester" => 4,
+        _ => (hash / 6) % 6,
+    };
     for line in 0..5 {
         let (left, top, motif_width, motif_height) = match motif {
             0 => (
@@ -5175,28 +5208,28 @@ fn plate_art_nodes(
             art_y + art_height * top,
             motif_width,
             motif_height,
-            background,
+            "--color-border-hairline",
         ));
     }
     // CSS reference: `.plate .frame { inset: space-2; border: 1px; border-radius:
-    // calc(radius-m - 4px) }`. Four one-pixel scene edges preserve the exact 4 px inset
+    // calc(radius-m - 4px) }`. Four one-pixel scene edges preserve the exact 8 px inset
     // without covering the translucent plate fill.
     for (edge, edge_x, edge_y, edge_width, edge_height) in [
-        ("top", art_x + 4.0, art_y + 4.0, art_width - 8.0, 1.0),
+        ("top", art_x + 8.0, art_y + 8.0, art_width - 16.0, 1.0),
         (
             "bottom",
-            art_x + 4.0,
-            art_y + art_height - 5.0,
-            art_width - 8.0,
+            art_x + 8.0,
+            art_y + art_height - 9.0,
+            art_width - 16.0,
             1.0,
         ),
-        ("left", art_x + 4.0, art_y + 4.0, 1.0, art_height - 8.0),
+        ("left", art_x + 8.0, art_y + 8.0, 1.0, art_height - 16.0),
         (
             "right",
-            art_x + art_width - 5.0,
-            art_y + 4.0,
+            art_x + art_width - 9.0,
+            art_y + 8.0,
             1.0,
-            art_height - 8.0,
+            art_height - 16.0,
         ),
     ] {
         nodes.push(node(
@@ -5216,9 +5249,9 @@ fn plate_art_nodes(
             Role::Text,
             &initial,
             art_x + (art_width - 72.0) / 2.0,
-            art_y + art_height * 0.28,
+            art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0,
             72.0,
-            72.0,
+            56.0,
             background,
         )
         .with_type_role(TypeRole::Plate),
@@ -5227,9 +5260,9 @@ fn plate_art_nodes(
         node(
             &format!("{context}-plate-kind-{}", item.id),
             Role::Text,
-            kind,
+            &kind,
             art_x + (art_width - 88.0) / 2.0,
-            art_y + art_height * 0.62,
+            art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0 + 64.0,
             88.0,
             24.0,
             background,
@@ -5245,10 +5278,8 @@ fn plate_art_nodes(
                 if favorite { x + 68.0 } else { x },
                 if favorite {
                     y + 32.0
-                } else if context == "home-card" {
-                    y + 166.0
                 } else {
-                    y + 176.0
+                    y + art_height + CARD_LABEL_GAP
                 },
                 if favorite { width - 72.0 } else { width },
                 if favorite { 32.0 } else { 28.0 },
@@ -5274,19 +5305,19 @@ fn art_nodes(
         let favorite = context == "favorite-card";
         let detail = context == "detail-art";
         let label_y = if home {
-            y + 166.0
+            y + art_height + CARD_LABEL_GAP
         } else if favorite {
             y + 32.0
         } else {
-            y + 176.0
+            y + art_height + CARD_LABEL_GAP
         };
         let mut image = node(
             &format!("{context}-art-{}", item.id),
             Role::Group,
             &format!("{} cover art", item.title),
-            if favorite { x + 4.0 } else { x + 8.0 },
+            if favorite { x + 4.0 } else { x },
             if favorite { y + 4.0 } else { y },
-            if favorite { 56.0 } else { width - 16.0 },
+            if favorite { 56.0 } else { width },
             art_height,
             "--state-rest-surface",
         );
@@ -5323,15 +5354,46 @@ fn add_unavailable_card_cues(
     width: f32,
     footer_top: Option<f32>,
 ) {
-    if matches!(availability, Availability::Ready) && item.id == "steam-link" {
+    let home = context == "home-card";
+    let art_height = CARD_ART_HEIGHT;
+    if item.id == "steam-link" {
         nodes.push(
             node(
                 &format!("{context}-badge-{}", item.id),
                 Role::Text,
-                "⌁ Network",
-                x + width - 106.0,
-                y + 10.0,
+                "⊘ Network",
+                x + 10.0,
+                y + art_height - 46.0,
                 92.0,
+                28.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+        nodes.push(
+            node(
+                &format!("{context}-reason-{}", item.id),
+                Role::Text,
+                "⊘ Network required",
+                x,
+                y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP,
+                width,
+                20.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+        return;
+    }
+    if matches!(availability, Availability::IncompatibleRuntime { .. }) {
+        nodes.push(
+            node(
+                &format!("{context}-badge-{}", item.id),
+                Role::Text,
+                "◉ Update",
+                x + 10.0,
+                y + art_height - 46.0,
+                84.0,
                 28.0,
                 "--color-surface-canvas",
             )
@@ -5342,14 +5404,12 @@ fn add_unavailable_card_cues(
     if matches!(availability, Availability::Ready) {
         return;
     }
-    let home = context == "home-card";
     // Home is a six-item ready rail in the approved composition. Should live data place an
     // unavailable item in that rail, its hero status remains truthful without adding a second
     // state treatment or reason line to the compact card.
     if home {
         return;
     }
-    let art_height = if home { 158.0 } else { 136.0 };
     let badge = match availability {
         Availability::NeedsNetwork { .. } => "Network",
         Availability::NeedsSetup { .. } => "Setup",
@@ -5376,8 +5436,8 @@ fn add_unavailable_card_cues(
             &format!("{context}-badge-{}", item.id),
             Role::Text,
             &format!("⊘ {badge}"),
-            x + width - 98.0,
-            y + 10.0,
+            x + 10.0,
+            y + art_height - 46.0,
             84.0,
             28.0,
             "--color-surface-canvas",
@@ -5388,7 +5448,7 @@ fn add_unavailable_card_cues(
         "⊘ {}",
         availability_text(availability, &Presentation::Ready)
     );
-    let reason_y = if home { y + 194.0 } else { y + 204.0 };
+    let reason_y = y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP;
     let max_lines = footer_top.map(|footer_top| {
         let available_height = footer_top - reason_y;
         let mut lines = 1;
@@ -5646,7 +5706,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("settings-toggle-") && (id.ends_with("-track") || id.ends_with("-knob"))
     {
         Some(RADIUS_PILL)
-    } else if id.contains("press-marker") {
+    } else if id.contains("plate-frame-") || id.contains("press-marker") {
         Some(RADIUS_S)
     } else if id == "detail-cover"
         || id.starts_with("detail-art-")
@@ -7171,7 +7231,7 @@ mod tests {
     }
 
     #[test]
-    fn library_fold_only_appears_when_content_exceeds_visible_capacity() {
+    fn library_never_paints_a_full_width_fold_band() {
         let scene_for_count = |count| {
             let items = (0..count)
                 .map(|index| {
@@ -7209,80 +7269,7 @@ mod tests {
         };
 
         assert!(!has_fold(&scene_for_count(3)));
-        assert!(has_fold(&scene_for_count(4)));
-
-        let items = (0..4)
-            .map(|index| {
-                item(
-                    &format!("item-{index}"),
-                    &format!("Item {index}"),
-                    vec![variant(
-                        "native",
-                        &format!("app-{index}"),
-                        Availability::Ready,
-                    )],
-                )
-            })
-            .collect();
-        let mut core = fixture_core(items);
-        core.go(Route::Library);
-        core.scene(
-            SurfaceMetrics {
-                logical_width: 640.0,
-                logical_height: 720.0,
-                scale: 1.0,
-                safe_insets: Default::default(),
-                orientation: pf_scene::Orientation::Landscape,
-            },
-            "",
-        )
-        .unwrap();
-        core.focus = 5;
-        core.action(&ShellAction::Move(AxisMove::Down));
-        assert_eq!(core.focus, 8, "content below the fold is navigable");
-        let scrolled = core
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 640.0,
-                    logical_height: 720.0,
-                    scale: 1.0,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        let focused = scrolled
-            .root()
-            .children
-            .iter()
-            .find(|node| node.state.focused)
-            .expect("focused item below the initial fold");
-        assert_eq!(focused.id.as_str(), "library-item-item-3");
-        assert!((focused.bounds.y - library_geometry(640.0).card_top - 8.0).abs() < f32::EPSILON);
-        assert!(
-            !has_fold(&scrolled),
-            "fold hides when the final row is fully visible"
-        );
-
-        core.action(&ShellAction::Move(AxisMove::Up));
-        let scrolled_back = core
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 640.0,
-                    logical_height: 720.0,
-                    scale: 1.0,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        assert_eq!(core.focus, 5);
-        assert!(
-            has_fold(&scrolled_back),
-            "fold reappears when scrolling above the final row"
-        );
+        assert!(!has_fold(&scene_for_count(24)));
     }
 
     #[test]
@@ -7388,7 +7375,7 @@ mod tests {
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-setup").unwrap();
         assert_eq!(card.style_token, "--color-surface-canvas");
-        assert!((card.bounds.height - 210.0).abs() < f32::EPSILON);
+        assert!((card.bounds.height - 256.0).abs() < f32::EPSILON);
         for required in [
             "library-card-art-setup",
             "library-title-setup",
@@ -8937,7 +8924,7 @@ mod tests {
 
         assert_eq!(
             emitted_ids,
-            (0..6)
+            (0..12)
                 .map(|index| format!("library-item-item-{index}"))
                 .collect::<Vec<_>>()
         );
@@ -8981,26 +8968,24 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert!(
-                cards
-                    .iter()
-                    .all(|card| card.bounds.y + card.bounds.height <= grid_bottom),
-                "cards must remain above the footer at {width}x{height}"
+                cards.iter().all(|card| card.bounds.y < grid_bottom),
+                "each emitted row must begin above the footer at {width}x{height}"
             );
 
-            let row_height = 292.0;
+            let row_height = 272.0;
             let mut expected_rows = 1;
-            while geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 <= grid_bottom
-            {
+            while if geometry.columns == 6 {
+                geometry.card_top + 8.0 + expected_rows as f32 * row_height < grid_bottom
+            } else {
+                geometry.card_top + 8.0 + expected_rows as f32 * row_height + CARD_ART_HEIGHT
+                    <= grid_bottom
+            } {
                 expected_rows += 1;
             }
             assert_eq!(
                 cards.len(),
                 expected_rows * geometry.columns,
                 "the maximum fitting rows must be emitted at {width}x{height}"
-            );
-            assert!(
-                geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 > grid_bottom,
-                "one more row must not fit at {width}x{height}"
             );
         }
     }

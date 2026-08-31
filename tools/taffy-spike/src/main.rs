@@ -296,7 +296,7 @@ fn layout_and_paint(
     let frame = renderer
         .render(&scene, metrics)
         .map_err(|error| format!("{error:?}"))?;
-    ensure_text_ink_is_clipped(&scene, metrics, &frame.rgba)?;
+    ensure_text_ink_is_clipped(&scene, metrics, text_scale)?;
 
     let mut record = format!("{surface}:{orientation:?}:{scale_percent}:{width:.0}x{height:.0}\n");
     for (context, rect) in &painted {
@@ -481,38 +481,52 @@ fn validate_geometry(
 fn ensure_text_ink_is_clipped(
     scene: &Scene,
     metrics: SurfaceMetrics,
-    painted: &[u8],
+    text_scale: f32,
 ) -> Result<(), String> {
-    let mut blank = scene.root().clone();
-    for child in &mut blank.children {
-        child.role = Role::Group;
-    }
-    let blank_scene =
-        Scene::new(blank, SceneNodeId::new("root").unwrap()).map_err(|error| error.to_string())?;
-    let mut rasterizer = Rasterizer::new();
-    let scale = scene.root().children.first().map_or(1.0, |_| 1.0);
-    rasterizer
-        .set_text_scale(scale)
-        .map_err(|error| format!("{error:?}"))?;
-    let background = rasterizer
-        .render(&blank_scene, metrics)
-        .map_err(|error| format!("{error:?}"))?
-        .rgba;
-    for (index, (a, b)) in painted
-        .chunks_exact(4)
-        .zip(background.chunks_exact(4))
-        .enumerate()
-    {
-        if a != b {
-            let x = (index % metrics.logical_width as usize) as f32;
-            let y = (index / metrics.logical_width as usize) as f32;
-            if !scene.root().children.iter().any(|node| {
-                x >= node.bounds.x
-                    && x < node.bounds.x + node.bounds.width
-                    && y >= node.bounds.y
-                    && y < node.bounds.y + node.bounds.height
-            }) {
-                return Err("required text ink escaped its computed node".into());
+    for node in &scene.root().children {
+        // Preserve the computed width (and therefore the production wrapping), but
+        // remove the bottom clip so ink from lines that do not fit is observable.
+        let mut ink_node = node.clone();
+        ink_node.bounds.height = (metrics.logical_height - node.bounds.y).max(node.bounds.height);
+        let mut ink_root = scene.root().clone();
+        ink_root.children = vec![ink_node.clone()];
+        let mut blank_node = ink_node;
+        blank_node.role = Role::Group;
+        let mut blank_root = scene.root().clone();
+        blank_root.children = vec![blank_node];
+        let render = |root| -> Result<Vec<u8>, String> {
+            let isolated = Scene::new(root, SceneNodeId::new("root").unwrap())
+                .map_err(|error| error.to_string())?;
+            let mut rasterizer = Rasterizer::new();
+            rasterizer
+                .set_text_scale(text_scale)
+                .map_err(|error| format!("{error:?}"))?;
+            rasterizer
+                .render(&isolated, metrics)
+                .map(|frame| frame.rgba)
+                .map_err(|error| format!("{error:?}"))
+        };
+        let ink = render(ink_root)?;
+        let background = render(blank_root)?;
+        for (index, (a, b)) in ink
+            .chunks_exact(4)
+            .zip(background.chunks_exact(4))
+            .enumerate()
+        {
+            if a != b {
+                let x = (index % metrics.logical_width as usize) as f32;
+                let y = (index / metrics.logical_width as usize) as f32;
+                // Pixel coordinates are integral, so no sub-pixel AA tolerance is used.
+                if x < node.bounds.x
+                    || x >= node.bounds.x + node.bounds.width
+                    || y < node.bounds.y
+                    || y >= node.bounds.y + node.bounds.height
+                {
+                    return Err(format!(
+                        "required text ink from {:?} escaped its computed node",
+                        node.id
+                    ));
+                }
             }
         }
     }
@@ -553,4 +567,71 @@ fn binary_delta() -> i64 {
         .and_then(|path| fs::metadata(path).ok())
         .map_or(0, |meta| i64::try_from(meta.len()).unwrap_or(i64::MAX));
     binary_size() - shell
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overflow_is_attributed_to_the_text_node_that_produced_it() {
+        let overflowing = Node::new(
+            SceneNodeId::new("overflowing-label").unwrap(),
+            Role::Text,
+            "Configuración de accesibilidad y controles",
+            Bounds::new(8.0, 8.0, 48.0, 48.0),
+            "--color-surface-raised",
+        )
+        .with_type_role(TypeRole::Label)
+        .with_line_height(1.25);
+        // This sibling deliberately covers the overflowing label's shaped advance.
+        // The former any-node check therefore accepted the escaped pixels.
+        let covering_sibling = Node::new(
+            SceneNodeId::new("covering-sibling").unwrap(),
+            Role::Group,
+            "cover",
+            Bounds::new(56.0, 8.0, 248.0, 48.0),
+            "--color-surface-raised",
+        );
+        let root = Node::new(
+            SceneNodeId::new("root").unwrap(),
+            Role::Group,
+            "fixture",
+            Bounds::new(0.0, 0.0, 320.0, 80.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![overflowing, covering_sibling]);
+        let scene = Scene::new(root, SceneNodeId::new("root").unwrap()).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 80.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let error = ensure_text_ink_is_clipped(&scene, metrics, 1.0).unwrap_err();
+        assert!(error.contains("overflowing-label"), "{error}");
+
+        let contained = Node::new(
+            SceneNodeId::new("contained-label").unwrap(),
+            Role::Text,
+            "Configuración de accesibilidad y controles",
+            Bounds::new(8.0, 8.0, 296.0, 64.0),
+            "--color-surface-raised",
+        )
+        .with_type_role(TypeRole::Label)
+        .with_line_height(1.25);
+        let contained_root = Node::new(
+            SceneNodeId::new("root").unwrap(),
+            Role::Group,
+            "fixture",
+            Bounds::new(0.0, 0.0, 320.0, 80.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![contained]);
+        let contained_scene =
+            Scene::new(contained_root, SceneNodeId::new("root").unwrap()).unwrap();
+        ensure_text_ink_is_clipped(&contained_scene, metrics, 1.0).unwrap();
+    }
 }

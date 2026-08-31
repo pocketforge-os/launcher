@@ -570,6 +570,11 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     validate_args(&args)?;
+    validate_baseline_capture(
+        &args,
+        env::var_os("PF_BASELINE_RECORD_ONLY").is_some(),
+        env::var_os("PF_RASTER_INK_GUARD").is_some(),
+    )?;
     let interactive_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
@@ -648,6 +653,14 @@ fn main() -> Result<(), String> {
     }
     core.load_preferences(preferences, first_run_complete)
         .map_err(|e| format!("preferences: {e:?}"))?;
+    if let Some(scale) = value(&args, "--text-scale") {
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text(format!("{scale}%")),
+            stored: PreferenceValue::Text(format!("{scale}%")),
+            applied: true,
+        });
+    }
     if args.iter().any(|a| a == "--high-contrast-evidence") {
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("highContrast".into()),
@@ -773,12 +786,18 @@ fn main() -> Result<(), String> {
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let (surface_width, surface_height) =
+        parse_surface(value(&args, "--surface").unwrap_or("1280x720"))?;
     let metrics = SurfaceMetrics {
-        logical_width: 1280.0,
-        logical_height: 720.0,
+        logical_width: f32::from(surface_width),
+        logical_height: f32::from(surface_height),
         scale: 1.0,
         safe_insets: Insets::default(),
-        orientation: Orientation::Landscape,
+        orientation: if surface_height > surface_width {
+            Orientation::Portrait
+        } else {
+            Orientation::Landscape
+        },
     };
     let mut host = OffscreenHost::new(metrics);
     apply_text_scale(&mut host, &core)?;
@@ -812,6 +831,17 @@ fn main() -> Result<(), String> {
         emit(&mut host, &mut core, &footer, out, "system")?;
         core.reset_first_run();
         emit(&mut host, &mut core, &footer, out, "first-run")?;
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--taffy-baseline") {
+        core.load_device_status(&FakeDeviceStatusPort { attention: false });
+        emit(&mut host, &mut core, &footer, out, "home")?;
+        core.action(&ShellAction::Custom("Room.next".into()));
+        emit(&mut host, &mut core, &footer, out, "library")?;
+        core.action(&ShellAction::Custom("Room.next".into()));
+        emit(&mut host, &mut core, &footer, out, "settings")?;
+        core.action(&ShellAction::Custom("Quick".into()));
+        emit(&mut host, &mut core, &footer, out, "overlay")?;
         return Ok(());
     }
     if args.iter().any(|a| a == "--high-contrast-evidence") {
@@ -2113,23 +2143,101 @@ fn emit(
     let scene = core
         .scene(host.metrics(), prompt)
         .ok_or("shell has no frame")?;
+    let started = Instant::now();
     present_scene(host, core, prompt, &scene)?;
+    let frame_time_us = started.elapsed().as_micros();
     let frame = host.frame().ok_or("frame missing")?.clone();
-    if env::var_os("PF_RASTER_INK_GUARD").is_some() {
-        assert_raster_text_legible(&scene, host.metrics(), core.theme_base(), core.text_scale())?;
-    }
+    let baseline_record_only = env::var_os("PF_BASELINE_RECORD_ONLY").is_some();
+    let raster_guard = if env::var_os("PF_RASTER_INK_GUARD").is_some() {
+        raster_guard_record(
+            &scene,
+            host.metrics(),
+            core.theme_base(),
+            core.text_scale(),
+            baseline_record_only,
+        )?
+    } else {
+        "NOT_RUN (set PF_RASTER_INK_GUARD=1)".to_owned()
+    };
     let path = out.join(format!("{name}.png"));
-    let file = fs::File::create(&path).map_err(|e| e.to_string())?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .map_err(|e| e.to_string())?
-        .write_image_data(&frame.rgba)
-        .map_err(|e| e.to_string())?;
-    println!("{}  {}", hex(&Sha256::digest(&frame.rgba)), path.display());
+    if !baseline_record_only {
+        let file = fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .map_err(|e| e.to_string())?
+            .write_image_data(&frame.rgba)
+            .map_err(|e| e.to_string())?;
+    }
+    let hash = hex(&Sha256::digest(&frame.rgba));
+    fs::write(
+        out.join(format!("{name}.semantic.txt")),
+        semantic_snapshot(&scene),
+    )
+    .map_err(|e| e.to_string())?;
+    let damage = frame.damage.map(|rect| {
+        serde_json::json!({"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height})
+    });
+    let record = serde_json::json!({
+        "fixture": name,
+        "frame_sha256": hash,
+        "frame_time_us": frame_time_us,
+        "surface": {"width": frame.width, "height": frame.height},
+        "text_scale_percent": core.text_scale(),
+        "raster_guard": raster_guard,
+        "damage": damage,
+        "render_notes": format!("{:?}", frame.notes),
+    });
+    fs::write(
+        out.join(format!("{name}.json")),
+        serde_json::to_string_pretty(&record).unwrap() + "\n",
+    )
+    .map_err(|e| e.to_string())?;
+    println!("{hash}  {}", path.display());
     Ok(())
+}
+
+fn raster_guard_record(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale_percent: u16,
+    baseline_record_only: bool,
+) -> Result<String, String> {
+    match assert_raster_text_legible(scene, metrics, base, text_scale_percent) {
+        Ok(()) => Ok("PASS".to_owned()),
+        Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
+        Err(error) => Err(error),
+    }
+}
+
+fn semantic_snapshot(scene: &pf_scene::Scene) -> String {
+    fn visit(node: &Node, depth: usize, output: &mut String) {
+        let bounds = node.bounds;
+        writeln!(
+            output,
+            "{}{} role={:?} label={:?} bounds={:.1},{:.1},{:.1},{:.1} state={:?} action={:?}",
+            "  ".repeat(depth),
+            node.id.as_str(),
+            node.role,
+            node.accessible_label,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            node.state,
+            node.action
+        )
+        .unwrap();
+        for child in &node.children {
+            visit(child, depth + 1, output);
+        }
+    }
+    let mut output = String::new();
+    visit(scene.root(), 0, &mut output);
+    output
 }
 
 fn fails_raster_text_floor(
@@ -2500,18 +2608,56 @@ fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str())
 }
 
+fn parse_surface(value: &str) -> Result<(u16, u16), String> {
+    let (width, height) = value.split_once('x').ok_or_else(|| {
+        format!("usage error: invalid --surface {value:?}; expected WIDTHxHEIGHT")
+    })?;
+    let width = width
+        .parse()
+        .map_err(|_| format!("usage error: invalid surface width {width:?}"))?;
+    let height = height
+        .parse()
+        .map_err(|_| format!("usage error: invalid surface height {height:?}"))?;
+    if width == 0 || height == 0 {
+        return Err("usage error: surface dimensions must be non-zero".into());
+    }
+    Ok((width, height))
+}
+
 fn use_device_fixtures(args: &[String], fixture_mode: bool) -> bool {
     fixture_mode || args.iter().any(|arg| arg == "--device-fixtures")
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    if let Some(index) = args.iter().position(|arg| arg == "--catalog-snapshot") {
-        if args
-            .get(index + 1)
-            .is_none_or(|value| value.starts_with("--"))
+    const VALUE_FLAGS: [&str; 11] = [
+        "--authority-state-dir",
+        "--catalog-root",
+        "--catalog-snapshot",
+        "--desktop-sim-supervise",
+        "--device",
+        "--input",
+        "--out",
+        "--session-socket",
+        "--state-dir",
+        "--surface",
+        "--text-scale",
+    ];
+    for (index, arg) in args.iter().enumerate() {
+        if VALUE_FLAGS.contains(&arg.as_str())
+            && args
+                .get(index + 1)
+                .is_none_or(|value| value.starts_with("--"))
         {
-            return Err("usage error: --catalog-snapshot requires a path".into());
+            return Err(format!("usage error: {arg} requires a value"));
         }
+    }
+    if let Some(surface) = value(args, "--surface") {
+        parse_surface(surface)?;
+    }
+    if let Some(scale) = value(args, "--text-scale")
+        && !matches!(scale, "100" | "150" | "200")
+    {
+        return Err("usage error: --text-scale must be 100, 150, or 200".into());
     }
     #[cfg(not(feature = "wayland"))]
     if args.iter().any(|arg| arg == "--wayland") {
@@ -2532,6 +2678,23 @@ fn validate_args(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn validate_baseline_capture(
+    args: &[String],
+    baseline_record_only: bool,
+    raster_guard_enabled: bool,
+) -> Result<(), String> {
+    if baseline_record_only
+        && args.iter().any(|arg| arg == "--taffy-baseline")
+        && !raster_guard_enabled
+    {
+        return Err(
+            "baseline completeness error: guarded --taffy-baseline capture requires PF_RASTER_INK_GUARD=1"
+                .into(),
+        );
+    }
+    Ok(())
+}
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut out, byte| {
         write!(out, "{byte:02x}").expect("writing to a String cannot fail");
@@ -2542,6 +2705,44 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn guarded_baseline_capture_refuses_to_record_without_raster_guard() {
+        let args = vec!["--taffy-baseline".to_owned()];
+        let error = validate_baseline_capture(&args, true, false).unwrap_err();
+        assert!(error.contains("PF_RASTER_INK_GUARD=1"));
+        validate_baseline_capture(&args, true, true).unwrap();
+    }
+
+    #[test]
+    fn committed_baseline_records_have_raster_guard_outcomes() {
+        let baseline = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/taffy-baseline");
+        let mut incomplete = Vec::new();
+        for surface in ["small", "standard", "portrait", "large"] {
+            for scale in ["100", "150", "200"] {
+                for fixture in ["home", "library", "settings", "overlay"] {
+                    let path = baseline
+                        .join(surface)
+                        .join(scale)
+                        .join(format!("{fixture}.json"));
+                    let record = fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                    let record: serde_json::Value = serde_json::from_str(&record)
+                        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+                    let guarded = record["raster_guard"]
+                        .as_str()
+                        .is_some_and(|outcome| outcome == "PASS" || outcome.starts_with("FAIL: "));
+                    if !guarded {
+                        incomplete.push(path);
+                    }
+                }
+            }
+        }
+        assert!(
+            incomplete.is_empty(),
+            "baseline records without raster-guard outcomes: {incomplete:#?}"
+        );
+    }
 
     fn contrast_probe(state: fn(&mut Node)) -> Node {
         let mut label = Node::new(
@@ -2654,6 +2855,35 @@ mod durable_tests {
                 && failure.contains("raster_contrast=1."),
             "the transparent-surface label must fail against its rendered backdrop: {failure}"
         );
+    }
+
+    #[test]
+    fn raster_guard_failure_is_captured_only_for_baseline_recording() {
+        let root_id = pf_scene::NodeId::new("illegible-evidence-label").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Text,
+            "Illegible evidence",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
+            "--color-surface-canvas",
+        )
+        .with_ink_token("--color-surface-canvas");
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let normal_error =
+            raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, false).unwrap_err();
+        assert!(normal_error.contains("illegible-evidence-label"));
+
+        let baseline_record =
+            raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, true).unwrap();
+        assert_eq!(baseline_record, format!("FAIL: {normal_error}"));
     }
 
     #[test]
@@ -4353,6 +4583,32 @@ exec="./launch"
             status.attention_message.as_deref(),
             Some("Controller battery low")
         );
+    }
+
+    #[test]
+    fn value_flags_reject_missing_or_flag_shaped_values() {
+        for args in [
+            vec!["--surface".into()],
+            vec!["--surface".into(), "--text-scale".into(), "150".into()],
+        ] {
+            let error = validate_args(&args).unwrap_err();
+
+            assert!(error.contains("--surface"));
+        }
+    }
+
+    #[test]
+    fn value_flags_accept_values() {
+        let args = vec![
+            "--surface".into(),
+            "1280x720".into(),
+            "--text-scale".into(),
+            "150".into(),
+            "--out".into(),
+            "evidence/offscreen".into(),
+        ];
+
+        assert!(validate_args(&args).is_ok());
     }
 
     fn write_power_supply(root: &Path, name: &str, capacity: &str, status: &str, scope: &str) {

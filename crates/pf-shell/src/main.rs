@@ -2743,6 +2743,7 @@ mod durable_tests {
             incomplete.is_empty(),
             "baseline records without raster-guard outcomes: {incomplete:#?}"
         );
+    }
 
     fn remap_test_contract() -> DeviceContract {
         let mut contract: serde_json::Value =

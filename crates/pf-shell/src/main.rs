@@ -27,7 +27,7 @@ use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
     commit_pinned_variant, control_bindings, footer_prompt, safe_return_options,
 };
-use pf_shell_core::{Effect, ShellCore};
+use pf_shell_core::{DeviceStatus, DeviceStatusPort, Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -393,7 +393,7 @@ fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
             manual_set_time: Support::Supported,
         },
         TimeState {
-            wall_clock: std::time::SystemTime::UNIX_EPOCH,
+            wall_clock: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(9 * 3600 + 41 * 60),
             timezone: "UTC".into(),
             ntp_state: NtpState::Inactive,
         },
@@ -413,6 +413,25 @@ fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
         },
     ]);
     (network, time, transfer)
+}
+
+struct FakeDeviceStatusPort {
+    attention: bool,
+}
+impl DeviceStatusPort for FakeDeviceStatusPort {
+    fn status(&self) -> Result<DeviceStatus, String> {
+        Ok(DeviceStatus {
+            battery_percent: 82,
+            attention_message: self.attention.then(|| "Controller battery low".into()),
+        })
+    }
+}
+
+struct UnavailableDeviceStatusPort;
+impl DeviceStatusPort for UnavailableDeviceStatusPort {
+    fn status(&self) -> Result<DeviceStatus, String> {
+        Err("Device status unavailable".into())
+    }
 }
 
 fn load_durable_map_or_shipped(
@@ -459,7 +478,7 @@ fn main() -> Result<(), String> {
         .iter()
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
-        print!("{HELP}");
+        println!("{HELP}  --device-fixtures  use deterministic device state in interactive modes");
         return Ok(());
     }
     validate_args(&args)?;
@@ -472,6 +491,7 @@ fn main() -> Result<(), String> {
             "--sim-frame" | "--settings-evidence" | "--desktop-sim-script"
         )
     }) || !interactive_mode;
+    let device_fixture_mode = use_device_fixtures(&args, fixture_mode);
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
@@ -542,7 +562,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("preferences: {e:?}"))?;
     let mut fake_power;
     let mut unavailable_power;
-    let power: &mut dyn PowerPort = if fixture_mode {
+    let power: &mut dyn PowerPort = if device_fixture_mode {
         fake_power = FakePowerPort::new(
             vec![
                 PowerCapability {
@@ -576,7 +596,7 @@ fn main() -> Result<(), String> {
         &mut dyn NetworkPort,
         &mut dyn TimePort,
         &mut dyn TransferPort,
-    ) = if fixture_mode {
+    ) = if device_fixture_mode {
         (fake_network, fake_time, fake_transfer) = fixture_device_ports();
         (&mut fake_network, &mut fake_time, &mut fake_transfer)
     } else {
@@ -591,6 +611,11 @@ fn main() -> Result<(), String> {
     };
     core.load_network(&mut *network);
     core.load_system(&*time, &*transfer);
+    core.load_device_status(if device_fixture_mode {
+        &FakeDeviceStatusPort { attention: true }
+    } else {
+        &UnavailableDeviceStatusPort
+    });
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -673,6 +698,7 @@ fn main() -> Result<(), String> {
         return run_desktop_sim_supervisor(Path::new(session_socket), Path::new(authority_state));
     }
     if args.iter().any(|a| a == "--settings-evidence") {
+        core.load_device_status(&FakeDeviceStatusPort { attention: false });
         core.action(&ShellAction::Custom("Room.next".into()));
         core.action(&ShellAction::Custom("Room.next".into()));
         emit(&mut host, &mut core, &footer, out, "settings")?;
@@ -687,9 +713,8 @@ fn main() -> Result<(), String> {
         emit(&mut host, &mut core, &footer, out, "first-run")?;
         return Ok(());
     }
-    core.set_chrome_status(82, Some("Controller battery low".into()));
     emit(&mut host, &mut core, &footer, out, "boot-home")?;
-    core.set_chrome_status(82, None);
+    core.load_device_status(&FakeDeviceStatusPort { attention: false });
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     emit(&mut host, &mut core, &footer, out, "focus-moved")?;
     let effect = core
@@ -2364,6 +2389,10 @@ fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str())
 }
 
+fn use_device_fixtures(args: &[String], fixture_mode: bool) -> bool {
+    fixture_mode || args.iter().any(|arg| arg == "--device-fixtures")
+}
+
 fn validate_args(args: &[String]) -> Result<(), String> {
     if let Some(index) = args.iter().position(|arg| arg == "--catalog-snapshot") {
         if args
@@ -3440,12 +3469,12 @@ mod durable_tests {
             (
                 Key::Other(0xff09),
                 0xff09,
-                ShellAction::Custom("Favorite".into()),
+                ShellAction::Custom("Quick".into()),
             ),
             (
                 Key::Char('F'),
                 u32::from('F'),
-                ShellAction::Custom("Favorite".into()),
+                ShellAction::Custom("Quick".into()),
             ),
             (
                 Key::Char('s'),
@@ -4189,6 +4218,30 @@ exec="./launch"
 
         assert!(error.contains("--fbdev"));
         assert!(error.contains("--settings-evidence"));
+    }
+
+    #[test]
+    fn interactive_device_fixtures_are_explicit_and_validate() {
+        assert!(!use_device_fixtures(&[], false));
+        let args = vec!["--device-fixtures".into()];
+        assert!(validate_args(&args).is_ok());
+        assert!(use_device_fixtures(&args, false));
+        assert!(use_device_fixtures(&[], true));
+        let (_, time, _) = fixture_device_ports();
+        let wall_clock = time.read().unwrap().wall_clock;
+        assert_eq!(
+            wall_clock
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            9 * 3600 + 41 * 60
+        );
+        let status = FakeDeviceStatusPort { attention: true }.status().unwrap();
+        assert_eq!(status.battery_percent, 82);
+        assert_eq!(
+            status.attention_message.as_deref(),
+            Some("Controller battery low")
+        );
     }
 
     #[test]

@@ -673,7 +673,7 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "SafeReturn" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
             ShellAction::Custom(name.into())
         }
-        "Quick" => ShellAction::Custom("Favorite".into()),
+        "Quick" => ShellAction::Custom("Quick".into()),
         _ => return None,
     })
 }
@@ -769,6 +769,14 @@ mod tests {
         assert_eq!(
             favorite_footer_prompt(&effective, true).as_deref(),
             Some("X  Unfavorite")
+        );
+    }
+
+    #[test]
+    fn physical_quick_binding_translates_to_quick_action() {
+        assert_eq!(
+            semantic_action("Quick"),
+            Some(ShellAction::Custom("Quick".into()))
         );
     }
 

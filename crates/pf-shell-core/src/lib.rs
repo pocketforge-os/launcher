@@ -34,6 +34,16 @@ use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceStatus {
+    pub battery_percent: u8,
+    pub attention_message: Option<String>,
+}
+
+pub trait DeviceStatusPort {
+    fn status(&self) -> Result<DeviceStatus, String>;
+}
+
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 const HOME_SHELF_LIMIT: usize = 6;
@@ -641,7 +651,7 @@ pub struct ShellCore {
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
-    battery_percent: u8,
+    battery_percent: Option<u8>,
     attention_message: Option<String>,
     playtime: HashMap<String, Playtime>,
     recent_use: HashMap<String, SystemTime>,
@@ -790,15 +800,20 @@ impl ShellCore {
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
-            battery_percent: 82,
+            battery_percent: None,
             attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
         }
     }
 
-    pub fn set_chrome_status(&mut self, battery_percent: u8, attention: Option<String>) {
-        let battery_percent = battery_percent.min(100);
+    pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {
+        let (battery_percent, attention) = port.status().map_or((None, None), |status| {
+            (
+                Some(status.battery_percent.min(100)),
+                status.attention_message,
+            )
+        });
         if self.battery_percent != battery_percent || self.attention_message != attention {
             self.battery_percent = battery_percent;
             self.attention_message = attention;
@@ -1738,7 +1753,16 @@ impl ShellCore {
             ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
             ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
             ShellAction::Custom(name) if name == "Quick" => {
-                self.go(Route::Quick);
+                if self.route == Route::Details {
+                    if let Some(item) = self.focused_item_index() {
+                        return Some(Effect::ToggleFavorite {
+                            item_id: self.items[item].id.clone(),
+                            favorite: !self.items[item].favorite,
+                        });
+                    }
+                } else {
+                    self.go(Route::Quick);
+                }
             }
             ShellAction::Back if self.route == Route::Quick => {
                 let route = self.previous_route;
@@ -2520,28 +2544,7 @@ impl ShellCore {
         }
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         self.library_surface_width.set(w);
-        let mut children = vec![
-            node(
-                "status-bar",
-                Role::Group,
-                "",
-                0.0,
-                0.0,
-                w,
-                STATUS_BAR_HEIGHT,
-                "--color-surface-raised",
-            ),
-            node(
-                "status-left-spacer",
-                Role::Group,
-                "",
-                0.0,
-                0.0,
-                200.0,
-                STATUS_BAR_HEIGHT,
-                "--color-surface-raised",
-            ),
-        ];
+        let mut children = Vec::new();
         let battery_x = w - 168.0;
         if self
             .network_state
@@ -2562,65 +2565,81 @@ impl ShellCore {
                 .with_image(wifi_glyph_source(), ImageFit::Contain),
             );
         }
-        children.extend([
-            node(
-                "battery-outline",
-                Role::Group,
-                "Battery",
-                battery_x,
-                24.0,
-                24.0,
-                14.0,
-                "--color-border-strong",
-            ),
-            node(
-                "battery-cavity",
-                Role::Group,
-                "",
-                battery_x + 2.0,
-                26.0,
-                18.0,
-                10.0,
-                "--color-surface-raised",
-            ),
-            node(
-                "battery-level",
-                Role::Group,
-                "",
-                battery_x + 3.0,
-                27.0,
-                16.0 * f32::from(self.battery_percent) / 100.0,
-                8.0,
-                "--color-text-secondary",
-            ),
-            node(
-                "battery-terminal",
-                Role::Group,
-                "",
-                battery_x + 24.0,
-                28.0,
-                2.0,
-                6.0,
-                "--color-border-strong",
-            ),
-        ]);
-        children.push(
-            node(
-                "status-cluster",
-                Role::Text,
-                &if self.authority_unavailable() {
-                    format!("{}     !     9:41", self.battery_percent)
-                } else {
-                    format!("{}     9:41", self.battery_percent)
-                },
-                battery_x + 32.0,
-                16.0,
-                152.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Caption),
-        );
+        if let Some(battery_percent) = self.battery_percent {
+            children.extend([
+                node(
+                    "battery-outline",
+                    Role::Group,
+                    "Battery",
+                    battery_x,
+                    24.0,
+                    24.0,
+                    14.0,
+                    "--color-border-strong",
+                ),
+                node(
+                    "battery-cavity",
+                    Role::Group,
+                    "",
+                    battery_x + 2.0,
+                    26.0,
+                    18.0,
+                    10.0,
+                    "--color-surface-raised",
+                ),
+                node(
+                    "battery-level",
+                    Role::Group,
+                    "",
+                    battery_x + 3.0,
+                    27.0,
+                    16.0 * f32::from(battery_percent) / 100.0,
+                    8.0,
+                    "--color-text-secondary",
+                ),
+                node(
+                    "battery-terminal",
+                    Role::Group,
+                    "",
+                    battery_x + 24.0,
+                    28.0,
+                    2.0,
+                    6.0,
+                    "--color-border-strong",
+                ),
+            ]);
+        }
+        let mut status_parts = Vec::new();
+        if let Some(percent) = self.battery_percent {
+            status_parts.push(percent.to_string());
+        }
+        if self.authority_unavailable() {
+            status_parts.push("!".into());
+        }
+        if let Ok(state) = &self.time_state {
+            let seconds = state
+                .wall_clock
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                % 86_400;
+            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
+        }
+        if !status_parts.is_empty() {
+            children.push(
+                node(
+                    "status-cluster",
+                    Role::Text,
+                    &status_parts.join("     "),
+                    battery_x + 32.0,
+                    16.0,
+                    152.0,
+                    32.0,
+                    "--color-surface-raised",
+                )
+                .with_type_role(TypeRole::Caption),
+            );
+        }
         let room_left = w / 2.0 - 220.0;
         children.push(
             node(
@@ -2982,9 +3001,9 @@ impl ShellCore {
                     Role::Group,
                     "Ridgeline aura: rgba(201,111,87,0.5) to transparent 68%; rgba(58,43,78,0.65) to transparent 70%; layer opacity 0.55",
                     0.0,
-                    STATUS_BAR_HEIGHT,
+                    0.0,
                     w,
-                    280.0,
+                    344.0,
                     "--color-transparent",
                 )
                 .with_image(hero_wash_source(), ImageFit::Cover),
@@ -5901,13 +5920,13 @@ fn hero_wash_source() -> ImageSource {
     static WASH: OnceLock<Arc<[u8]>> = OnceLock::new();
     let bytes = WASH.get_or_init(|| {
         const WIDTH: usize = 1280;
-        const HEIGHT: usize = 280;
+        const HEIGHT: usize = 344;
         let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
                 // Exact Ridgeline aura declarations from assets/auras.css. CSS paints the
                 // first radial gradient over the second, then .deco applies opacity 0.55.
-                let global_y = y as f32 + STATUS_BAR_HEIGHT;
+                let global_y = y as f32;
                 let sample = |center_x: f32,
                               center_y: f32,
                               radius_x: f32,
@@ -5946,10 +5965,11 @@ fn hero_wash_source() -> ImageSource {
                     [0.0; 3]
                 };
                 let offset = (y * WIDTH + x) * 4;
+                let dither = [[-0.75, 0.25], [0.75, -0.25]][y % 2][x % 2];
                 rgba[offset..offset + 4].copy_from_slice(&[
-                    rgb[0].round() as u8,
-                    rgb[1].round() as u8,
-                    rgb[2].round() as u8,
+                    (rgb[0] + dither).round().clamp(0.0, 255.0) as u8,
+                    (rgb[1] + dither).round().clamp(0.0, 255.0) as u8,
+                    (rgb[2] + dither).round().clamp(0.0, 255.0) as u8,
                     (alpha * 0.55 * 255.0).round() as u8,
                 ]);
             }
@@ -7295,6 +7315,15 @@ mod tests {
     }
 
     fn fixture_core(items: Vec<pf_catalog::CatalogItem>) -> ShellCore {
+        struct FixtureStatus;
+        impl DeviceStatusPort for FixtureStatus {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 82,
+                    attention_message: None,
+                })
+            }
+        }
         let snapshot = CatalogSnapshot {
             revision: 10,
             observed_at_unix_seconds: 0,
@@ -7304,7 +7333,89 @@ mod tests {
         };
         let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
+        core.load_device_status(&FixtureStatus);
         core
+    }
+
+    #[test]
+    fn quick_is_contextual_between_home_and_details() {
+        let mut home = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        assert_eq!(home.action(&ShellAction::Custom("Quick".into())), None);
+        assert_eq!(home.route(), Route::Quick);
+
+        let mut details = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        details.selected_item = Some(0);
+        details.go(Route::Details);
+        assert_eq!(
+            details.action(&ShellAction::Custom("Quick".into())),
+            Some(Effect::ToggleFavorite {
+                item_id: "ready".into(),
+                favorite: true,
+            })
+        );
+        assert_eq!(details.route(), Route::Details);
+    }
+
+    #[test]
+    fn unavailable_device_status_and_time_are_absent_from_chrome() {
+        struct Unavailable;
+        impl DeviceStatusPort for Unavailable {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Err("unavailable".into())
+            }
+        }
+        let mut core = fixture_core(vec![]);
+        core.load_device_status(&Unavailable);
+        let scene = settings_scene(&core);
+        for id in [
+            "battery-outline",
+            "battery-cavity",
+            "battery-level",
+            "battery-terminal",
+            "status-cluster",
+            "attention-pill",
+        ] {
+            assert!(node_by_id(scene.root(), id).is_none(), "unexpected {id}");
+        }
+        assert!(node_by_id(scene.root(), "status-bar").is_none());
+    }
+
+    #[test]
+    fn hero_wash_starts_at_top_and_has_local_dither_variance() {
+        let core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        let scene = settings_scene(&core);
+        let wash = node_by_id(scene.root(), "hero-wash").unwrap();
+        assert!(wash.bounds.y.abs() < f32::EPSILON);
+        let pf_scene::NodeContent::Image { source, .. } = &wash.content else {
+            panic!("wash must be an image");
+        };
+        let decoder = png::Decoder::new(Cursor::new(source.bytes.as_ref()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        let stride = info.width as usize * 4;
+        let mut values = std::collections::HashSet::new();
+        for y in 120..136 {
+            for x in 600..616 {
+                values.insert(pixels[y * stride + x * 4]);
+            }
+        }
+        assert!(
+            values.len() > 1,
+            "mid-gradient tile must not be a flat band"
+        );
     }
 
     #[test]
@@ -9816,6 +9927,15 @@ mod tests {
 
     #[test]
     fn chrome_status_uses_observed_battery_and_optional_attention() {
+        struct Status(u8, Option<&'static str>);
+        impl DeviceStatusPort for Status {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: self.0,
+                    attention_message: self.1.map(str::to_owned),
+                })
+            }
+        }
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -9828,7 +9948,7 @@ mod tests {
             "Ready Game",
             vec![variant("native", "ready-app", Availability::Ready)],
         )]);
-        core.set_chrome_status(25, None);
+        core.load_device_status(&Status(25, None));
         let scene = core.scene(metrics, "").unwrap();
         assert!(
             (node_by_id(scene.root(), "battery-level")
@@ -9852,7 +9972,7 @@ mod tests {
         let scene = core.scene(metrics, "").unwrap();
         assert!(node_by_id(scene.root(), "wifi-glyph").is_some());
 
-        core.set_chrome_status(100, Some("Controller battery low".into()));
+        core.load_device_status(&Status(100, Some("Controller battery low")));
         let scene = core.scene(metrics, "").unwrap();
         assert!(
             (node_by_id(scene.root(), "battery-level")

@@ -6135,6 +6135,29 @@ fn add_explicit_action_name(action_node: &mut Node) {
 }
 
 fn layer_library_fade(children: &mut Vec<Node>) {
+    fn retain_label_ink(node: &mut Node) -> bool {
+        if matches!(node.role, Role::Text | Role::Heading) {
+            return true;
+        }
+        node.children.retain_mut(retain_label_ink);
+        !node.children.is_empty()
+    }
+
+    fn remove_label_ink(node: &mut Node) -> bool {
+        if matches!(node.role, Role::Text | Role::Heading) {
+            return false;
+        }
+        node.children.retain_mut(remove_label_ink);
+        true
+    }
+
+    fn clear_focus_state(node: &mut Node) {
+        node.state.focused = false;
+        for child in &mut node.children {
+            clear_focus_state(child);
+        }
+    }
+
     let Some(fade_index) = children
         .iter()
         .position(|node| node.id.as_str() == "library-grid-footer-fade")
@@ -6150,15 +6173,13 @@ fn layer_library_fade(children: &mut Vec<Node>) {
         let mut label_layer = node.clone();
         label_layer.id = NodeId::new(format!("library-label-layer-{}", node.id.as_str())).unwrap();
         label_layer.style_token = SCENE_TRANSPARENT_TOKEN.into();
-        label_layer
-            .children
-            .retain(|child| matches!(child.role, Role::Text | Role::Heading));
+        label_layer.children.retain_mut(retain_label_ink);
         label_layer.action = node.action.take();
         label_layer.state = node.state;
 
         node.accessible_label.clear();
-        node.children
-            .retain(|child| !matches!(child.role, Role::Text | Role::Heading));
+        node.children.retain_mut(remove_label_ink);
+        clear_focus_state(node);
         labels.push(label_layer);
     }
     children.push(fade);
@@ -8059,21 +8080,31 @@ mod tests {
                 "",
             )
             .unwrap();
-        let card = node_by_id(scene.root(), "library-item-item-6").unwrap();
+        let art_layer = node_by_id(scene.root(), "library-item-item-6").unwrap();
+        let label_layer =
+            node_by_id(scene.root(), "library-label-layer-library-item-item-6").unwrap();
 
+        assert!(
+            node_by_id(art_layer, "library-card-art-item-6").is_some(),
+            "missing library-card-art-item-6"
+        );
         for required in [
-            "library-card-art-item-6",
             "library-card-initial-plate-item-6",
             "library-card-plate-kind-item-6",
         ] {
-            assert!(node_by_id(card, required).is_some(), "missing {required}");
+            assert!(
+                node_by_id(label_layer, required).is_some(),
+                "missing {required}"
+            );
         }
-        assert!(card.children.iter().all(|child| {
-            child.bounds.x >= card.bounds.x
-                && child.bounds.y >= card.bounds.y
-                && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
-                && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
-        }));
+        for card in [art_layer, label_layer] {
+            assert!(card.children.iter().all(|child| {
+                child.bounds.x >= card.bounds.x
+                    && child.bounds.y >= card.bounds.y
+                    && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
+                    && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
+            }));
+        }
     }
 
     #[test]
@@ -8239,24 +8270,25 @@ mod tests {
                 "",
             )
             .unwrap();
-        let card = node_by_id(scene.root(), "library-item-setup").unwrap();
-        assert_eq!(card.style_token, COLOR_SURFACE_CANVAS_TOKEN);
-        assert!((card.bounds.height - 256.0).abs() < f32::EPSILON);
+        let art_layer = node_by_id(scene.root(), "library-item-setup").unwrap();
+        let label_layer =
+            node_by_id(scene.root(), "library-label-layer-library-item-setup").unwrap();
+        assert_eq!(art_layer.style_token, COLOR_SURFACE_CANVAS_TOKEN);
+        assert!((art_layer.bounds.height - 256.0).abs() < f32::EPSILON);
+        assert!(node_by_id(art_layer, "library-card-art-setup").is_some());
         for required in [
-            "library-card-art-setup",
             "library-title-setup",
             "library-card-reason-setup",
-        ] {
-            assert!(node_by_id(card, required).is_some(), "missing {required}");
-        }
-        for required in [
             "library-card-initial-plate-setup",
             "library-card-plate-kind-setup",
         ] {
-            assert!(node_by_id(card, required).is_some(), "missing {required}");
+            assert!(
+                node_by_id(label_layer, required).is_some(),
+                "missing {required}"
+            );
         }
         assert_eq!(
-            node_by_id(card, "library-card-reason-setup")
+            node_by_id(label_layer, "library-card-reason-setup")
                 .unwrap()
                 .accessible_label,
             "⊘ Finish setup — choose a profile"
@@ -9834,11 +9866,20 @@ mod tests {
             .root()
             .children
             .iter()
-            .find(|node| node.state.focused && node.id.as_str().starts_with("library-item-"))
+            .find(|node| {
+                node.state.focused
+                    && node
+                        .id
+                        .as_str()
+                        .starts_with("library-label-layer-library-item-")
+            })
             .unwrap();
         assert!(focused.bounds.y >= 0.0);
         assert!(focused.bounds.y + focused.bounds.height <= metrics.logical_height);
-        assert_eq!(focused.id.as_str(), "library-item-title-480");
+        assert_eq!(
+            focused.id.as_str(),
+            "library-label-layer-library-item-title-480"
+        );
     }
 
     #[test]
@@ -9872,7 +9913,11 @@ mod tests {
             .root()
             .children
             .iter()
-            .filter(|node| node.id.as_str().starts_with("library-item-"))
+            .filter(|node| {
+                node.id
+                    .as_str()
+                    .starts_with("library-label-layer-library-item-")
+            })
             .collect::<Vec<_>>();
         let toolbar_bottom = scene
             .root()
@@ -9892,9 +9937,9 @@ mod tests {
             "only one row fits at 640x720"
         );
         assert!(
-            cards
-                .iter()
-                .any(|card| card.id.as_str() == "library-item-item-7" && card.state.focused),
+            cards.iter().any(|card| {
+                card.id.as_str() == "library-label-layer-library-item-item-7" && card.state.focused
+            }),
             "the focused card must remain in the emitted row"
         );
     }

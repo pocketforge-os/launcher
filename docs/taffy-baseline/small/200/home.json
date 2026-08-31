@@ -1,0 +1,18 @@
+{
+  "damage": {
+    "height": 540,
+    "width": 960,
+    "x": 0,
+    "y": 0
+  },
+  "fixture": "home",
+  "frame_sha256": "cbb151f51e584dca21e8bf564f1add95f1c7630e6384bf3ecbc261d566e6aaea",
+  "frame_time_us": 669101,
+  "raster_guard": "FAIL: raster ink guard failed:\nhome-card-title-ridgeline (\"Ridgeline\", Bounds { x: 48.0, y: 610.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\nhome-card-title-hollow-tides (\"Hollow Tides\", Bounds { x: 283.33334, y: 610.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\nhome-card-title-sunwake (\"Sunwake\", Bounds { x: 518.6667, y: 610.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\nhome-card-title-moth-and-lantern (\"Moth & Lantern\", Bounds { x: 754.0, y: 610.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5",
+  "render_notes": "[]",
+  "surface": {
+    "height": 540,
+    "width": 960
+  },
+  "text_scale_percent": 200
+}

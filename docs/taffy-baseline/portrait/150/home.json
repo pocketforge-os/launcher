@@ -1,0 +1,18 @@
+{
+  "damage": {
+    "height": 1280,
+    "width": 720,
+    "x": 0,
+    "y": 0
+  },
+  "fixture": "home",
+  "frame_sha256": "bccd63f2e1a09a8bc5fb67105c32c9ea841cff7dc0499322ac364af99ab61830",
+  "frame_time_us": 924371,
+  "raster_guard": "PASS",
+  "render_notes": "[]",
+  "surface": {
+    "height": 1280,
+    "width": 720
+  },
+  "text_scale_percent": 150
+}

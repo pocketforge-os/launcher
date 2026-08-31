@@ -1,0 +1,18 @@
+{
+  "damage": {
+    "height": 524,
+    "width": 960,
+    "x": 0,
+    "y": 16
+  },
+  "fixture": "overlay",
+  "frame_sha256": "e11a3e6fc2fca3d5f4cc79d0d997acad5ede7dffdb3e5ca197d695fbbbdf2986",
+  "frame_time_us": 27565,
+  "raster_guard": "FAIL: raster ink guard failed:\naction-name-quick-capture-screenshot (\"Capture screenshot\", Bounds { x: 560.0, y: 462.0, width: 352.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=693, raster_contrast=0.00, required=4.5",
+  "render_notes": "[]",
+  "surface": {
+    "height": 540,
+    "width": 960
+  },
+  "text_scale_percent": 100
+}

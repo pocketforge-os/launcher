@@ -1,0 +1,18 @@
+{
+  "damage": {
+    "height": 1064,
+    "width": 1920,
+    "x": 0,
+    "y": 16
+  },
+  "fixture": "overlay",
+  "frame_sha256": "88d6ccfc80fc3a928ee6e2fb3b7fbe23cb3cc50274adfe2b7a54135167388c5f",
+  "frame_time_us": 36795,
+  "raster_guard": "NOT_RUN (set PF_RASTER_INK_GUARD=1)",
+  "render_notes": "[]",
+  "surface": {
+    "height": 1080,
+    "width": 1920
+  },
+  "text_scale_percent": 150
+}

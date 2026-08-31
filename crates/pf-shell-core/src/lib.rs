@@ -142,7 +142,7 @@ impl LibraryGeometry {
 }
 
 fn library_geometry(surface_width: f32) -> LibraryGeometry {
-    let (columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
+    let (preferred_columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
         (6, 4, 184.0)
     } else if surface_width >= 760.0 {
         (4, 4, 252.0)
@@ -151,9 +151,18 @@ fn library_geometry(surface_width: f32) -> LibraryGeometry {
     };
     let card_left = LIBRARY_SIDE_MARGIN;
     let card_width = CARD_ART_WIDTH;
+    let mut columns = preferred_columns;
+    while columns > 1
+        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * 16.0
+            > surface_width
+    {
+        columns -= 1;
+    }
     // The desktop mockup fixes the cover width and distributes the remaining content
     // width between columns. Narrower breakpoints retain their existing fluid spacing.
-    let card_gap = if columns == 6 {
+    let card_gap = if columns == 1 {
+        0.0
+    } else if columns == 6 {
         (surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32
     } else {
         ((surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32)
@@ -7015,6 +7024,56 @@ mod tests {
     }
 
     #[test]
+    fn narrow_library_keeps_every_painted_card_inside_the_surface() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 480.0,
+                    logical_height: 800.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Portrait,
+                },
+                "",
+            )
+            .unwrap();
+
+        for card in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-item-"))
+        {
+            assert!(
+                card.bounds.x >= 0.0,
+                "{} starts off-screen",
+                card.id.as_str()
+            );
+            assert!(
+                card.bounds.x + card.bounds.width <= 480.0,
+                "{} ends off-screen at {}",
+                card.id.as_str(),
+                card.bounds.x + card.bounds.width
+            );
+        }
+    }
+
+    #[test]
     fn ready_now_skips_unavailable_catalog_entries_but_library_keeps_their_cues() {
         let unavailable = item(
             "offline",
@@ -7148,7 +7207,7 @@ mod tests {
         let mut core = fixture_core(items);
         core.go(Route::Library);
 
-        for (width, columns) in [(640.0, 3), (800.0, 4), (1280.0, 6)] {
+        for (width, columns) in [(480.0, 2), (640.0, 3), (800.0, 4), (1280.0, 6)] {
             core.scene(
                 SurfaceMetrics {
                     logical_width: width,
@@ -7165,15 +7224,15 @@ mod tests {
             core.action(&ShellAction::Move(AxisMove::Right));
             assert_eq!(core.focus, 5 + columns - 1, "right edge at {width}px");
 
-            core.focus = 6;
+            core.focus = 5;
             core.action(&ShellAction::Move(AxisMove::Right));
             core.action(&ShellAction::Move(AxisMove::Left));
-            assert_eq!(core.focus, 6, "left/right inverse at {width}px");
+            assert_eq!(core.focus, 5, "left/right inverse at {width}px");
 
             core.action(&ShellAction::Move(AxisMove::Down));
-            assert_eq!(core.focus, 6 + columns, "down at {width}px");
+            assert_eq!(core.focus, 5 + columns, "down at {width}px");
             core.action(&ShellAction::Move(AxisMove::Up));
-            assert_eq!(core.focus, 6, "up/down inverse at {width}px");
+            assert_eq!(core.focus, 5, "up/down inverse at {width}px");
         }
     }
 

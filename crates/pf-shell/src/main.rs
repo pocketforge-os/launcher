@@ -2083,6 +2083,8 @@ fn assert_raster_text_legible(
             let mut samples = vec![None; sample_width * sample_height];
             let text_token = if node.state.disabled {
                 "--state-disabled-text"
+            } else if let Some(ink_token) = node.ink_token.as_deref() {
+                ink_token
             } else if node.state.unavailable {
                 "--state-unavailable-text"
             } else if node.state.focused {
@@ -2102,7 +2104,7 @@ fn assert_raster_text_legible(
                         let ink = [ink[0], ink[1], ink[2]];
                         let background = [background[0], background[1], background[2]];
                         samples[sample] = Some((
-                            contrast(ink, background),
+                            contrast(foreground, background),
                             coverage(ink, background, foreground),
                         ));
                     }
@@ -2447,6 +2449,44 @@ mod durable_tests {
     fn raster_ink_guard_does_not_exempt_unavailable_text() {
         let label = contrast_probe(|node| node.state.unavailable = true);
         assert!(fails_raster_text_floor(&label, 1, 4.0, 4.5));
+    }
+
+    #[test]
+    fn raster_ink_guard_rejects_transparent_surface_text_over_same_tone_backdrop() {
+        let root_id = pf_scene::NodeId::new("same-tone-backdrop").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("transparent-surface-same-tone-label").unwrap(),
+                Role::Text,
+                "Same tone",
+                pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
+                "--color-transparent",
+            )
+            .with_ink_token("--color-surface-raised"),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("transparent-surface-same-tone-label")
+                && failure.contains("raster_contrast=1."),
+            "the transparent-surface label must fail against its rendered backdrop: {failure}"
+        );
     }
 
     #[test]

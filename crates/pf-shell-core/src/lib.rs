@@ -83,12 +83,13 @@ fn caption_text_width(text: &str) -> f32 {
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
-    label_text_width(label)
+    CHIP_HORIZONTAL_PADDING
+        + label_text_width(label)
         + 20.0
-        + CHIP_HORIZONTAL_PADDING
         + count.map_or(0.0, |value| {
             CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
         })
+        + CHIP_HORIZONTAL_PADDING
 }
 
 fn ready_variant_label(variant: &Variant) -> String {
@@ -8036,6 +8037,69 @@ mod tests {
         assert!(
             (count_right - padded_chip_right).abs() < f32::EPSILON,
             "library count must end at the generated chip trailing padding: {count_right} != {padded_chip_right}"
+        );
+    }
+
+    #[test]
+    fn countless_library_filter_respects_chip_trailing_padding() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-0").unwrap();
+        let label_node = node_by_id(chip, "library-filter-0-label").unwrap();
+
+        let label_right = label_node.bounds.x + label_node.bounds.width;
+        let padded_chip_right = chip.bounds.x + chip.bounds.width - CHIP_HORIZONTAL_PADDING;
+        assert!(
+            (label_right - padded_chip_right).abs() < f32::EPSILON,
+            "countless library label must end at the generated chip trailing padding: {label_right} != {padded_chip_right}"
+        );
+    }
+
+    #[test]
+    fn counted_library_filter_preserves_label_count_gap() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-2").unwrap();
+        let label_node = node_by_id(chip, "library-filter-2-label").unwrap();
+        let count_node = node_by_id(chip, "library-filter-2-count").unwrap();
+
+        let label_right = label_node.bounds.x + label_node.bounds.width;
+        let gap = count_node.bounds.x - label_right;
+        assert!(
+            gap >= CHIP_COUNT_GAP,
+            "counted library label/count gap must be at least {CHIP_COUNT_GAP}px, got {gap}px"
         );
     }
 

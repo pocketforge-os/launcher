@@ -11,6 +11,7 @@ pf-ports.workspace = true
 pf-session-authority.workspace = true
 pf-scene.workspace = true
 pf-theme.workspace = true
+png = "0.17.16"
 sha2 = "0.10.9"
 
 [lints]

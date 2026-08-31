@@ -25,8 +25,7 @@ use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
-    commit_pinned_variant, control_bindings, favorite_footer_prompt, footer_prompt,
-    safe_return_options,
+    commit_pinned_variant, control_bindings, footer_prompt, safe_return_options,
 };
 use pf_shell_core::{Effect, ShellCore};
 use sha2::{Digest, Sha256};
@@ -119,7 +118,7 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         "Activate" => ShellAction::Activate,
         "Start" => ShellAction::Custom("Start".into()),
         "Back" => ShellAction::Back,
-        "Quick" => ShellAction::Custom("Favorite".into()),
+        "Quick" => ShellAction::Custom("Quick".into()),
         "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
         _ => unreachable!("keyboard action table is exhaustive"),
     })
@@ -509,13 +508,7 @@ fn main() -> Result<(), String> {
     } else {
         load_durable_map_or_shipped(contract.clone(), &remap_path)?
     };
-    let mut footer = footer_prompt(&glyphs);
-    if let Some(hint) = favorite_footer_prompt(&glyphs, false) {
-        if let Some(glyph) = hint.strip_suffix("  Favorite") {
-            footer.push('\u{1f}');
-            footer.push_str(glyph);
-        }
-    }
+    let footer = footer_prompt(&glyphs);
     let mut core = selected_core(
         &snapshot,
         snapshot_path.as_deref(),

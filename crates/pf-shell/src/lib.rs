@@ -308,7 +308,7 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
             } else {
                 binding.printed_label
             };
-            format!("{glyph}  Safe Return · button below the d-pad")
+            format!("{glyph}  Safe Return")
         }
         _ => "Select+Start  Safe Return".into(),
     };
@@ -319,7 +319,7 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
     }
 }
 
-/// Adds the favorite affordance only when the effective map actually resolves it.
+/// Adds the contextual favorite affordance only when the effective map resolves Quick.
 pub fn favorite_footer_prompt(resolver: &dyn GlyphResolver, favorite: bool) -> Option<String> {
     match resolver.resolve(&ShellAction::Custom("Quick".into())) {
         Ok(GlyphResult::Resolved(binding)) => {
@@ -759,10 +759,7 @@ mod tests {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let effective = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let footer = footer_prompt(&effective);
-        assert_eq!(
-            footer,
-            "A  Open     PF  Safe Return · button below the d-pad"
-        );
+        assert_eq!(footer, "A  Open     PF  Safe Return");
         assert!(!footer.contains("Search"));
         assert!(!footer.contains("Quick"));
         assert_eq!(

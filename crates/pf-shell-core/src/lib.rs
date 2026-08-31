@@ -30,6 +30,7 @@ use pf_theme::{Base, Theme};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -2541,7 +2542,26 @@ impl ShellCore {
                 "--color-surface-raised",
             ),
         ];
-        let battery_x = w - 200.0;
+        let battery_x = w - 168.0;
+        if self
+            .network_state
+            .as_ref()
+            .is_ok_and(|state| state.connected_ssid.is_some())
+        {
+            children.push(
+                node(
+                    "wifi-glyph",
+                    Role::Group,
+                    "Wi-Fi connected",
+                    w - 200.0,
+                    22.0,
+                    20.0,
+                    20.0,
+                    "--color-transparent",
+                )
+                .with_image(wifi_glyph_source(), ImageFit::Contain),
+            );
+        }
         children.extend([
             node(
                 "battery-outline",
@@ -2712,21 +2732,7 @@ impl ShellCore {
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
         }
-        let supplied_footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
-            self.focused_item_index().map_or_else(
-                || base.to_owned(),
-                |item| {
-                    let label = if self.items[item].favorite {
-                        "Unfavorite"
-                    } else {
-                        "Favorite"
-                    };
-                    format!("{base}     {glyph}  {label}")
-                },
-            )
-        } else {
-            footer.to_owned()
-        };
+        let supplied_footer = footer.to_owned();
         let footer = match self.route {
             Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
                 let mut prompts = self
@@ -2752,7 +2758,7 @@ impl ShellCore {
                 if !global_prompts.is_empty() {
                     prompts.push(global_prompts.to_owned());
                 }
-                prompts.join("     ")
+                prompts.join(" · ")
             }),
             Route::Library => (self.focus >= 5)
                 .then(|| self.binding_prompt("Activate", "Details"))
@@ -2823,19 +2829,33 @@ impl ShellCore {
             PROMPTS_AREA_HEIGHT,
             "--color-surface-raised",
         ));
-        children.push(
-            node(
-                "prompts",
-                Role::Text,
-                &footer,
-                w - 600.0,
-                h - PROMPTS_AREA_HEIGHT,
-                552.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Label),
-        );
+        let mut prompt_node = node(
+            "prompts",
+            if self.route == Route::Home {
+                Role::Group
+            } else {
+                Role::Text
+            },
+            &footer,
+            if self.route == Route::Home {
+                w - 660.0
+            } else {
+                w - 600.0
+            },
+            h - PROMPTS_AREA_HEIGHT,
+            if self.route == Route::Home {
+                612.0
+            } else {
+                552.0
+            },
+            32.0,
+            "--color-surface-raised",
+        )
+        .with_type_role(TypeRole::Label);
+        if self.route == Route::Home {
+            prompt_node.children = home_prompt_nodes(&footer, w, h);
+        }
+        children.push(prompt_node);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
@@ -2960,13 +2980,14 @@ impl ShellCore {
                 node(
                     "hero-wash",
                     Role::Group,
-                    "",
+                    "Ridgeline aura: rgba(201,111,87,0.5) to transparent 68%; rgba(58,43,78,0.65) to transparent 70%; layer opacity 0.55",
                     0.0,
                     STATUS_BAR_HEIGHT,
                     w,
                     280.0,
-                    "--color-surface-raised",
-                ),
+                    "--color-transparent",
+                )
+                .with_image(hero_wash_source(), ImageFit::Cover),
                 heading,
                 node(
                     "hero-title",
@@ -3006,13 +3027,23 @@ impl ShellCore {
             });
             if let Some(message) = attention {
                 content.push(node(
-                    "attention-pill",
+                    "attention-pill-border",
                     Role::Group,
                     "",
                     w - 328.0,
                     76.0,
                     280.0,
                     36.0,
+                    "--color-border-hairline",
+                ));
+                content.push(node(
+                    "attention-pill",
+                    Role::Group,
+                    "",
+                    w - 327.0,
+                    77.0,
+                    278.0,
+                    34.0,
                     "--color-surface-raised",
                 ));
                 content.push(node(
@@ -5746,6 +5777,195 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
     )
 }
 
+fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    let y = surface_height - PROMPTS_AREA_HEIGHT + 4.0;
+    let mut x = surface_width - 656.0;
+    let mut nodes = Vec::new();
+    for (index, prompt) in footer.split(" · ").enumerate() {
+        let Some((binding, verb)) = prompt.split_once(' ') else {
+            continue;
+        };
+        if index > 0 {
+            nodes.push(
+                node(
+                    &format!("home-prompt-separator-{index}"),
+                    Role::Text,
+                    "·",
+                    x,
+                    y,
+                    16.0,
+                    24.0,
+                    "--color-surface-raised",
+                )
+                .with_type_role(TypeRole::Label),
+            );
+            x += 20.0;
+        }
+        let binding_width = if binding == "SELECT" { 56.0 } else { 28.0 };
+        let prefix = format!("home-prompt-keycap-{index}");
+        nodes.push(node(
+            &format!("{prefix}-border"),
+            Role::Group,
+            "",
+            x,
+            y,
+            binding_width,
+            24.0,
+            "--color-border-strong",
+        ));
+        nodes.push(node(
+            &format!("{prefix}-fill"),
+            Role::Group,
+            "",
+            x + 1.0,
+            y + 1.0,
+            binding_width - 2.0,
+            22.0,
+            "--color-surface-raised",
+        ));
+        nodes.push(
+            node(
+                &prefix,
+                Role::Text,
+                binding,
+                x + 2.0,
+                y + 1.0,
+                binding_width - 4.0,
+                22.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_text_align(TextAlign::Center),
+        );
+        x += binding_width + 8.0;
+        let verb_width = verb.len() as f32 * 10.0 + 8.0;
+        nodes.push(
+            node(
+                &format!("home-prompt-verb-{index}"),
+                Role::Text,
+                verb,
+                x,
+                y,
+                verb_width,
+                24.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+        x += verb_width + 12.0;
+    }
+    nodes
+}
+
+fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(Cursor::new(&mut bytes), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .expect("in-memory PNG header")
+            .write_image_data(rgba)
+            .expect("in-memory PNG pixels");
+    }
+    bytes.into()
+}
+
+fn wifi_glyph_source() -> ImageSource {
+    static WIFI: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = WIFI.get_or_init(|| {
+        let mut rgba = vec![0_u8; 24 * 24 * 4];
+        for y in 0..24 {
+            for x in 0..24 {
+                let dx = f32::from(u16::try_from(x).unwrap()) + 0.5 - 12.0;
+                let dy = 19.0 - (f32::from(u16::try_from(y).unwrap()) + 0.5);
+                let radius = dx.hypot(dy);
+                let in_upper_fan = dy > 0.0 && dx.abs() <= dy * 1.45;
+                let painted = radius <= 1.8
+                    || in_upper_fan
+                        && ((4.3..=6.3).contains(&radius) || (8.0..=10.2).contains(&radius));
+                if painted {
+                    let offset = (y * 24 + x) * 4;
+                    rgba[offset..offset + 4].copy_from_slice(&[0xc9, 0xc2, 0xb4, 0xff]);
+                }
+            }
+        }
+        encoded_png(24, 24, &rgba)
+    });
+    ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn hero_wash_source() -> ImageSource {
+    static WASH: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = WASH.get_or_init(|| {
+        const WIDTH: usize = 1280;
+        const HEIGHT: usize = 280;
+        let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                // Exact Ridgeline aura declarations from assets/auras.css. CSS paints the
+                // first radial gradient over the second, then .deco applies opacity 0.55.
+                let global_y = y as f32 + STATUS_BAR_HEIGHT;
+                let sample = |center_x: f32,
+                              center_y: f32,
+                              radius_x: f32,
+                              radius_y: f32,
+                              stop: f32,
+                              color: [f32; 4]| {
+                    let dx = (x as f32 + 0.5 - center_x) / radius_x;
+                    let dy = (global_y + 0.5 - center_y) / radius_y;
+                    let distance = dx.hypot(dy);
+                    let fade = (1.0 - distance / stop).clamp(0.0, 1.0);
+                    [color[0], color[1], color[2], color[3] * fade]
+                };
+                let bottom = sample(
+                    1280.0 * 0.12,
+                    720.0 * 0.92,
+                    900.0,
+                    520.0,
+                    0.70,
+                    [58.0, 43.0, 78.0, 0.65],
+                );
+                let top = sample(
+                    1280.0 * 0.78,
+                    720.0 * 0.08,
+                    720.0,
+                    420.0,
+                    0.68,
+                    [201.0, 111.0, 87.0, 0.5],
+                );
+                let alpha = top[3] + bottom[3] * (1.0 - top[3]);
+                let rgb = if alpha > 0.0 {
+                    [0, 1, 2].map(|channel| {
+                        (top[channel] * top[3] + bottom[channel] * bottom[3] * (1.0 - top[3]))
+                            / alpha
+                    })
+                } else {
+                    [0.0; 3]
+                };
+                let offset = (y * WIDTH + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[
+                    rgb[0].round() as u8,
+                    rgb[1].round() as u8,
+                    rgb[2].round() as u8,
+                    (alpha * 0.55 * 255.0).round() as u8,
+                ]);
+            }
+        }
+        encoded_png(
+            u32::try_from(WIDTH).unwrap(),
+            u32::try_from(HEIGHT).unwrap(),
+            &rgba,
+        )
+    });
+    ImageSource::new(
+        "quiet-console:aura-ridgeline:201-111-87@0.5/68%;58-43-78@0.65/70%;opacity=0.55",
+        bytes.clone(),
+    )
+}
+
 fn add_explicit_action_name(action_node: &mut Node) {
     fn contains(outer: Bounds, inner: Bounds) -> bool {
         inner.x >= outer.x
@@ -5797,14 +6017,18 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.starts_with("room-keycap-")
+    let radius = if id.starts_with("home-prompt-keycap-0")
+        || id.starts_with("room-keycap-")
         || id.contains("keycap")
             && (id.to_ascii_lowercase().contains("select")
                 || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id == "attention"
+    } else if id.starts_with("home-prompt-keycap-")
+        || id == "attention"
         || id == "attention-pill"
+        || id == "attention-pill-border"
+        || id == "attention-dot"
         || id.contains("status-dot")
         || id.contains("-pip")
         || id.starts_with("favorite-pin-")
@@ -9616,6 +9840,17 @@ mod tests {
                 < f32::EPSILON
         );
         assert!(node_by_id(scene.root(), "attention-pill").is_none());
+        assert!(node_by_id(scene.root(), "wifi-glyph").is_none());
+
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(node_by_id(scene.root(), "wifi-glyph").is_some());
 
         core.set_chrome_status(100, Some("Controller battery low".into()));
         let scene = core.scene(metrics, "").unwrap();
@@ -9632,6 +9867,13 @@ mod tests {
             node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
             Some("Controller battery low")
         );
+        let wash = node_by_id(scene.root(), "hero-wash").unwrap();
+        assert!(wash.accessible_label.contains("rgba(201,111,87,0.5)"));
+        assert!(wash.accessible_label.contains("transparent 68%"));
+        assert!(wash.accessible_label.contains("rgba(58,43,78,0.65)"));
+        assert!(wash.accessible_label.contains("transparent 70%"));
+        assert!(wash.accessible_label.contains("opacity 0.55"));
+        assert!(matches!(wash.content, pf_scene::NodeContent::Image { .. }));
     }
 
     #[test]
@@ -10226,7 +10468,7 @@ mod tests {
                 binding: "A".into(),
             }]
         };
-        let supplied_footer = "A  Open     PF  Safe Return · button below the d-pad\u{1f}X";
+        let supplied_footer = "A  Open     PF  Safe Return";
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -10271,10 +10513,21 @@ mod tests {
         ]);
         core.items[3].favorite = true;
         core.set_control_bindings(bindings());
-        assert_eq!(
-            prompt(&core.scene(metrics, supplied_footer).unwrap()),
-            "A Open     PF  Safe Return · button below the d-pad     X  Favorite"
+        let home = core.scene(metrics, supplied_footer).unwrap();
+        assert_eq!(prompt(&home), "A Open · PF  Safe Return");
+        let prompts = node_by_id(home.root(), "prompts").unwrap();
+        let footer_top = metrics.logical_height - PROMPTS_AREA_HEIGHT;
+        assert!(prompts.bounds.x >= 0.0);
+        assert!(prompts.bounds.x + prompts.bounds.width <= metrics.logical_width);
+        assert!(prompts.bounds.y >= footer_top);
+        assert!(
+            prompts
+                .children
+                .iter()
+                .all(|child| child.bounds.y >= footer_top
+                    && child.bounds.y + child.bounds.height <= metrics.logical_height)
         );
+        assert!(node_by_id(home.root(), "home-prompt-keycap-0").is_some());
         assert_eq!(
             core.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {
@@ -10286,7 +10539,7 @@ mod tests {
         core.focus = 1;
         assert_eq!(
             prompt(&core.scene(metrics, supplied_footer).unwrap()),
-            "A Open     PF  Safe Return · button below the d-pad     X  Unfavorite"
+            "A Open · PF  Safe Return"
         );
         assert_eq!(
             core.action(&ShellAction::Activate),

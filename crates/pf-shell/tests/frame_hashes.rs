@@ -170,27 +170,29 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "bd46c60817ed6916d21f0819c7badd79932493f03ac7b186c40b05ce94f934b7  ",
-        "0b0463b554d9086123b2641d0421aa4c0165e20565f3875b15c550007a3b9cca  ",
-        "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
-        "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
-        "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
+        "4f40ec5b62cc463d7d159e6e3b8a26c5fbca1eaef3487549052e3452857ab1b7  ",
+        "9a5d3aff657843dd7f3d38a1a0b679cc7a8c0080d1807226ffccc1a7cf917d62  ",
+        "69ff05c9f4f1dc0db11c5754af601cd5dd7634000445dedd0f87dba334894ee5  ",
+        "243628ab06f9eecec14f159a4fd24f92819ba6a62aa1b0272c6b58378b8bd3e4  ",
+        "a1adc0be0d102469433bd6ecc400bfb97eb8b85599c1ef363bdf37728bb49ced  ",
         // Library hashes intentionally rebaseline for the CSS flex row's natural-width
         // chips, divider-free 16px gaps, uniform selected border, and separator-free,
         // right-aligned prompt groups. These hashes include the unclipped chip and
         // prompt text; the approved design golden remains unchanged.
-        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
-        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
-        "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
-        "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
-        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
-        "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",
+        // All route frames intentionally rebaseline because the shared chrome now
+        // uses compact keycaps, uniform gaps, and label-width selected underlines.
+        "c8d5340cccc2f7ee564e74af63670be2186f5ca1fd11cabe9da29ec922030207  ",
+        "c8d5340cccc2f7ee564e74af63670be2186f5ca1fd11cabe9da29ec922030207  ",
+        "08db0a27e9f282fffd2fd3f7e2f278da693cb0820f0a2180ad05fddd265317cf  ",
+        "3190dc0699d8d0ab17e4a10e84d585e0bae32222086afb577a0600dfbf07da0d  ",
+        "c7e761084f433c4bd34c3fb916b218fe123a18f9df3d86c64eca1ba6097eabdf  ",
+        "3cc6782383e2210076bba2edaa7489d10178a27ffa4fa345055fa615421132ed  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("0b0463b"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("9a5d3af"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("d3bca43"),
+        lines.lines().nth(3).unwrap().starts_with("243628a"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -225,19 +227,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("e8a86aa8e934d6b4fd6f1c10e774ccdc8d57aae0ff385c7ceab64a70d1a94c1c  ")
+        transcript.contains("b007ad74d7eb7108db5d54174a9358166968222b4d3529d2928c671d8176de17  ")
     );
     assert!(
-        transcript.contains("6280b745d96067738e519a2d25c4a517b0a02ab25aa0655719fd562dde0ebd5d  ")
+        transcript.contains("73702c832feb82b6c9f58df0c4dc626c4d790c6dcf570aa2cf562288f3fa4197  ")
     );
     assert!(
-        transcript.contains("708578c894f705162d60c72056a32e8b5add474bd799754c531b4aa718051a3a  ")
+        transcript.contains("37885c16f3a64ac0da654ef416515ff5014184f8c02180e587348dbc2dae0de7  ")
     );
     assert!(
-        transcript.contains("6c345ac2580e69d6449ae92876d8e752bbdc3f6bedc04bfc9aad04882229228d  ")
+        transcript.contains("1543bd5ffc2bff07e3dd9139720f0f779d40fbacad3e3e3aa1dba4f603f6f571  ")
     );
     assert!(
-        transcript.contains("38ae161596dfca2d70b353c1937f54feebd49de481e1fe6a2a2ad5eeb43c9cc9  ")
+        transcript.contains("d0b11b160606d4b1ea5cfd5f0dd59ce67c5f418b5f2c33b87a25cdf9185b4f35  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());
@@ -265,6 +267,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("30e2194cfc6af8252a42940ba7f37020e3c77bcf207a3cf9e8d9bb00f29c6e92  ")
+        transcript.contains("31b54e3efc86149f29015129b7ad2760a1f4966eea5334f340d1d22e434543f7  ")
     );
 }

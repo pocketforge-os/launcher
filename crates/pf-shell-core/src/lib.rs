@@ -42,13 +42,14 @@ use design_generated::{
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
     COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
     COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
-    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_HEIGHT,
-    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4,
-    SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
+    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
+    KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
+    LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
+    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3,
+    SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
     STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
     STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SIDE_WIDTH,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -86,6 +87,17 @@ fn label_text_width(text: &str) -> f32 {
 // calibrated against the deterministic Cosmic Text/Manrope rasterizer.
 fn caption_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
+}
+
+// Natural Manrope 14/600 advances for the finite room-strip vocabulary, measured
+// with the same Cosmic Text configuration that paints the Label role.
+fn room_label_advance(text: &str) -> f32 {
+    match text {
+        "Home" => 39.0,
+        "Library" => 46.0,
+        "Settings" => 55.0,
+        _ => label_text_width(text),
+    }
 }
 
 // Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
@@ -2696,27 +2708,46 @@ impl ShellCore {
                 .with_type_role(TypeRole::Caption),
             );
         }
-        let room_left = w / 2.0 - 220.0;
+        let keycap_width =
+            KEYCAP_MIN_WIDTH.max(caption_text_width("L") + 2.0 * KEYCAP_BORDER_WIDTH);
+        let room_widths = [
+            keycap_width,
+            room_label_advance("Home") + 2.0 * ROOM_HORIZONTAL_PADDING,
+            room_label_advance("Library") + 2.0 * ROOM_HORIZONTAL_PADDING,
+            room_label_advance("Settings") + 2.0 * ROOM_HORIZONTAL_PADDING,
+            keycap_width,
+        ];
+        let rooms_width = room_widths.iter().sum::<f32>() + ROOM_STRIP_GAP * 4.0;
+        // Equal CSS side columns make the center of the available statusbar content
+        // the viewport center; retaining the expression documents that contract.
+        let status_content_width = w - 2.0 * STATUS_BAR_HORIZONTAL_PADDING;
+        let room_left = STATUS_BAR_HORIZONTAL_PADDING
+            + STATUS_BAR_SIDE_WIDTH
+            + (status_content_width - 2.0 * STATUS_BAR_SIDE_WIDTH - rooms_width) / 2.0;
         children.push(
             node(
                 "rooms",
                 Role::Group,
                 "",
                 room_left,
-                12.0,
-                424.0,
-                40.0,
+                0.0,
+                rooms_width,
+                STATUS_BAR_HEIGHT,
                 SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Label),
         );
-        for (id, label, x, width) in [
-            ("room-keycap-left", "L", room_left + 8.0, 32.0),
-            ("room-home", "Home", room_left + 56.0, 72.0),
-            ("room-library", "Library", room_left + 152.0, 88.0),
-            ("room-settings", "Settings", room_left + 264.0, 92.0),
-            ("room-keycap-right", "R", room_left + 384.0, 32.0),
-        ] {
+        let mut room_x = room_left;
+        for ((id, label), width) in [
+            ("room-keycap-left", "L"),
+            ("room-home", "Home"),
+            ("room-library", "Library"),
+            ("room-settings", "Settings"),
+            ("room-keycap-right", "R"),
+        ]
+        .into_iter()
+        .zip(room_widths)
+        {
             let keycap = id.contains("keycap");
             let selected = matches!(
                 (id, self.route),
@@ -2728,24 +2759,25 @@ impl ShellCore {
                     | ("room-settings", Route::Settings)
             );
             if keycap {
+                let keycap_y = (STATUS_BAR_HEIGHT - KEYCAP_HEIGHT) / 2.0;
                 children.push(node(
                     &format!("{id}-border"),
                     Role::Group,
                     "",
-                    x - 4.0,
-                    16.0,
-                    width + 8.0,
-                    24.0,
+                    room_x,
+                    keycap_y,
+                    width,
+                    KEYCAP_HEIGHT,
                     COLOR_BORDER_STRONG_TOKEN,
                 ));
                 children.push(node(
                     &format!("{id}-fill"),
                     Role::Group,
                     "",
-                    x - 3.0,
-                    17.0,
-                    width + 6.0,
-                    22.0,
+                    room_x + KEYCAP_BORDER_WIDTH,
+                    keycap_y + KEYCAP_BORDER_WIDTH,
+                    width - 2.0 * KEYCAP_BORDER_WIDTH,
+                    KEYCAP_HEIGHT - 2.0 * KEYCAP_BORDER_WIDTH,
                     COLOR_SURFACE_RAISED_TOKEN,
                 ));
                 children.push(
@@ -2753,22 +2785,24 @@ impl ShellCore {
                         id,
                         Role::Text,
                         label,
-                        x,
-                        17.0,
-                        width,
-                        22.0,
+                        room_x + KEYCAP_BORDER_WIDTH,
+                        keycap_y + KEYCAP_BORDER_WIDTH,
+                        width - 2.0 * KEYCAP_BORDER_WIDTH,
+                        KEYCAP_HEIGHT - 2.0 * KEYCAP_BORDER_WIDTH,
                         COLOR_SURFACE_RAISED_TOKEN,
                     )
-                    .with_type_role(TypeRole::Caption),
+                    .with_type_role(TypeRole::Caption)
+                    .with_text_align(TextAlign::Center),
                 );
             } else {
+                let room_y = (STATUS_BAR_HEIGHT - 32.0) / 2.0;
                 children.push(
                     node(
                         id,
                         Role::Text,
                         label,
-                        x,
-                        16.0,
+                        room_x,
+                        room_y,
                         width,
                         32.0,
                         SCENE_TRANSPARENT_TOKEN,
@@ -2780,14 +2814,15 @@ impl ShellCore {
                         &format!("{id}-underline"),
                         Role::Group,
                         "",
-                        x,
+                        room_x + ROOM_HORIZONTAL_PADDING,
                         49.0,
-                        width,
+                        room_label_advance(label),
                         3.0,
                         STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
+            room_x += width + ROOM_STRIP_GAP;
         }
         if let Some(status) = self.session_status() {
             children.push(node(
@@ -12026,6 +12061,90 @@ mod tests {
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
                     && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
             );
+        }
+    }
+
+    #[test]
+    fn chrome_room_strip_follows_css_geometry() {
+        let scene = core()
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let rooms = node_by_id(root, "rooms").unwrap();
+        assert!((rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON);
+        assert!(
+            (rooms.bounds.y + rooms.bounds.height / 2.0 - STATUS_BAR_HEIGHT / 2.0).abs()
+                < f32::EPSILON
+        );
+
+        let item_ids = [
+            "room-keycap-left-border",
+            "room-home",
+            "room-library",
+            "room-settings",
+            "room-keycap-right-border",
+        ];
+        for pair in item_ids.windows(2) {
+            let left = node_by_id(root, pair[0]).unwrap();
+            let right = node_by_id(root, pair[1]).unwrap();
+            let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+            assert!(
+                (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
+                "{pair:?} gap={gap}"
+            );
+        }
+
+        for (id, label) in [
+            ("room-home", "Home"),
+            ("room-library", "Library"),
+            ("room-settings", "Settings"),
+        ] {
+            let label_node = node_by_id(root, id).unwrap();
+            assert!(
+                (label_node.bounds.y + label_node.bounds.height / 2.0 - STATUS_BAR_HEIGHT / 2.0)
+                    .abs()
+                    < f32::EPSILON
+            );
+            if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                assert!((underline.bounds.width - room_label_advance(label)).abs() < f32::EPSILON);
+                assert!(
+                    (underline.bounds.x + underline.bounds.width / 2.0
+                        - (label_node.bounds.x + label_node.bounds.width / 2.0))
+                        .abs()
+                        < f32::EPSILON
+                );
+            }
+        }
+
+        for id in ["room-keycap-left", "room-keycap-right"] {
+            let border = node_by_id(root, &format!("{id}-border")).unwrap();
+            let glyph = node_by_id(root, id).unwrap();
+            assert_eq!(
+                (border.bounds.width, border.bounds.height),
+                (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+            );
+            assert!(
+                (glyph.bounds.x + glyph.bounds.width / 2.0
+                    - (border.bounds.x + border.bounds.width / 2.0))
+                    .abs()
+                    <= 1.0
+            );
+            assert!(
+                (glyph.bounds.y + glyph.bounds.height / 2.0
+                    - (border.bounds.y + border.bounds.height / 2.0))
+                    .abs()
+                    <= 1.0
+            );
+            assert_eq!(glyph.text_align, TextAlign::Center);
         }
     }
 

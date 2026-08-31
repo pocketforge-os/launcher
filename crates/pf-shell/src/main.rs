@@ -1,5 +1,5 @@
 use pf_catalog::{
-    CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
+    CatalogItem, CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
     VariantPinCommitResult,
 };
 use pf_framehost::{FbdevHost, OffscreenHost};
@@ -53,7 +53,7 @@ const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact CatalogSnapshot JSON (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -167,70 +167,70 @@ impl KeyRepeatScheduler {
 
 fn vendored_art(reference: &str) -> Option<Arc<[u8]>> {
     match reference {
-        "art/ridgeline.png" => Some(Arc::from(
+        "fixture-art:ridgeline.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/ridgeline.png")[..],
         )),
-        "art/hollow-tides.png" => Some(Arc::from(
+        "fixture-art:hollow-tides.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/hollow-tides.png")[..],
         )),
-        "art/sunwake.png" => Some(Arc::from(
+        "fixture-art:sunwake.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/sunwake.png")[..],
         )),
-        "art/moth-and-lantern.png" => Some(Arc::from(
+        "fixture-art:moth-and-lantern.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/moth-and-lantern.png")[..],
         )),
-        "art/bellwether.png" => Some(Arc::from(
+        "fixture-art:bellwether.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/bellwether.png")[..],
         )),
-        "art/torchbug.png" => Some(Arc::from(
+        "fixture-art:torchbug.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/torchbug.png")[..],
         )),
-        "art/northlight.png" => Some(Arc::from(
+        "fixture-art:northlight.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/northlight.png")[..],
         )),
-        "art/petrichor.png" => Some(Arc::from(
+        "fixture-art:petrichor.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/petrichor.png")[..],
         )),
-        "art/lumen-vale.png" => Some(Arc::from(
+        "fixture-art:lumen-vale.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/lumen-vale.png")[..],
         )),
-        "art/redshift-alley.png" => Some(Arc::from(
+        "fixture-art:redshift-alley.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/redshift-alley.png")[..],
         )),
-        "art/quiet-machines.png" => Some(Arc::from(
+        "fixture-art:quiet-machines.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/quiet-machines.png")[..],
         )),
-        "art/low-orbit.png" => Some(Arc::from(
+        "fixture-art:low-orbit.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/low-orbit.png")[..],
         )),
-        "art/paper-armada.png" => Some(Arc::from(
+        "fixture-art:paper-armada.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/paper-armada.png")[..],
         )),
-        "art/vega-crossing.png" => Some(Arc::from(
+        "fixture-art:vega-crossing.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/vega-crossing.png")[..],
         )),
-        "art/iron-meridian.png" => Some(Arc::from(
+        "fixture-art:iron-meridian.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/iron-meridian.png")[..],
         )),
-        "art/signal-decay.png" => Some(Arc::from(
+        "fixture-art:signal-decay.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/signal-decay.png")[..],
         )),
-        "art/milewide.png" => Some(Arc::from(
+        "fixture-art:milewide.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/milewide.png")[..],
         )),
-        "art/orchard-of-glass.png" => Some(Arc::from(
+        "fixture-art:orchard-of-glass.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/orchard-of-glass.png")[..],
         )),
-        "art/cinder-loop.png" => Some(Arc::from(
+        "fixture-art:cinder-loop.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/cinder-loop.png")[..],
         )),
-        "art/halfmoon-harbor.png" => Some(Arc::from(
+        "fixture-art:halfmoon-harbor.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/halfmoon-harbor.png")[..],
         )),
-        "art/fern-and-fathom.png" => Some(Arc::from(
+        "fixture-art:fern-and-fathom.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/fern-and-fathom.png")[..],
         )),
-        "art/corrupt.png" => Some(Arc::from(
+        "fixture-art:corrupt.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/corrupt.png")[..],
         )),
         _ => None,
@@ -238,25 +238,28 @@ fn vendored_art(reference: &str) -> Option<Arc<[u8]>> {
 }
 
 fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
-    ShellCore::boot_with_art(snapshot, theme, reduced, vendored_art)
+    ShellCore::boot_with_art(snapshot, theme, reduced, |_, reference| {
+        vendored_art(reference)
+    })
 }
 
-fn catalog_art_paths(snapshot: &CatalogSnapshot) -> VecDeque<(String, PathBuf)> {
-    snapshot
-        .items
-        .iter()
-        .filter_map(|item| {
-            let reference = item.presentation.icon_reference.clone()?;
-            let manifest_dir = item
-                .variants
-                .first()?
-                .launch_target
-                .descriptor_path
-                .parent()?
-                .to_owned();
-            Some((reference, manifest_dir))
-        })
-        .collect()
+enum ArtBase<'a> {
+    DescriptorDirectory,
+    SnapshotDirectory(&'a Path),
+}
+
+fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase<'a>) -> Option<&'a Path> {
+    match policy {
+        ArtBase::DescriptorDirectory => item
+            .variants
+            .first()?
+            .launch_target
+            .descriptor_path
+            .parent(),
+        // Snapshot paths can describe another machine, so their relative art references
+        // deliberately use the portable snapshot bundle's directory instead.
+        ArtBase::SnapshotDirectory(directory) => Some(directory),
+    }
 }
 
 fn read_catalog_art(manifest_dir: &Path, reference: &str) -> Option<Arc<[u8]>> {
@@ -274,20 +277,35 @@ fn read_catalog_art(manifest_dir: &Path, reference: &str) -> Option<Arc<[u8]>> {
     fs::read(path).ok().map(Arc::from)
 }
 
-fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
-    let mut paths = catalog_art_paths(snapshot);
-    ShellCore::boot_with_art(snapshot, theme, reduced, move |reference| {
-        if let Some(bytes) = vendored_art(reference) {
-            return Some(bytes);
-        }
-        let index = paths
-            .iter()
-            .position(|(candidate, _)| candidate == reference)?;
-        let (_, manifest_dir) = paths.remove(index)?;
-        read_catalog_art(&manifest_dir, reference)
+fn manifest_art_core(
+    snapshot: &CatalogSnapshot,
+    theme: &pf_theme::Theme,
+    reduced: bool,
+    policy: ArtBase<'_>,
+) -> ShellCore {
+    ShellCore::boot_with_art(snapshot, theme, reduced, move |item, reference| {
+        read_catalog_art(art_base_path(item, &policy)?, reference)
     })
 }
 
+fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
+    manifest_art_core(snapshot, theme, reduced, ArtBase::DescriptorDirectory)
+}
+
+fn snapshot_core(
+    snapshot: &CatalogSnapshot,
+    snapshot_path: &Path,
+    theme: &pf_theme::Theme,
+    reduced: bool,
+) -> ShellCore {
+    let directory = snapshot_path.parent().unwrap_or_else(|| Path::new(""));
+    manifest_art_core(
+        snapshot,
+        theme,
+        reduced,
+        ArtBase::SnapshotDirectory(directory),
+    )
+}
 struct SnapshotCatalog(CatalogSnapshot);
 
 impl FavoriteCatalog for SnapshotCatalog {
@@ -472,8 +490,10 @@ fn main() -> Result<(), String> {
             footer.push_str(glyph);
         }
     }
-    let mut core = if fixture_mode || snapshot_path.is_some() {
+    let mut core = if fixture_mode {
         fixture_core(&snapshot, &theme, reduced)
+    } else if let Some(path) = &snapshot_path {
+        snapshot_core(&snapshot, path, &theme, reduced)
     } else {
         catalog_core(&snapshot, &theme, reduced)
     };
@@ -2761,7 +2781,21 @@ mod durable_tests {
         let fixture: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let mut catalog = fixture.clone();
+        let catalog_root = tempfile::tempdir().unwrap();
         for item in &mut catalog.items {
+            if let Some(reference) = item.presentation.icon_reference.clone() {
+                let app_dir = catalog_root.path().join(&item.id);
+                fs::create_dir_all(app_dir.join("art")).unwrap();
+                fs::write(
+                    app_dir.join("art/cover.png"),
+                    vendored_art(&reference).unwrap(),
+                )
+                .unwrap();
+                item.presentation.icon_reference = Some("art/cover.png".into());
+                for variant in &mut item.variants {
+                    variant.launch_target.descriptor_path = app_dir.join("app.toml");
+                }
+            }
             item.id = format!("installed-applications:{}", item.id);
         }
         let fixture_scene = fixture_core(&fixture, &pf_theme::flagship(), false)
@@ -3608,6 +3642,125 @@ exec="./launch"
         assert!(read_catalog_art(dir.path(), "large.png").is_none());
     }
 
+    fn rendered_home(mut core: ShellCore) -> Vec<u8> {
+        core.authority_snapshot(false);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let mut host = OffscreenHost::new(metrics);
+        present(&mut host, &mut core, "A Open").unwrap();
+        host.frame().unwrap().rgba.clone()
+    }
+
+    #[test]
+    fn snapshot_relative_art_renders_pixels_from_beside_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("catalog.json");
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
+        fs::create_dir(dir.path().join("art")).unwrap();
+        fs::write(
+            dir.path().join("art/cover.png"),
+            include_bytes!("../fixtures/art/hollow-tides.png"),
+        )
+        .unwrap();
+
+        let actual = rendered_home(snapshot_core(
+            &snapshot,
+            &snapshot_path,
+            &pf_theme::flagship(),
+            false,
+        ));
+        snapshot.items[0].presentation.icon_reference = Some("fixture-art:hollow-tides.png".into());
+        let expected = rendered_home(fixture_core(&snapshot, &pf_theme::flagship(), false));
+
+        assert_eq!(
+            actual, expected,
+            "snapshot must render the adjacent file's pixels"
+        );
+    }
+
+    #[test]
+    fn installed_relative_art_cannot_be_shadowed_by_vendored_fixture_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("apps");
+        let app = root.join("example");
+        fs::create_dir_all(app.join("art")).unwrap();
+        fs::write(
+            app.join("app.toml"),
+            scanned_manifest().replace("art/cover.png", "art/ridgeline.png"),
+        )
+        .unwrap();
+        fs::write(
+            app.join("art/ridgeline.png"),
+            include_bytes!("../fixtures/art/hollow-tides.png"),
+        )
+        .unwrap();
+        let mut snapshot = installed_app_provider(&root, dir.path().join("favorites.json"))
+            .snapshot()
+            .unwrap();
+
+        let actual = rendered_home(catalog_core(&snapshot, &pf_theme::flagship(), false));
+        snapshot.items[0].presentation.icon_reference = Some("fixture-art:hollow-tides.png".into());
+        let expected = rendered_home(fixture_core(&snapshot, &pf_theme::flagship(), false));
+
+        assert_eq!(
+            actual, expected,
+            "manifest-relative art must win by item path"
+        );
+    }
+
+    #[test]
+    fn shipped_fixture_catalog_resolves_every_namespaced_cover() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+
+        for item in snapshot
+            .items
+            .iter()
+            .filter(|item| item.presentation.icon_reference.is_some())
+        {
+            let reference = item.presentation.icon_reference.as_deref().unwrap();
+            assert!(reference.starts_with("fixture-art:"));
+            assert!(
+                vendored_art(reference).is_some(),
+                "missing vendored art for {reference}"
+            );
+            assert_eq!(
+                core.art_treatment(&item.id),
+                Some(pf_shell_core::ArtTreatment::CatalogArt)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_snapshot_art_keeps_plate_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("art/missing.png".into());
+
+        let core = snapshot_core(
+            &snapshot,
+            &dir.path().join("catalog.json"),
+            &pf_theme::flagship(),
+            false,
+        );
+
+        assert!(matches!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
+        ));
+    }
+
     #[test]
     fn production_catalog_provider_matches_canonical_runtime_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -4178,7 +4331,7 @@ exec="./launch"
     fn corrupt_fixture_render_note_replaces_image_with_plate_on_redraw() {
         let mut snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
-        snapshot.items[0].presentation.icon_reference = Some("art/corrupt.png".into());
+        snapshot.items[0].presentation.icon_reference = Some("fixture-art:corrupt.png".into());
         snapshot.items[0].presentation.icon_decodable = true;
         let theme = pf_theme::flagship();
         let mut core = fixture_core(&snapshot, &theme, false);

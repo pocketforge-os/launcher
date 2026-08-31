@@ -647,7 +647,7 @@ impl ShellCore {
 
     #[must_use]
     pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
-        Self::boot_with_art(snapshot, theme, reduced_motion, |_| None)
+        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
     }
 
     #[must_use]
@@ -658,7 +658,7 @@ impl ShellCore {
         mut resolve_art: F,
     ) -> Self
     where
-        F: FnMut(&str) -> Option<Arc<[u8]>>,
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let favorites = &snapshot.user_projection.favorite_item_ids;
         let pins = &snapshot.user_projection.pinned_variant_ids;
@@ -671,7 +671,7 @@ impl ShellCore {
                     .icon_reference
                     .as_deref()
                     .filter(|_| item.presentation.icon_decodable)
-                    .and_then(&mut resolve_art)
+                    .and_then(|reference| resolve_art(item, reference))
                     .map(|bytes| {
                         let digest = Sha256::digest(&bytes);
                         ImageSource::new(format!("sha256:{digest:x}"), bytes)
@@ -8167,7 +8167,7 @@ mod tests {
                 user_projection: UserProjection::default(),
             };
             let mut core =
-                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_| {
+                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, _| {
                     with_real_art.then(|| Arc::from(&b"png"[..]))
                 });
             core.authority_snapshot(false);
@@ -8589,7 +8589,7 @@ mod tests {
             user_projection: UserProjection::default(),
         };
         let mut core =
-            ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |reference| {
+            ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, reference| {
                 (reference == "art/paper-comet.png").then(|| Arc::from(&b"png"[..]))
             });
         core.authority_snapshot(false);

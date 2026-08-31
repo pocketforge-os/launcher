@@ -7,8 +7,8 @@
   },
   "fixture": "overlay",
   "frame_sha256": "96e3ba93e07aa0b0acdd09425a47488f59fb8cfcac9e6406637351a7bf3b8c46",
-  "frame_time_us": 35993,
-  "raster_guard": "NOT_RUN (set PF_RASTER_INK_GUARD=1)",
+  "frame_time_us": 35664,
+  "raster_guard": "PASS",
   "render_notes": "[]",
   "surface": {
     "height": 1080,

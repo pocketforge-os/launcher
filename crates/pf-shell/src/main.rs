@@ -570,6 +570,11 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     validate_args(&args)?;
+    validate_baseline_capture(
+        &args,
+        env::var_os("PF_BASELINE_RECORD_ONLY").is_some(),
+        env::var_os("PF_RASTER_INK_GUARD").is_some(),
+    )?;
     let interactive_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
@@ -2673,6 +2678,23 @@ fn validate_args(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn validate_baseline_capture(
+    args: &[String],
+    baseline_record_only: bool,
+    raster_guard_enabled: bool,
+) -> Result<(), String> {
+    if baseline_record_only
+        && args.iter().any(|arg| arg == "--taffy-baseline")
+        && !raster_guard_enabled
+    {
+        return Err(
+            "baseline completeness error: guarded --taffy-baseline capture requires PF_RASTER_INK_GUARD=1"
+                .into(),
+        );
+    }
+    Ok(())
+}
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut out, byte| {
         write!(out, "{byte:02x}").expect("writing to a String cannot fail");
@@ -2683,6 +2705,44 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn guarded_baseline_capture_refuses_to_record_without_raster_guard() {
+        let args = vec!["--taffy-baseline".to_owned()];
+        let error = validate_baseline_capture(&args, true, false).unwrap_err();
+        assert!(error.contains("PF_RASTER_INK_GUARD=1"));
+        validate_baseline_capture(&args, true, true).unwrap();
+    }
+
+    #[test]
+    fn committed_baseline_records_have_raster_guard_outcomes() {
+        let baseline = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/taffy-baseline");
+        let mut incomplete = Vec::new();
+        for surface in ["small", "standard", "portrait", "large"] {
+            for scale in ["100", "150", "200"] {
+                for fixture in ["home", "library", "settings", "overlay"] {
+                    let path = baseline
+                        .join(surface)
+                        .join(scale)
+                        .join(format!("{fixture}.json"));
+                    let record = fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                    let record: serde_json::Value = serde_json::from_str(&record)
+                        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+                    let guarded = record["raster_guard"]
+                        .as_str()
+                        .is_some_and(|outcome| outcome == "PASS" || outcome.starts_with("FAIL: "));
+                    if !guarded {
+                        incomplete.push(path);
+                    }
+                }
+            }
+        }
+        assert!(
+            incomplete.is_empty(),
+            "baseline records without raster-guard outcomes: {incomplete:#?}"
+        );
+    }
 
     fn contrast_probe(state: fn(&mut Node)) -> Node {
         let mut label = Node::new(

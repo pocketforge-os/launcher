@@ -7,8 +7,8 @@
   },
   "fixture": "library",
   "frame_sha256": "315174c3a68d0e114b3842bdb2e4edf7a781b913294cb5c82b5fda960130d611",
-  "frame_time_us": 1695931,
-  "raster_guard": "NOT_RUN (set PF_RASTER_INK_GUARD=1)",
+  "frame_time_us": 1736393,
+  "raster_guard": "FAIL: raster ink guard failed:\naction-name-library-item-fern-and-fathom (\"Fern & Fathom\", Bounds { x: 48.0, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\naction-name-library-item-signal-decay (\"Signal Decay\", Bounds { x: 381.2, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\naction-name-library-item-quiet-machines (\"Quiet Machines\", Bounds { x: 714.4, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\naction-name-library-item-redshift-alley (\"Redshift Alley\", Bounds { x: 1047.6001, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\naction-name-library-item-bellwether (\"Bellwether\", Bounds { x: 1380.8, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5\naction-name-library-item-milewide (\"Milewide\", Bounds { x: 1714.0, y: 1184.0, width: 158.0, height: 28.0, min_width: 0.0, min_height: 0.0, max_width: None, max_height: None }): ink_pixels=0, raster_contrast=0.00, required=4.5",
   "render_notes": "[]",
   "surface": {
     "height": 1080,

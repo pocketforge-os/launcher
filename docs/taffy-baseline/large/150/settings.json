@@ -7,8 +7,8 @@
   },
   "fixture": "settings",
   "frame_sha256": "facbd2ccfb87aabe629435e90285f9c2bd351b5be185ed87392ce74720e14e97",
-  "frame_time_us": 61616,
-  "raster_guard": "NOT_RUN (set PF_RASTER_INK_GUARD=1)",
+  "frame_time_us": 64243,
+  "raster_guard": "PASS",
   "render_notes": "[]",
   "surface": {
     "height": 1080,

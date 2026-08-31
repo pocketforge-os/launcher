@@ -308,7 +308,7 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
             } else {
                 binding.printed_label
             };
-            format!("{glyph}  Safe Return · button below the d-pad")
+            format!("{glyph}  Safe Return")
         }
         _ => "Select+Start  Safe Return".into(),
     };
@@ -319,7 +319,7 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
     }
 }
 
-/// Adds the favorite affordance only when the effective map actually resolves it.
+/// Adds the contextual favorite affordance only when the effective map resolves Quick.
 pub fn favorite_footer_prompt(resolver: &dyn GlyphResolver, favorite: bool) -> Option<String> {
     match resolver.resolve(&ShellAction::Custom("Quick".into())) {
         Ok(GlyphResult::Resolved(binding)) => {
@@ -656,9 +656,8 @@ fn display_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        custom @ ("SafeReturn" | "Quick" | "Start" | "Room.next" | "Room.previous") => {
-            ShellAction::Custom(custom.into())
-        }
+        custom @ ("SafeReturn" | "Quick" | "Search.open" | "Start" | "Room.next"
+        | "Room.previous") => ShellAction::Custom(custom.into()),
         _ => return None,
     })
 }
@@ -671,8 +670,10 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        "SafeReturn" | "Start" | "Room.next" | "Room.previous" => ShellAction::Custom(name.into()),
-        "Quick" => ShellAction::Custom("Favorite".into()),
+        "SafeReturn" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
+            ShellAction::Custom(name.into())
+        }
+        "Quick" => ShellAction::Custom("Quick".into()),
         _ => return None,
     })
 }
@@ -758,10 +759,7 @@ mod tests {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let effective = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let footer = footer_prompt(&effective);
-        assert_eq!(
-            footer,
-            "A  Open     PF  Safe Return · button below the d-pad"
-        );
+        assert_eq!(footer, "A  Open     PF  Safe Return");
         assert!(!footer.contains("Search"));
         assert!(!footer.contains("Quick"));
         assert_eq!(
@@ -771,6 +769,14 @@ mod tests {
         assert_eq!(
             favorite_footer_prompt(&effective, true).as_deref(),
             Some("X  Unfavorite")
+        );
+    }
+
+    #[test]
+    fn physical_quick_binding_translates_to_quick_action() {
+        assert_eq!(
+            semantic_action("Quick"),
+            Some(ShellAction::Custom("Quick".into()))
         );
     }
 

@@ -30,8 +30,19 @@ use pf_theme::{Base, Theme};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceStatus {
+    pub battery_percent: u8,
+    pub attention_message: Option<String>,
+}
+
+pub trait DeviceStatusPort {
+    fn status(&self) -> Result<DeviceStatus, String>;
+}
 
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
@@ -51,6 +62,12 @@ const CARD_CAPTION_GAP: f32 = 2.0;
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
 fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * 8.0
+}
+
+// The flagship caption role is 12 px Manrope medium. This conservative advance is
+// calibrated against the deterministic Cosmic Text/Manrope rasterizer.
+fn caption_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 6.5
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
@@ -640,6 +657,8 @@ pub struct ShellCore {
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
+    battery_percent: Option<u8>,
+    attention_message: Option<String>,
     playtime: HashMap<String, Playtime>,
     recent_use: HashMap<String, SystemTime>,
 }
@@ -787,8 +806,24 @@ impl ShellCore {
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
+            battery_percent: None,
+            attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
+        }
+    }
+
+    pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {
+        let (battery_percent, attention) = port.status().map_or((None, None), |status| {
+            (
+                Some(status.battery_percent.min(100)),
+                status.attention_message,
+            )
+        });
+        if self.battery_percent != battery_percent || self.attention_message != attention {
+            self.battery_percent = battery_percent;
+            self.attention_message = attention;
+            self.bump_revision();
         }
     }
 
@@ -1717,14 +1752,23 @@ impl ShellCore {
                     });
                 }
             }
-            ShellAction::Custom(name) if name == "Search" => {
+            ShellAction::Custom(name) if matches!(name.as_str(), "Search" | "Search.open") => {
                 self.remember_caller();
                 self.go(Route::Search);
             }
             ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
             ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
             ShellAction::Custom(name) if name == "Quick" => {
-                self.go(Route::Quick);
+                if self.route == Route::Details {
+                    if let Some(item) = self.focused_item_index() {
+                        return Some(Effect::ToggleFavorite {
+                            item_id: self.items[item].id.clone(),
+                            favorite: !self.items[item].favorite,
+                        });
+                    }
+                } else {
+                    self.go(Route::Quick);
+                }
             }
             ShellAction::Back if self.route == Route::Quick => {
                 let route = self.previous_route;
@@ -2506,43 +2550,102 @@ impl ShellCore {
         }
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         self.library_surface_width.set(w);
-        let mut children = vec![
-            node(
-                "status-bar",
-                Role::Group,
-                "",
-                0.0,
-                0.0,
-                w,
-                STATUS_BAR_HEIGHT,
-                "--color-surface-raised",
-            ),
-            node(
-                "status-left-spacer",
-                Role::Group,
-                "",
-                0.0,
-                0.0,
-                200.0,
-                STATUS_BAR_HEIGHT,
-                "--color-surface-raised",
-            ),
-            node(
-                "status-cluster",
-                Role::Text,
-                if self.authority_unavailable() {
-                    "Wi-Fi   82%   !   9:41"
-                } else {
-                    "Wi-Fi   82%   9:41"
-                },
-                w - 248.0,
-                16.0,
-                200.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Caption),
-        ];
+        let mut children = Vec::new();
+        let battery_x = w - 168.0;
+        if self
+            .network_state
+            .as_ref()
+            .is_ok_and(|state| state.connected_ssid.is_some())
+        {
+            children.push(
+                node(
+                    "wifi-glyph",
+                    Role::Group,
+                    "Wi-Fi connected",
+                    w - 200.0,
+                    22.0,
+                    20.0,
+                    20.0,
+                    "--color-transparent",
+                )
+                .with_image(wifi_glyph_source(), ImageFit::Contain),
+            );
+        }
+        if let Some(battery_percent) = self.battery_percent {
+            children.extend([
+                node(
+                    "battery-outline",
+                    Role::Group,
+                    "Battery",
+                    battery_x,
+                    24.0,
+                    24.0,
+                    14.0,
+                    "--color-border-strong",
+                ),
+                node(
+                    "battery-cavity",
+                    Role::Group,
+                    "",
+                    battery_x + 2.0,
+                    26.0,
+                    18.0,
+                    10.0,
+                    "--color-surface-raised",
+                ),
+                node(
+                    "battery-level",
+                    Role::Group,
+                    "",
+                    battery_x + 3.0,
+                    27.0,
+                    16.0 * f32::from(battery_percent) / 100.0,
+                    8.0,
+                    "--color-text-secondary",
+                ),
+                node(
+                    "battery-terminal",
+                    Role::Group,
+                    "",
+                    battery_x + 24.0,
+                    28.0,
+                    2.0,
+                    6.0,
+                    "--color-border-strong",
+                ),
+            ]);
+        }
+        let mut status_parts = Vec::new();
+        if let Some(percent) = self.battery_percent {
+            status_parts.push(percent.to_string());
+        }
+        if self.authority_unavailable() {
+            status_parts.push("!".into());
+        }
+        if let Ok(state) = &self.time_state {
+            let seconds = state
+                .wall_clock
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                % 86_400;
+            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
+        }
+        if !status_parts.is_empty() {
+            children.push(
+                node(
+                    "status-cluster",
+                    Role::Text,
+                    &status_parts.join("     "),
+                    battery_x + 32.0,
+                    16.0,
+                    152.0,
+                    32.0,
+                    "--color-transparent",
+                )
+                .with_type_role(TypeRole::Caption),
+            );
+        }
         let room_left = w / 2.0 - 220.0;
         children.push(
             node(
@@ -2553,7 +2656,7 @@ impl ShellCore {
                 12.0,
                 424.0,
                 40.0,
-                "--color-surface-raised",
+                "--color-transparent",
             )
             .with_type_role(TypeRole::Label),
         );
@@ -2618,7 +2721,7 @@ impl ShellCore {
                         16.0,
                         width,
                         32.0,
-                        "--color-surface-raised",
+                        "--color-transparent",
                     )
                     .with_type_role(TypeRole::Label),
                 );
@@ -2654,41 +2757,33 @@ impl ShellCore {
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, w, h),
         }
-        let supplied_footer = if let Some((base, glyph)) = footer.split_once('\u{1f}') {
-            self.focused_item_index().map_or_else(
-                || base.to_owned(),
-                |item| {
-                    let label = if self.items[item].favorite {
-                        "Unfavorite"
-                    } else {
-                        "Favorite"
-                    };
-                    format!("{base}     {glyph}  {label}")
-                },
-            )
-        } else {
-            footer.to_owned()
-        };
+        let supplied_footer = footer.to_owned();
         let footer = match self.route {
             Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
                 let mut prompts = self
-                    .binding_prompt(
-                        "Activate",
-                        if self.ready_variants(item).is_empty() {
-                            "Details"
-                        } else {
-                            "Open"
-                        },
-                    )
+                    .binding_prompt("Search.open", "Search")
                     .into_iter()
                     .collect::<Vec<_>>();
+                if let Some(prompt) = self.binding_prompt("Quick", "Quick") {
+                    prompts.push(prompt);
+                }
+                if let Some(prompt) = self.binding_prompt(
+                    "Activate",
+                    if self.ready_variants(item).is_empty() {
+                        "Details"
+                    } else {
+                        "Open"
+                    },
+                ) {
+                    prompts.push(prompt);
+                }
                 let global_prompts = supplied_footer
                     .split_once("     ")
                     .map_or(supplied_footer.as_str(), |(_, global)| global);
                 if !global_prompts.is_empty() {
                     prompts.push(global_prompts.to_owned());
                 }
-                prompts.join("     ")
+                prompts.join(" · ")
             }),
             Route::Library => (self.focus >= 5)
                 .then(|| self.binding_prompt("Activate", "Details"))
@@ -2759,19 +2854,33 @@ impl ShellCore {
             PROMPTS_AREA_HEIGHT,
             "--color-surface-raised",
         ));
-        children.push(
-            node(
-                "prompts",
-                Role::Text,
-                &footer,
-                w - 600.0,
-                h - PROMPTS_AREA_HEIGHT,
-                552.0,
-                32.0,
-                "--color-surface-raised",
-            )
-            .with_type_role(TypeRole::Label),
-        );
+        let mut prompt_node = node(
+            "prompts",
+            if self.route == Route::Home {
+                Role::Group
+            } else {
+                Role::Text
+            },
+            &footer,
+            if self.route == Route::Home {
+                w - 660.0
+            } else {
+                w - 600.0
+            },
+            h - PROMPTS_AREA_HEIGHT,
+            if self.route == Route::Home {
+                612.0
+            } else {
+                552.0
+            },
+            32.0,
+            "--color-surface-raised",
+        )
+        .with_type_role(TypeRole::Label);
+        if self.route == Route::Home {
+            prompt_node.children = home_prompt_nodes(&footer, w, h);
+        }
+        children.push(prompt_node);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
@@ -2844,7 +2953,11 @@ impl ShellCore {
             );
         }
         if self.route == Route::Home {
-            let heading = out.pop().expect("Home route heading was just added");
+            let mut heading = out
+                .pop()
+                .expect("Home route heading was just added")
+                .with_ink_token("--color-text-muted");
+            heading.style_token = "--color-transparent".into();
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
@@ -2889,6 +3002,17 @@ impl ShellCore {
                 },
             );
             let mut content = vec![
+                node(
+                    "hero-wash",
+                    Role::Group,
+                    "Ridgeline aura: rgba(201,111,87,0.5) to transparent 68%; rgba(58,43,78,0.65) to transparent 70%; layer opacity 0.55",
+                    0.0,
+                    0.0,
+                    w,
+                    344.0,
+                    "--color-transparent",
+                )
+                .with_image(hero_wash_source(), ImageFit::Cover),
                 heading,
                 node(
                     "hero-title",
@@ -2898,10 +3022,11 @@ impl ShellCore {
                     144.0,
                     w - 96.0,
                     72.0,
-                    "--color-surface-canvas",
+                    "--color-transparent",
                 )
                 .with_type_role(TypeRole::Hero)
-                .with_line_height(1.04),
+                .with_line_height(1.04)
+                .with_ink_token("--color-text-primary"),
                 node(
                     "hero-status",
                     Role::Text,
@@ -2916,21 +3041,69 @@ impl ShellCore {
                     224.0,
                     480.0,
                     32.0,
-                    "--color-surface-canvas",
+                    "--color-transparent",
                 )
-                .with_type_role(TypeRole::Label),
+                .with_type_role(TypeRole::Label)
+                .with_ink_token("--color-status-ready"),
             ];
-            if self.presentation == Presentation::ForcedClose {
+            let attention = self.attention_message.as_deref().or_else(|| {
+                (self.presentation == Presentation::ForcedClose)
+                    .then_some("The previous game didn't close cleanly")
+            });
+            if let Some(message) = attention {
+                const PILL_RIGHT_MARGIN: f32 = 48.0;
+                const PILL_TOP: f32 = 77.0;
+                const PILL_HEIGHT: f32 = 33.0;
+                const PILL_HORIZONTAL_PADDING: f32 = 16.0;
+                const PILL_GAP: f32 = 8.0;
+                const DOT_SIZE: f32 = 6.4;
+                let text_width = caption_text_width(message);
+                let pill_width = PILL_HORIZONTAL_PADDING * 2.0 + DOT_SIZE + PILL_GAP + text_width;
+                let pill_left = w - PILL_RIGHT_MARGIN - pill_width;
                 content.push(node(
-                    "attention",
-                    Role::Text,
-                    &format!("● Attention · {} didn't close cleanly", self.active_title),
-                    w - 480.0,
-                    96.0,
-                    432.0,
-                    36.0,
+                    "attention-pill-border",
+                    Role::Group,
+                    "",
+                    pill_left,
+                    PILL_TOP,
+                    pill_width,
+                    PILL_HEIGHT,
+                    "--color-border-hairline",
+                ));
+                content.push(node(
+                    "attention-pill",
+                    Role::Group,
+                    "",
+                    pill_left + 1.0,
+                    PILL_TOP + 1.0,
+                    pill_width - 2.0,
+                    PILL_HEIGHT - 2.0,
+                    "--color-surface-raised",
+                ));
+                content.push(node(
+                    "attention-dot",
+                    Role::Group,
+                    "",
+                    pill_left + PILL_HORIZONTAL_PADDING,
+                    PILL_TOP + (PILL_HEIGHT - DOT_SIZE) / 2.0,
+                    DOT_SIZE,
+                    DOT_SIZE,
                     "--color-status-attention",
                 ));
+                content.push(
+                    node(
+                        "attention",
+                        Role::Text,
+                        message,
+                        pill_left + PILL_HORIZONTAL_PADDING + DOT_SIZE + PILL_GAP,
+                        PILL_TOP,
+                        text_width,
+                        PILL_HEIGHT,
+                        "--color-transparent",
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token("--color-text-secondary"),
+                );
             }
             let ready_items = self
                 .items
@@ -5639,6 +5812,196 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
     )
 }
 
+fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    let y = surface_height - PROMPTS_AREA_HEIGHT + 4.0;
+    let mut x = surface_width - 656.0;
+    let mut nodes = Vec::new();
+    for (index, prompt) in footer.split(" · ").enumerate() {
+        let Some((binding, verb)) = prompt.split_once(' ') else {
+            continue;
+        };
+        if index > 0 {
+            nodes.push(
+                node(
+                    &format!("home-prompt-separator-{index}"),
+                    Role::Text,
+                    "·",
+                    x,
+                    y,
+                    16.0,
+                    24.0,
+                    "--color-surface-raised",
+                )
+                .with_type_role(TypeRole::Label),
+            );
+            x += 20.0;
+        }
+        let binding_width = if binding == "SELECT" { 56.0 } else { 28.0 };
+        let prefix = format!("home-prompt-keycap-{index}");
+        nodes.push(node(
+            &format!("{prefix}-border"),
+            Role::Group,
+            "",
+            x,
+            y,
+            binding_width,
+            24.0,
+            "--color-border-strong",
+        ));
+        nodes.push(node(
+            &format!("{prefix}-fill"),
+            Role::Group,
+            "",
+            x + 1.0,
+            y + 1.0,
+            binding_width - 2.0,
+            22.0,
+            "--color-surface-raised",
+        ));
+        nodes.push(
+            node(
+                &prefix,
+                Role::Text,
+                binding,
+                x + 2.0,
+                y + 1.0,
+                binding_width - 4.0,
+                22.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_text_align(TextAlign::Center),
+        );
+        x += binding_width + 8.0;
+        let verb_width = verb.len() as f32 * 10.0 + 8.0;
+        nodes.push(
+            node(
+                &format!("home-prompt-verb-{index}"),
+                Role::Text,
+                verb,
+                x,
+                y,
+                verb_width,
+                24.0,
+                "--color-surface-raised",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+        x += verb_width + 12.0;
+    }
+    nodes
+}
+
+fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(Cursor::new(&mut bytes), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .expect("in-memory PNG header")
+            .write_image_data(rgba)
+            .expect("in-memory PNG pixels");
+    }
+    bytes.into()
+}
+
+fn wifi_glyph_source() -> ImageSource {
+    static WIFI: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = WIFI.get_or_init(|| {
+        let mut rgba = vec![0_u8; 24 * 24 * 4];
+        for y in 0..24 {
+            for x in 0..24 {
+                let dx = f32::from(u16::try_from(x).unwrap()) + 0.5 - 12.0;
+                let dy = 19.0 - (f32::from(u16::try_from(y).unwrap()) + 0.5);
+                let radius = dx.hypot(dy);
+                let in_upper_fan = dy > 0.0 && dx.abs() <= dy * 1.45;
+                let painted = radius <= 1.8
+                    || in_upper_fan
+                        && ((4.3..=6.3).contains(&radius) || (8.0..=10.2).contains(&radius));
+                if painted {
+                    let offset = (y * 24 + x) * 4;
+                    rgba[offset..offset + 4].copy_from_slice(&[0xc9, 0xc2, 0xb4, 0xff]);
+                }
+            }
+        }
+        encoded_png(24, 24, &rgba)
+    });
+    ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn hero_wash_source() -> ImageSource {
+    static WASH: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = WASH.get_or_init(|| {
+        const WIDTH: usize = 1280;
+        const HEIGHT: usize = 344;
+        let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                // Exact Ridgeline aura declarations from assets/auras.css. CSS paints the
+                // first radial gradient over the second, then .deco applies opacity 0.55.
+                let global_y = y as f32;
+                let sample = |center_x: f32,
+                              center_y: f32,
+                              radius_x: f32,
+                              radius_y: f32,
+                              stop: f32,
+                              color: [f32; 4]| {
+                    let dx = (x as f32 + 0.5 - center_x) / radius_x;
+                    let dy = (global_y + 0.5 - center_y) / radius_y;
+                    let distance = dx.hypot(dy);
+                    let fade = (1.0 - distance / stop).clamp(0.0, 1.0);
+                    [color[0], color[1], color[2], color[3] * fade]
+                };
+                let bottom = sample(
+                    1280.0 * 0.12,
+                    720.0 * 0.92,
+                    900.0,
+                    520.0,
+                    0.70,
+                    [58.0, 43.0, 78.0, 0.65],
+                );
+                let top = sample(
+                    1280.0 * 0.78,
+                    720.0 * 0.08,
+                    720.0,
+                    420.0,
+                    0.68,
+                    [201.0, 111.0, 87.0, 0.5],
+                );
+                let alpha = top[3] + bottom[3] * (1.0 - top[3]);
+                let rgb = if alpha > 0.0 {
+                    [0, 1, 2].map(|channel| {
+                        (top[channel] * top[3] + bottom[channel] * bottom[3] * (1.0 - top[3]))
+                            / alpha
+                    })
+                } else {
+                    [0.0; 3]
+                };
+                let offset = (y * WIDTH + x) * 4;
+                let dither = [[-0.75, 0.25], [0.75, -0.25]][y % 2][x % 2];
+                rgba[offset..offset + 4].copy_from_slice(&[
+                    (rgb[0] + dither).round().clamp(0.0, 255.0) as u8,
+                    (rgb[1] + dither).round().clamp(0.0, 255.0) as u8,
+                    (rgb[2] + dither).round().clamp(0.0, 255.0) as u8,
+                    (alpha * 0.55 * 255.0).round() as u8,
+                ]);
+            }
+        }
+        encoded_png(
+            u32::try_from(WIDTH).unwrap(),
+            u32::try_from(HEIGHT).unwrap(),
+            &rgba,
+        )
+    });
+    ImageSource::new(
+        "quiet-console:aura-ridgeline:201-111-87@0.5/68%;58-43-78@0.65/70%;opacity=0.55",
+        bytes.clone(),
+    )
+}
+
 fn add_explicit_action_name(action_node: &mut Node) {
     fn contains(outer: Bounds, inner: Bounds) -> bool {
         inner.x >= outer.x
@@ -5690,13 +6053,18 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.starts_with("room-keycap-")
+    let radius = if id.starts_with("home-prompt-keycap-0")
+        || id.starts_with("room-keycap-")
         || id.contains("keycap")
             && (id.to_ascii_lowercase().contains("select")
                 || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id == "attention"
+    } else if id.starts_with("home-prompt-keycap-")
+        || id == "attention"
+        || id == "attention-pill"
+        || id == "attention-pill-border"
+        || id == "attention-dot"
         || id.contains("status-dot")
         || id.contains("-pip")
         || id.starts_with("favorite-pin-")
@@ -5737,7 +6105,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         None
     };
     if let Some(radius) = radius {
-        node.corner_radius = radius * scale;
+        node.corner_radius = (radius * scale).min(node.bounds.width.min(node.bounds.height) / 2.0);
     }
     for child in &mut node.children {
         apply_quiet_console_radius(child, scale);
@@ -5990,7 +6358,6 @@ mod tests {
             .unwrap();
         let debug = format!("{scene:?}");
         assert!(debug.contains("rooms"));
-        assert!(debug.contains("status-cluster"));
 
         let Some(Effect::ChangePreference(first)) = c.action(&ShellAction::Activate) else {
             panic!("first visible row must activate");
@@ -6963,6 +7330,15 @@ mod tests {
     }
 
     fn fixture_core(items: Vec<pf_catalog::CatalogItem>) -> ShellCore {
+        struct FixtureStatus;
+        impl DeviceStatusPort for FixtureStatus {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 82,
+                    attention_message: None,
+                })
+            }
+        }
         let snapshot = CatalogSnapshot {
             revision: 10,
             observed_at_unix_seconds: 0,
@@ -6972,7 +7348,89 @@ mod tests {
         };
         let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
+        core.load_device_status(&FixtureStatus);
         core
+    }
+
+    #[test]
+    fn quick_is_contextual_between_home_and_details() {
+        let mut home = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        assert_eq!(home.action(&ShellAction::Custom("Quick".into())), None);
+        assert_eq!(home.route(), Route::Quick);
+
+        let mut details = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        details.selected_item = Some(0);
+        details.go(Route::Details);
+        assert_eq!(
+            details.action(&ShellAction::Custom("Quick".into())),
+            Some(Effect::ToggleFavorite {
+                item_id: "ready".into(),
+                favorite: true,
+            })
+        );
+        assert_eq!(details.route(), Route::Details);
+    }
+
+    #[test]
+    fn unavailable_device_status_and_time_are_absent_from_chrome() {
+        struct Unavailable;
+        impl DeviceStatusPort for Unavailable {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Err("unavailable".into())
+            }
+        }
+        let mut core = fixture_core(vec![]);
+        core.load_device_status(&Unavailable);
+        let scene = settings_scene(&core);
+        for id in [
+            "battery-outline",
+            "battery-cavity",
+            "battery-level",
+            "battery-terminal",
+            "status-cluster",
+            "attention-pill",
+        ] {
+            assert!(node_by_id(scene.root(), id).is_none(), "unexpected {id}");
+        }
+        assert!(node_by_id(scene.root(), "status-bar").is_none());
+    }
+
+    #[test]
+    fn hero_wash_starts_at_top_and_has_local_dither_variance() {
+        let core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        let scene = settings_scene(&core);
+        let wash = node_by_id(scene.root(), "hero-wash").unwrap();
+        assert!(wash.bounds.y.abs() < f32::EPSILON);
+        let pf_scene::NodeContent::Image { source, .. } = &wash.content else {
+            panic!("wash must be an image");
+        };
+        let decoder = png::Decoder::new(Cursor::new(source.bytes.as_ref()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        let stride = info.width as usize * 4;
+        let mut values = std::collections::HashSet::new();
+        for y in 120..136 {
+            for x in 600..616 {
+                values.insert(pixels[y * stride + x * 4]);
+            }
+        }
+        assert!(
+            values.len() > 1,
+            "mid-gradient tile must not be a flat band"
+        );
     }
 
     #[test]
@@ -9483,6 +9941,141 @@ mod tests {
     }
 
     #[test]
+    fn chrome_status_uses_observed_battery_and_optional_attention() {
+        struct Status(u8, Option<&'static str>);
+        impl DeviceStatusPort for Status {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: self.0,
+                    attention_message: self.1.map(str::to_owned),
+                })
+            }
+        }
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.load_device_status(&Status(25, None));
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(
+            (node_by_id(scene.root(), "battery-level")
+                .unwrap()
+                .bounds
+                .width
+                - 4.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(node_by_id(scene.root(), "attention-pill").is_none());
+        assert!(node_by_id(scene.root(), "wifi-glyph").is_none());
+
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(node_by_id(scene.root(), "wifi-glyph").is_some());
+
+        core.load_device_status(&Status(100, Some("Controller battery low")));
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(
+            (node_by_id(scene.root(), "battery-level")
+                .unwrap()
+                .bounds
+                .width
+                - 16.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
+            Some("Controller battery low")
+        );
+        let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
+        assert!((pill_border.bounds.x - 1043.0).abs() <= 2.0);
+        assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
+        assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
+        assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
+        assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
+        assert_eq!(pill_border.style_token, "--color-border-hairline");
+        assert_eq!(
+            node_by_id(scene.root(), "attention-pill")
+                .unwrap()
+                .style_token,
+            "--color-surface-raised"
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention")
+                .unwrap()
+                .ink_token
+                .as_deref(),
+            Some("--color-text-secondary")
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention-dot")
+                .unwrap()
+                .style_token,
+            "--color-status-attention"
+        );
+        let wash = node_by_id(scene.root(), "hero-wash").unwrap();
+        assert!(wash.accessible_label.contains("rgba(201,111,87,0.5)"));
+        assert!(wash.accessible_label.contains("transparent 68%"));
+        assert!(wash.accessible_label.contains("rgba(58,43,78,0.65)"));
+        assert!(wash.accessible_label.contains("transparent 70%"));
+        assert!(wash.accessible_label.contains("opacity 0.55"));
+        assert!(matches!(wash.content, pf_scene::NodeContent::Image { .. }));
+    }
+
+    #[test]
+    fn chrome_navigation_and_system_status_float_on_the_wash() {
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        let scene = core.scene(metrics, "").unwrap();
+
+        for id in [
+            "rooms",
+            "status-cluster",
+            "room-home",
+            "room-library",
+            "room-settings",
+        ] {
+            assert_eq!(
+                node_by_id(scene.root(), id).unwrap().style_token,
+                "--color-transparent",
+                "{id} must not paint a raised strip behind floating chrome"
+            );
+        }
+        for id in ["room-keycap-left-fill", "room-keycap-right-fill"] {
+            assert_eq!(
+                node_by_id(scene.root(), id).unwrap().style_token,
+                "--color-surface-raised",
+                "keycaps retain their designed raised fill"
+            );
+        }
+    }
+
+    #[test]
     fn chrome_text_uses_contrasting_bar_surfaces_in_dusk_and_high_contrast() {
         fn luminance(hex: &str) -> f64 {
             let channel = |offset| {
@@ -10074,7 +10667,7 @@ mod tests {
                 binding: "A".into(),
             }]
         };
-        let supplied_footer = "A  Open     PF  Safe Return · button below the d-pad\u{1f}X";
+        let supplied_footer = "A  Open     PF  Safe Return";
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -10119,10 +10712,21 @@ mod tests {
         ]);
         core.items[3].favorite = true;
         core.set_control_bindings(bindings());
-        assert_eq!(
-            prompt(&core.scene(metrics, supplied_footer).unwrap()),
-            "A Open     PF  Safe Return · button below the d-pad     X  Favorite"
+        let home = core.scene(metrics, supplied_footer).unwrap();
+        assert_eq!(prompt(&home), "A Open · PF  Safe Return");
+        let prompts = node_by_id(home.root(), "prompts").unwrap();
+        let footer_top = metrics.logical_height - PROMPTS_AREA_HEIGHT;
+        assert!(prompts.bounds.x >= 0.0);
+        assert!(prompts.bounds.x + prompts.bounds.width <= metrics.logical_width);
+        assert!(prompts.bounds.y >= footer_top);
+        assert!(
+            prompts
+                .children
+                .iter()
+                .all(|child| child.bounds.y >= footer_top
+                    && child.bounds.y + child.bounds.height <= metrics.logical_height)
         );
+        assert!(node_by_id(home.root(), "home-prompt-keycap-0").is_some());
         assert_eq!(
             core.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {
@@ -10134,7 +10738,7 @@ mod tests {
         core.focus = 1;
         assert_eq!(
             prompt(&core.scene(metrics, supplied_footer).unwrap()),
-            "A Open     PF  Safe Return · button below the d-pad     X  Unfavorite"
+            "A Open · PF  Safe Return"
         );
         assert_eq!(
             core.action(&ShellAction::Activate),
@@ -10414,6 +11018,15 @@ mod tests {
             })
         }
 
+        fn assert_radius(root: &Node, id: &str, token_radius: f32) {
+            let node = find(root, id);
+            assert_eq!(
+                node.corner_radius,
+                token_radius.min(node.bounds.width.min(node.bounds.height) / 2.0),
+                "{id} must clamp its token radius to CSS corner bounds"
+            );
+        }
+
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -10427,77 +11040,50 @@ mod tests {
             core.text_scale = text_scale;
 
             let home = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(home.root(), "item-i0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(home.root(), "home-card-art-i0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(home.root(), "room-keycap-left").corner_radius,
-                6.0 * multiplier
-            );
+            assert_radius(home.root(), "item-i0", 10.0 * multiplier);
+            assert_radius(home.root(), "home-card-art-i0", 10.0 * multiplier);
+            assert_radius(home.root(), "room-keycap-left", 6.0 * multiplier);
 
             core.go(Route::Library);
             let library = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(library.root(), "library-search").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(library.root(), "library-filter-0").corner_radius,
-                10.0 * multiplier
-            );
-            assert_eq!(
-                find(library.root(), "library-item-i0").corner_radius,
-                10.0 * multiplier
-            );
+            assert_radius(library.root(), "library-search", 10.0 * multiplier);
+            assert_radius(library.root(), "library-filter-0", 10.0 * multiplier);
+            assert_radius(library.root(), "library-item-i0", 10.0 * multiplier);
 
             core.selected_item = Some(0);
             core.go(Route::Details);
             let details = core.scene(metrics, "").unwrap();
-            assert_eq!(
-                find(details.root(), "detail-cover").corner_radius,
-                16.0 * multiplier
-            );
-            assert_eq!(
-                find(details.root(), "detail-variant-0").corner_radius,
-                10.0 * multiplier
-            );
+            assert_radius(details.root(), "detail-cover", 16.0 * multiplier);
+            assert_radius(details.root(), "detail-variant-0", 10.0 * multiplier);
 
             core.load_preferences(&preferences(true), true).unwrap();
             core.text_scale = text_scale;
             core.go(Route::Settings);
             let settings = settings_scene(&core);
-            assert_eq!(
-                find(settings.root(), "settings-nav-accessibility").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-nav-accessibility",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(settings.root(), "settings-row-accessibility-textScale").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-row-accessibility-textScale",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(settings.root(), "settings-text-scale-segmented-control").corner_radius,
-                10.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-text-scale-segmented-control",
+                10.0 * multiplier,
             );
-            assert_eq!(
-                find(
-                    settings.root(),
-                    "settings-toggle-accessibility-highContrast-track"
-                )
-                .corner_radius,
-                999.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-toggle-accessibility-highContrast-track",
+                999.0 * multiplier,
             );
-            assert_eq!(
-                find(
-                    settings.root(),
-                    "settings-toggle-accessibility-highContrast-knob"
-                )
-                .corner_radius,
-                999.0 * multiplier
+            assert_radius(
+                settings.root(),
+                "settings-toggle-accessibility-highContrast-knob",
+                999.0 * multiplier,
             );
         }
     }

@@ -3280,6 +3280,19 @@ impl ShellCore {
                 }
                 out.push(card);
             }
+            // pf-scene has no ancestor clipping primitive. Paint the canvas back over the
+            // overflow before footer chrome is emitted so the partial row remains a crop of
+            // full-size covers rather than rescaling their art into the remaining height.
+            out.push(node(
+                "library-grid-footer-clip",
+                Role::Group,
+                "",
+                0.0,
+                h - PROMPTS_AREA_HEIGHT,
+                w,
+                PROMPTS_AREA_HEIGHT,
+                "--color-surface-canvas",
+            ));
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -5322,7 +5335,14 @@ fn add_unavailable_card_cues(
 ) {
     let home = context == "home-card";
     let art_height = CARD_ART_HEIGHT;
-    if item.id == "steam-link" {
+    if matches!(availability, Availability::Ready)
+        && best_variant(item).is_some_and(|variant| {
+            variant
+                .requirements
+                .iter()
+                .any(|requirement| !requirement.optional && requirement.capability == "network")
+        })
+    {
         nodes.push(
             node(
                 &format!("{context}-badge-{}", item.id),
@@ -5517,22 +5537,25 @@ fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
 fn best_availability(item: &Item) -> &Availability {
     static NO_VARIANTS: OnceLock<Availability> = OnceLock::new();
 
+    best_variant(item).map_or_else(
+        || {
+            eprintln!(
+                "pf-shell: catalog item {} has no variants; rendering it unavailable",
+                item.id
+            );
+            NO_VARIANTS.get_or_init(|| Availability::UnsupportedCapability {
+                capability: "catalog item has no variants".into(),
+            })
+        },
+        |variant| &variant.availability,
+    )
+}
+
+fn best_variant(item: &Item) -> Option<&Variant> {
     item.variants
         .iter()
         .find(|variant| matches!(variant.availability, Availability::Ready))
         .or_else(|| item.variants.first())
-        .map_or_else(
-            || {
-                eprintln!(
-                    "pf-shell: catalog item {} has no variants; rendering it unavailable",
-                    item.id
-                );
-                NO_VARIANTS.get_or_init(|| Availability::UnsupportedCapability {
-                    capability: "catalog item has no variants".into(),
-                })
-            },
-            |variant| &variant.availability,
-        )
 }
 fn kind_text(kind: &AppKind) -> &'static str {
     match kind {
@@ -5799,7 +5822,8 @@ mod tests {
         );
     }
     use pf_catalog::{
-        AppKind, AppManifestRef, Presentation as CP, Provenance, UserProjection, Variant,
+        AppKind, AppManifestRef, Presentation as CP, Provenance, Requirement, UserProjection,
+        Variant,
     };
     use pf_ports::{FakePowerPort, FakePreferencePort, PreferenceChangeResult};
     use std::path::PathBuf;
@@ -7464,6 +7488,63 @@ mod tests {
     }
 
     #[test]
+    fn ready_network_cues_follow_the_selected_variants_requirement_not_item_identity() {
+        let mut differently_named = variant("stream", "moonlight", Availability::Ready);
+        differently_named.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let ordinary = variant("native", "ordinary", Availability::Ready);
+        let mut steam_link = variant("stream", "steam-link", Availability::Ready);
+        steam_link.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let core = fixture_core(vec![
+            item("moonlight", "Moonlight", vec![differently_named]),
+            item("ordinary", "Ordinary", vec![ordinary]),
+            item("steam-link", "Steam Link", vec![steam_link]),
+        ]);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        for id in ["moonlight", "steam-link"] {
+            let card = node_by_id(scene.root(), &format!("item-{id}")).unwrap();
+            assert_eq!(
+                node_by_id(card, &format!("home-card-badge-{id}"))
+                    .unwrap()
+                    .accessible_label,
+                "⊘ Network"
+            );
+            assert_eq!(
+                node_by_id(card, &format!("home-card-reason-{id}"))
+                    .unwrap()
+                    .accessible_label,
+                "⊘ Network required"
+            );
+        }
+        let ordinary = node_by_id(scene.root(), "item-ordinary").unwrap();
+        assert!(node_by_id(ordinary, "home-card-badge-ordinary").is_none());
+        assert!(node_by_id(ordinary, "home-card-reason-ordinary").is_none());
+        assert_eq!(
+            node_by_id(scene.root(), "home-shelf-label")
+                .unwrap()
+                .accessible_label,
+            "READY NOW · 3"
+        );
+    }
+
+    #[test]
     fn identity_plate_text_uses_the_selected_palette_foreground() {
         for (id, expected_ink) in [
             ("steam-link", "--deco-plate-a-fg"),
@@ -9088,6 +9169,63 @@ mod tests {
                 "the maximum fitting rows must be emitted at {width}x{height}"
             );
         }
+    }
+
+    #[test]
+    fn library_footer_clip_preserves_an_undistorted_second_row_peek() {
+        let items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let footer_top = 720.0 - PROMPTS_AREA_HEIGHT;
+        let second_row_art = node_by_id(root, "library-card-art-item-6").unwrap();
+        assert!(second_row_art.bounds.y < footer_top);
+        assert!(second_row_art.bounds.y + second_row_art.bounds.height > footer_top);
+        assert!((second_row_art.bounds.height - CARD_ART_HEIGHT).abs() < f32::EPSILON);
+
+        let clip_index = root
+            .children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-clip")
+            .unwrap();
+        let last_card_index = root
+            .children
+            .iter()
+            .rposition(|node| node.id.as_str().starts_with("library-item-"))
+            .unwrap();
+        let clip = &root.children[clip_index];
+        assert!(
+            clip_index > last_card_index,
+            "clip must paint after every grid card"
+        );
+        assert!((clip.bounds.y - footer_top).abs() < f32::EPSILON);
+        assert!((clip.bounds.height - PROMPTS_AREA_HEIGHT).abs() < f32::EPSILON);
+        assert_eq!(clip.style_token, "--color-surface-canvas");
     }
 
     #[test]

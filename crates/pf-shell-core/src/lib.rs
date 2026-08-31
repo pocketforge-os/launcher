@@ -23,7 +23,7 @@ use pf_ports::{
 };
 use pf_scene::{
     AxisMove, Bounds, Elevation, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene,
-    SurfaceMetrics, TypeRole,
+    SurfaceMetrics, TextAlign, TypeRole,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
@@ -35,12 +35,17 @@ use std::time::{Duration, SystemTime};
 
 const STATUS_BAR_HEIGHT: f32 = 64.0;
 const PROMPTS_AREA_HEIGHT: f32 = 60.0;
-const HOME_SHELF_LIMIT: usize = 8;
+const HOME_SHELF_LIMIT: usize = 6;
+const HOME_SHELF_GAP: f32 = 47.2;
 const LIBRARY_SIDE_MARGIN: f32 = 48.0;
 const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CHIP_HORIZONTAL_PADDING: f32 = 24.0;
 const CHIP_COUNT_GAP: f32 = 8.0;
+const CARD_ART_WIDTH: f32 = 158.0;
+const CARD_ART_HEIGHT: f32 = 210.0;
+const CARD_LABEL_GAP: f32 = 12.0;
+const CARD_CAPTION_GAP: f32 = 2.0;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
@@ -91,7 +96,7 @@ fn ready_variant_capability(variant: &Variant) -> ReadyVariantCapability {
 
 fn ready_variant_capability_cue(variant: &Variant) -> &'static str {
     match ready_variant_capability(variant) {
-        ReadyVariantCapability::Native => "Installed on this device",
+        ReadyVariantCapability::Native => "Installed",
         ReadyVariantCapability::Stream => "Available over the network",
         ReadyVariantCapability::Unknown => "Source availability unknown",
     }
@@ -137,17 +142,32 @@ impl LibraryGeometry {
 }
 
 fn library_geometry(surface_width: f32) -> LibraryGeometry {
-    let (columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
+    let (preferred_columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
         (6, 4, 184.0)
     } else if surface_width >= 760.0 {
         (4, 4, 252.0)
     } else {
         (3, 2, 320.0)
     };
-    let card_left = 48.0;
-    let card_gap = 16.0;
-    let card_width =
-        (surface_width - 2.0 * card_left - (columns - 1) as f32 * card_gap) / columns as f32;
+    let card_left = LIBRARY_SIDE_MARGIN;
+    let card_width = CARD_ART_WIDTH;
+    let mut columns = preferred_columns;
+    while columns > 1
+        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * 16.0
+            > surface_width
+    {
+        columns -= 1;
+    }
+    // The desktop mockup fixes the cover width and distributes the remaining content
+    // width between columns. Narrower breakpoints retain their existing fluid spacing.
+    let card_gap = if columns == 1 {
+        0.0
+    } else if columns == 6 {
+        (surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32
+    } else {
+        ((surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32)
+            .max(16.0)
+    };
     LibraryGeometry {
         columns,
         card_width,
@@ -542,6 +562,7 @@ struct Item {
     kind: AppKind,
     tags: Vec<String>,
     playtime_fact: Option<String>,
+    developer: Option<String>,
     art: Option<ImageSource>,
     art_failed: bool,
     variants: Vec<Variant>,
@@ -646,7 +667,7 @@ impl ShellCore {
 
     #[must_use]
     pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
-        Self::boot_with_art(snapshot, theme, reduced_motion, |_| None)
+        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
     }
 
     #[must_use]
@@ -657,7 +678,7 @@ impl ShellCore {
         mut resolve_art: F,
     ) -> Self
     where
-        F: FnMut(&str) -> Option<Arc<[u8]>>,
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let favorites = &snapshot.user_projection.favorite_item_ids;
         let pins = &snapshot.user_projection.pinned_variant_ids;
@@ -670,7 +691,7 @@ impl ShellCore {
                     .icon_reference
                     .as_deref()
                     .filter(|_| item.presentation.icon_decodable)
-                    .and_then(&mut resolve_art)
+                    .and_then(|reference| resolve_art(item, reference))
                     .map(|bytes| {
                         let digest = Sha256::digest(&bytes);
                         ImageSource::new(format!("sha256:{digest:x}"), bytes)
@@ -684,6 +705,10 @@ impl ShellCore {
                         .tags
                         .iter()
                         .find_map(|tag| tag.strip_prefix("playtime:").map(str::to_owned)),
+                    developer: item
+                        .tags
+                        .iter()
+                        .find_map(|tag| tag.strip_prefix("developer:").map(str::to_owned)),
                     art,
                     art_failed: false,
                     variants: item.variants.clone(),
@@ -1342,18 +1367,14 @@ impl ShellCore {
                 .copied(),
             Route::Search => self.search_results.get(self.focus).copied(),
             Route::Details | Route::VariantChooser => self.selected_item,
-            Route::Home => {
-                if self.focus < self.items.len() {
-                    Some(self.focus)
-                } else {
-                    self.items
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, item)| item.favorite)
-                        .nth(self.focus - self.items.len())
-                        .map(|(i, _)| i)
-                }
-            }
+            Route::Home => self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                .take(HOME_SHELF_LIMIT)
+                .nth(self.focus)
+                .map(|(index, _)| index),
             _ => None,
         }
     }
@@ -1377,7 +1398,13 @@ impl ShellCore {
             && let Some(item_id) = id.strip_prefix("item-")
             && let Some(index) = self.items.iter().position(|item| item.id == item_id)
             && let Some(focus) = match self.caller_route {
-                Route::Home => (index < self.focus_count()).then_some(index),
+                Route::Home => self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                    .take(HOME_SHELF_LIMIT)
+                    .position(|(item_index, _)| item_index == index),
                 Route::Library => self
                     .library_items
                     .iter()
@@ -2165,7 +2192,13 @@ impl ShellCore {
     }
     fn focus_count(&self) -> usize {
         match self.route {
-            Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
+            Route::Home => self
+                .items
+                .iter()
+                .filter(|item| matches!(best_availability(item), Availability::Ready))
+                .take(HOME_SHELF_LIMIT)
+                .count()
+                .max(1),
             Route::Library => self.library_items.len() + 5,
             Route::Search => self.search_results.len().max(1),
             Route::Details => self.detail_pin_focus() + 1,
@@ -2547,19 +2580,19 @@ impl ShellCore {
                     Role::Group,
                     "",
                     x - 4.0,
-                    12.0,
+                    16.0,
                     width + 8.0,
-                    34.0,
+                    24.0,
                     "--color-border-strong",
                 ));
                 children.push(node(
                     &format!("{id}-fill"),
                     Role::Group,
                     "",
-                    x - 2.0,
-                    14.0,
-                    width + 4.0,
-                    30.0,
+                    x - 3.0,
+                    17.0,
+                    width + 6.0,
+                    22.0,
                     "--color-surface-raised",
                 ));
                 children.push(
@@ -2568,9 +2601,9 @@ impl ShellCore {
                         Role::Text,
                         label,
                         x,
-                        16.0,
+                        17.0,
                         width,
-                        26.0,
+                        22.0,
                         "--color-surface-raised",
                     )
                     .with_type_role(TypeRole::Caption),
@@ -2612,7 +2645,7 @@ impl ShellCore {
                 266.0,
                 520.0,
                 32.0,
-                "--color-text-secondary",
+                "--color-surface-canvas",
             ));
         }
         match self.presentation {
@@ -2741,6 +2774,7 @@ impl ShellCore {
         );
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
+            add_explicit_action_name(child);
             apply_quiet_console_radius(child, radius_scale);
         }
         let focus_id = children
@@ -2898,11 +2932,13 @@ impl ShellCore {
                     "--color-status-attention",
                 ));
             }
-            let ready_count = self
+            let ready_items = self
                 .items
                 .iter()
                 .filter(|item| matches!(best_availability(item), Availability::Ready))
-                .count();
+                .take(HOME_SHELF_LIMIT)
+                .collect::<Vec<_>>();
+            let ready_count = ready_items.len();
             content.push(
                 node(
                     "home-shelf-label",
@@ -2916,51 +2952,63 @@ impl ShellCore {
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
-            let count = self.items.len().min(HOME_SHELF_LIMIT);
-            let gap = 16.0;
-            let card_width = ((w - 96.0 - gap * count.saturating_sub(1) as f32)
-                / count.max(1) as f32)
-                .min(136.0);
-            for (i, item) in self.items.iter().take(HOME_SHELF_LIMIT).enumerate() {
+            let shelf_count = ready_items.len();
+            let card_width = CARD_ART_WIDTH;
+            let horizontal_margin = 48.0;
+            let available = (w - horizontal_margin * 2.0).max(0.0);
+            let mut visible_count = 1;
+            let mut occupied = card_width;
+            while visible_count < shelf_count
+                && horizontal_margin * 2.0 + occupied + HOME_SHELF_GAP + card_width <= w
+            {
+                visible_count += 1;
+                occupied += HOME_SHELF_GAP + card_width;
+            }
+            let first_visible = self
+                .focus
+                .saturating_sub(visible_count - 1)
+                .min(shelf_count.saturating_sub(visible_count));
+            let gap = if visible_count > 1 {
+                (available - card_width * visible_count as f32) / (visible_count - 1) as f32
+            } else {
+                0.0
+            };
+            for (i, item) in ready_items
+                .into_iter()
+                .skip(first_visible)
+                .take(visible_count)
+                .enumerate()
+            {
                 let availability = best_availability(item);
-                let x = 48.0 + i as f32 * (card_width + gap);
+                let x = horizontal_margin + i as f32 * (card_width + gap);
                 let mut n = node(
                     &format!("item-{}", item.id),
                     Role::ListItem,
                     &item.title,
-                    x + 8.0,
-                    390.0,
-                    card_width - 16.0,
-                    158.0,
-                    if i == self.focus {
-                        "--state-focused-ring"
-                    } else {
-                        "--color-surface-canvas"
-                    },
+                    x,
+                    388.0,
+                    card_width,
+                    CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + CARD_CAPTION_GAP + 14.0,
+                    "--color-surface-canvas",
                 );
                 n.action = Some(NodeAction::Activate);
-                n.state.focused = i == self.focus;
+                n.state.focused = i + first_visible == self.focus;
                 n.children = art_nodes(
                     item,
                     "home-card",
                     x,
-                    390.0,
+                    388.0,
                     card_width,
-                    158.0,
+                    CARD_ART_HEIGHT,
                     i == self.focus,
                 );
-                let title = n
-                    .children
-                    .iter()
-                    .position(|child| child.id.as_str() == format!("home-card-title-{}", item.id))
-                    .map(|index| n.children.remove(index));
                 add_unavailable_card_cues(
                     &mut n.children,
                     item,
                     availability,
                     "home-card",
                     x,
-                    390.0,
+                    388.0,
                     card_width,
                     Some(h - PROMPTS_AREA_HEIGHT),
                 );
@@ -2980,9 +3028,6 @@ impl ShellCore {
                     );
                 }
                 content.push(n);
-                if let Some(title) = title {
-                    content.push(title);
-                }
             }
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
@@ -3040,6 +3085,19 @@ impl ShellCore {
             );
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
+            search.children.push(
+                node(
+                    "library-search-placeholder",
+                    Role::Text,
+                    &format!("⌕  Search {} titles", self.items.len()),
+                    64.0,
+                    124.0,
+                    search_width - 32.0,
+                    28.0,
+                    "--state-rest-surface",
+                )
+                .with_type_role(TypeRole::Label),
+            );
             out.push(search);
             for (index, (label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
@@ -3132,26 +3190,19 @@ impl ShellCore {
                     ));
                 }
             }
-            let row_height = 292.0;
+            let row_height = 272.0;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
-            while card_top + (visible_rows + 1) as f32 * row_height - 18.0
-                <= h - PROMPTS_AREA_HEIGHT
-            {
+            while if geometry.columns == 6 {
+                card_top + 8.0 + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
+            } else {
+                card_top + 8.0 + visible_rows as f32 * row_height + CARD_ART_HEIGHT
+                    <= h - PROMPTS_AREA_HEIGHT
+            } {
                 visible_rows += 1;
             }
             let focused_row = self.focus.saturating_sub(5) / geometry.columns;
             let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
-            out.push(node(
-                "library-grid-scroll",
-                Role::Group,
-                "Library covers",
-                48.0,
-                card_top,
-                w - 96.0,
-                h - card_top - PROMPTS_AREA_HEIGHT,
-                "--color-surface-canvas",
-            ));
             for (i, &item_index) in self.library_items.iter().enumerate() {
                 let column = i % geometry.columns;
                 let row = i / geometry.columns;
@@ -3160,28 +3211,35 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
+                let card_y = card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height;
+                let title_fits =
+                    card_y + CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
                     &item.title,
-                    geometry.card_left
-                        + column as f32 * (geometry.card_width + geometry.card_gap)
-                        + 8.0,
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
-                    geometry.card_width - 16.0,
-                    136.0,
+                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
+                    card_y,
+                    geometry.card_width,
+                    if title_fits {
+                        CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
+                    } else {
+                        CARD_ART_HEIGHT
+                    },
                     "--color-surface-canvas",
                 );
                 card.state.focused = self.focus == i + 5;
-                card.state.unavailable = !matches!(availability, Availability::Ready);
+                // Availability is painted explicitly as an art veil plus badge so the status
+                // ink itself remains legible instead of being dimmed with the cover.
+                card.state.unavailable = false;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
                     "library-card",
-                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    card.bounds.x,
+                    card.bounds.y,
                     geometry.card_width,
-                    136.0,
+                    CARD_ART_HEIGHT,
                     self.focus == i + 5,
                 );
                 add_unavailable_card_cues(
@@ -3189,15 +3247,14 @@ impl ShellCore {
                     item,
                     availability,
                     "library-card",
-                    geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
-                    card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height,
+                    card.bounds.x,
+                    card.bounds.y,
                     geometry.card_width,
                     None,
                 );
                 card.children.retain(|child| {
                     !child.id.as_str().contains("-title-")
                         && !child.id.as_str().contains("-label-mask-")
-                        && !child.id.as_str().contains("-plate-")
                 });
                 if self.focus == i + 5
                     && let Some(art) = card
@@ -3208,34 +3265,52 @@ impl ShellCore {
                     art.style_token = "--state-focused-ring".into();
                     art.state.focused = true;
                 }
-                card.children.push(
-                    node(
-                        &format!("library-title-{}", item.id),
-                        Role::Text,
-                        &item.title,
-                        card.bounds.x - 8.0,
-                        card.bounds.y + 170.0,
-                        geometry.card_width,
-                        34.0,
-                        "--color-surface-canvas",
-                    )
-                    .with_type_role(TypeRole::Label),
-                );
+                if item.favorite {
+                    card.children.push(
+                        node(
+                            &format!("favorite-pin-{}", item.id),
+                            Role::Text,
+                            "★",
+                            card.bounds.x + geometry.card_width - 28.0,
+                            card.bounds.y + 8.0,
+                            20.0,
+                            20.0,
+                            "--color-surface-scrim",
+                        )
+                        .with_type_role(TypeRole::Caption),
+                    );
+                }
+                let title_y = card.bounds.y + CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                if title_fits {
+                    card.children.push(
+                        node(
+                            &format!("library-title-{}", item.id),
+                            Role::Text,
+                            &item.title,
+                            card.bounds.x,
+                            title_y,
+                            geometry.card_width,
+                            34.0,
+                            "--color-surface-canvas",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
+                }
                 out.push(card);
             }
-            let total_rows = self.library_items.len().div_ceil(geometry.columns);
-            if first_visible_row + visible_rows < total_rows {
-                out.push(node(
-                    "library-fold-fade",
-                    Role::Group,
-                    "More titles below",
-                    48.0,
-                    h - PROMPTS_AREA_HEIGHT - 32.0,
-                    w - 96.0,
-                    32.0,
-                    "--color-surface-scrim",
-                ));
-            }
+            // pf-scene has no ancestor clipping primitive. Paint the canvas back over the
+            // overflow before footer chrome is emitted so the partial row remains a crop of
+            // full-size covers rather than rescaling their art into the remaining height.
+            out.push(node(
+                "library-grid-footer-clip",
+                Role::Group,
+                "",
+                0.0,
+                h - PROMPTS_AREA_HEIGHT,
+                w,
+                PROMPTS_AREA_HEIGHT,
+                "--color-surface-canvas",
+            ));
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -3384,7 +3459,9 @@ impl ShellCore {
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
-            let description = if item.tags.is_empty() {
+            let description = if let Some(fact) = item.playtime_fact.as_deref() {
+                Some(format!("{} · {fact}", sentence_kind(&item.kind)))
+            } else {
                 match ready_variant.map(ready_variant_capability) {
                     Some(ReadyVariantCapability::Native) => Some(format!(
                         "{} is ready from the installed catalog.",
@@ -3395,12 +3472,6 @@ impl ShellCore {
                     }
                     None => None,
                 }
-            } else {
-                Some(format!(
-                    "{} · {}",
-                    sentence_kind(&item.kind),
-                    item.tags.join(" · ")
-                ))
             };
             if let Some(description) = description {
                 out.push(node(
@@ -3660,6 +3731,19 @@ impl ShellCore {
                     );
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
+                    open.children.push(
+                        node(
+                            "detail-open-label",
+                            Role::Text,
+                            &open.accessible_label,
+                            open.bounds.x + 16.0,
+                            open.bounds.y + 13.0,
+                            open.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(open);
                     let pin_label = if item.favorite {
                         "★ Unpin"
@@ -3690,6 +3774,19 @@ impl ShellCore {
                     );
                     pin.state.focused = self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
+                    pin.children.push(
+                        node(
+                            "detail-pin-label",
+                            Role::Text,
+                            pin_label,
+                            pin.bounds.x + 16.0,
+                            pin.bounds.y + 13.0,
+                            pin.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
                 } else {
@@ -3721,6 +3818,19 @@ impl ShellCore {
                     );
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
+                    pin.children.push(
+                        node(
+                            "detail-pin-label",
+                            Role::Text,
+                            &pin.accessible_label,
+                            pin.bounds.x + 16.0,
+                            pin.bounds.y + 13.0,
+                            pin.bounds.width - 32.0,
+                            28.0,
+                            "--state-rest-surface",
+                        )
+                        .with_type_role(TypeRole::Label),
+                    );
                     out.push(pin);
                     634.0
                 };
@@ -3762,7 +3872,9 @@ impl ShellCore {
                     let mut facts = vec![(
                         "developer",
                         "DEVELOPER",
-                        humanize_identifier(&variant.provenance.provider_id),
+                        item.developer.clone().unwrap_or_else(|| {
+                            humanize_identifier(&variant.provenance.provider_id)
+                        }),
                     )];
                     if ready_variant_capability(variant) == ReadyVariantCapability::Native {
                         facts.push((
@@ -4786,6 +4898,7 @@ impl ShellCore {
     }
 }
 
+#[allow(dead_code)]
 fn procedural_art_nodes(
     id: &str,
     title: &str,
@@ -5048,6 +5161,133 @@ fn procedural_art_nodes(
     nodes
 }
 
+fn plate_art_nodes(
+    item: &Item,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    art_height: f32,
+) -> Vec<Node> {
+    let identity = item.id.rsplit(':').next().unwrap_or(&item.id);
+    let hash = identity
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+        });
+    let favorite = context == "favorite-card";
+    let detail = context == "detail-art";
+    let art_x = if favorite { x + 4.0 } else { x };
+    let art_y = if favorite { y + 4.0 } else { y };
+    let art_width = if favorite { 56.0 } else { width };
+    let kind = item
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("kind-label:"))
+        .unwrap_or_else(|| sentence_kind(&item.kind))
+        .to_uppercase();
+    let initial = item.title.chars().next().unwrap_or('?').to_string();
+    let (plate_name, plate_bytes, plate_ink): (&str, &'static [u8], &str) = match identity {
+        "steam-link" => (
+            "plate-a",
+            include_bytes!("../../pf-shell/fixtures/art/plate-a.png"),
+            "--deco-plate-a-fg",
+        ),
+        "tidelines" => (
+            "plate-d",
+            include_bytes!("../../pf-shell/fixtures/art/plate-d.png"),
+            "--deco-plate-d-fg",
+        ),
+        "button-tester" => (
+            "plate-c",
+            include_bytes!("../../pf-shell/fixtures/art/plate-c.png"),
+            "--deco-plate-c-fg",
+        ),
+        _ => [
+            (
+                "plate-a",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-a.png")[..],
+                "--deco-plate-a-fg",
+            ),
+            (
+                "plate-d",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-d.png")[..],
+                "--deco-plate-d-fg",
+            ),
+            (
+                "plate-c",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-c.png")[..],
+                "--deco-plate-c-fg",
+            ),
+        ][(hash % 3) as usize],
+    };
+    let mut art = node(
+        &format!("{context}-art-{}", item.id),
+        Role::Group,
+        &format!("{} {plate_name} identity plate", item.title),
+        art_x,
+        art_y,
+        art_width,
+        art_height,
+        "--color-surface-raised",
+    );
+    art = art.with_image(
+        ImageSource::new(format!("fixture-art:{plate_name}.png"), plate_bytes),
+        ImageFit::Cover,
+    );
+    let mut nodes = vec![art];
+    nodes.push(
+        node(
+            &format!("{context}-initial-plate-{}", item.id),
+            Role::Text,
+            &initial,
+            art_x + (art_width - 72.0) / 2.0,
+            art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0,
+            72.0,
+            56.0,
+            "--color-transparent",
+        )
+        .with_type_role(TypeRole::Plate)
+        .with_ink_token(plate_ink)
+        .with_text_align(TextAlign::Center),
+    );
+    nodes.push(
+        node(
+            &format!("{context}-plate-kind-{}", item.id),
+            Role::Text,
+            &kind,
+            art_x + (art_width - 88.0) / 2.0,
+            art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0 + 64.0,
+            88.0,
+            24.0,
+            "--color-transparent",
+        )
+        .with_type_role(TypeRole::Eyebrow)
+        .with_ink_token(plate_ink)
+        .with_text_align(TextAlign::Center),
+    );
+    if !detail {
+        nodes.push(
+            node(
+                &format!("{context}-title-{}", item.id),
+                Role::Text,
+                &item.title,
+                if favorite { x + 68.0 } else { x },
+                if favorite {
+                    y + 32.0
+                } else {
+                    y + art_height + CARD_LABEL_GAP
+                },
+                if favorite { width - 72.0 } else { width },
+                if favorite { 32.0 } else { 28.0 },
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+    }
+    nodes
+}
+
 fn art_nodes(
     item: &Item,
     context: &str,
@@ -5062,19 +5302,19 @@ fn art_nodes(
         let favorite = context == "favorite-card";
         let detail = context == "detail-art";
         let label_y = if home {
-            y + 166.0
+            y + art_height + CARD_LABEL_GAP
         } else if favorite {
             y + 32.0
         } else {
-            y + 176.0
+            y + art_height + CARD_LABEL_GAP
         };
         let mut image = node(
             &format!("{context}-art-{}", item.id),
             Role::Group,
             &format!("{} cover art", item.title),
-            if favorite { x + 4.0 } else { x + 8.0 },
+            if favorite { x + 4.0 } else { x },
             if favorite { y + 4.0 } else { y },
-            if favorite { 56.0 } else { width - 16.0 },
+            if favorite { 56.0 } else { width },
             art_height,
             "--state-rest-surface",
         );
@@ -5097,17 +5337,8 @@ fn art_nodes(
             .with_type_role(TypeRole::Label),
         ];
     }
-    procedural_art_nodes(
-        &item.id,
-        &item.title,
-        Some(kind_text(&item.kind)),
-        context,
-        x,
-        y,
-        width,
-        art_height,
-        focused,
-    )
+    let _ = focused;
+    plate_art_nodes(item, context, x, y, width, art_height)
 }
 
 fn add_unavailable_card_cues(
@@ -5120,11 +5351,61 @@ fn add_unavailable_card_cues(
     width: f32,
     footer_top: Option<f32>,
 ) {
+    let art_height = CARD_ART_HEIGHT;
+    if matches!(availability, Availability::Ready)
+        && best_variant(item).is_some_and(|variant| {
+            variant
+                .requirements
+                .iter()
+                .any(|requirement| !requirement.optional && requirement.capability == "network")
+        })
+    {
+        nodes.push(
+            node(
+                &format!("{context}-badge-{}", item.id),
+                Role::Text,
+                "⊘ Network",
+                x + 10.0,
+                y + art_height - 46.0,
+                92.0,
+                28.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+        nodes.push(
+            node(
+                &format!("{context}-reason-{}", item.id),
+                Role::Text,
+                "⊘ Network required",
+                x,
+                y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP,
+                width,
+                20.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+    }
+    if matches!(availability, Availability::IncompatibleRuntime { .. }) {
+        nodes.push(
+            node(
+                &format!("{context}-badge-{}", item.id),
+                Role::Text,
+                "◉ Update",
+                x + 10.0,
+                y + art_height - 46.0,
+                84.0,
+                28.0,
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Caption),
+        );
+        return;
+    }
     if matches!(availability, Availability::Ready) {
         return;
     }
-    let home = context == "home-card";
-    let art_height = if home { 158.0 } else { 136.0 };
     let badge = match availability {
         Availability::NeedsNetwork { .. } => "Network",
         Availability::NeedsSetup { .. } => "Setup",
@@ -5132,26 +5413,30 @@ fn add_unavailable_card_cues(
         Availability::UnsupportedCapability { .. } => "Unavailable",
         Availability::Ready => return,
     };
-    nodes.push(node(
-        &format!("{context}-veil-{}", item.id),
-        Role::Group,
-        "",
-        x + 8.0,
-        y,
-        width - 16.0,
-        art_height,
-        "--state-unavailable-veil",
-    ));
+    // Illustrated covers receive a dimming veil. Identity plates already encode their
+    // unavailable state with the art badge; veiling the plate would erase its mono/kind identity.
+    if item.art.is_some() && !item.art_failed {
+        nodes.push(node(
+            &format!("{context}-veil-{}", item.id),
+            Role::Group,
+            "",
+            x + 8.0,
+            y,
+            width - 16.0,
+            art_height,
+            "--state-unavailable-veil",
+        ));
+    }
     nodes.push(
         node(
             &format!("{context}-badge-{}", item.id),
             Role::Text,
             &format!("⊘ {badge}"),
-            x + width - 98.0,
-            y + 10.0,
+            x + 10.0,
+            y + art_height - 46.0,
             84.0,
             28.0,
-            "--color-surface-scrim",
+            "--color-surface-canvas",
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -5159,7 +5444,7 @@ fn add_unavailable_card_cues(
         "⊘ {}",
         availability_text(availability, &Presentation::Ready)
     );
-    let reason_y = if home { y + 194.0 } else { y + 204.0 };
+    let reason_y = y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP;
     let max_lines = footer_top.map(|footer_top| {
         let available_height = footer_top - reason_y;
         let mut lines = 1;
@@ -5182,7 +5467,7 @@ fn add_unavailable_card_cues(
             reason_y,
             width,
             8.0 + 20.0 * reason_lines,
-            "--color-text-muted",
+            "--color-surface-canvas",
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -5246,7 +5531,11 @@ fn availability_text(a: &Availability, p: &Presentation) -> String {
 
 fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
     let source = match &variant.availability {
-        Availability::Ready => ready_variant_capability_cue(variant),
+        Availability::Ready => match ready_variant_capability(variant) {
+            ReadyVariantCapability::Native => "Installed on this device",
+            ReadyVariantCapability::Stream => "Available over the network",
+            ReadyVariantCapability::Unknown => "Source availability unknown",
+        },
         Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => "Source not ready",
         Availability::UnsupportedCapability { .. } | Availability::IncompatibleRuntime { .. } => {
             "Source unavailable"
@@ -5258,22 +5547,25 @@ fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
 fn best_availability(item: &Item) -> &Availability {
     static NO_VARIANTS: OnceLock<Availability> = OnceLock::new();
 
+    best_variant(item).map_or_else(
+        || {
+            eprintln!(
+                "pf-shell: catalog item {} has no variants; rendering it unavailable",
+                item.id
+            );
+            NO_VARIANTS.get_or_init(|| Availability::UnsupportedCapability {
+                capability: "catalog item has no variants".into(),
+            })
+        },
+        |variant| &variant.availability,
+    )
+}
+
+fn best_variant(item: &Item) -> Option<&Variant> {
     item.variants
         .iter()
         .find(|variant| matches!(variant.availability, Availability::Ready))
         .or_else(|| item.variants.first())
-        .map_or_else(
-            || {
-                eprintln!(
-                    "pf-shell: catalog item {} has no variants; rendering it unavailable",
-                    item.id
-                );
-                NO_VARIANTS.get_or_init(|| Availability::UnsupportedCapability {
-                    capability: "catalog item has no variants".into(),
-                })
-            },
-            |variant| &variant.availability,
-        )
 }
 fn kind_text(kind: &AppKind) -> &'static str {
     match kind {
@@ -5347,6 +5639,45 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
     )
 }
 
+fn add_explicit_action_name(action_node: &mut Node) {
+    fn contains(outer: Bounds, inner: Bounds) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width
+            && inner.y + inner.height <= outer.y + outer.height
+    }
+    fn has_name(node: &Node, bounds: Bounds) -> bool {
+        node.children.iter().any(|child| {
+            (matches!(child.role, Role::Text | Role::Heading)
+                && !child.accessible_label.trim().is_empty()
+                && contains(bounds, child.bounds))
+                || has_name(child, bounds)
+        })
+    }
+
+    if action_node.action.is_some()
+        && !action_node.accessible_label.trim().is_empty()
+        && !has_name(action_node, action_node.bounds)
+    {
+        let mut label = node(
+            &format!("action-name-{}", action_node.id.as_str()),
+            Role::Text,
+            &action_node.accessible_label,
+            action_node.bounds.x,
+            action_node.bounds.y + (action_node.bounds.height - 34.0).max(0.0),
+            action_node.bounds.width.max(1.0),
+            28.0_f32.min(action_node.bounds.height),
+            "--color-surface-canvas",
+        )
+        .with_type_role(TypeRole::Label);
+        label.state = action_node.state;
+        action_node.children.push(label);
+    }
+    for child in &mut action_node.children {
+        add_explicit_action_name(child);
+    }
+}
+
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     const RADIUS_S: f32 = 6.0;
     const RADIUS_M: f32 = 10.0;
@@ -5359,20 +5690,22 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.contains("keycap")
-        && (id.to_ascii_lowercase().contains("select") || id.to_ascii_lowercase().contains("start"))
+    let radius = if id.starts_with("room-keycap-")
+        || id.contains("keycap")
+            && (id.to_ascii_lowercase().contains("select")
+                || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id.starts_with("room-keycap-")
-        || id == "attention"
+    } else if id == "attention"
         || id.contains("status-dot")
         || id.contains("-pip")
+        || id.starts_with("favorite-pin-")
         || id.contains("current-indicator")
         || id.starts_with("room-") && id.ends_with("-underline")
         || id.starts_with("settings-toggle-") && (id.ends_with("-track") || id.ends_with("-knob"))
     {
         Some(RADIUS_PILL)
-    } else if id.contains("press-marker") {
+    } else if id.contains("plate-frame-") || id.contains("press-marker") {
         Some(RADIUS_S)
     } else if id == "detail-cover"
         || id.starts_with("detail-art-")
@@ -5499,7 +5832,8 @@ mod tests {
         );
     }
     use pf_catalog::{
-        AppKind, AppManifestRef, Presentation as CP, Provenance, UserProjection, Variant,
+        AppKind, AppManifestRef, Presentation as CP, Provenance, Requirement, UserProjection,
+        Variant,
     };
     use pf_ports::{FakePowerPort, FakePreferencePort, PreferenceChangeResult};
     use std::path::PathBuf;
@@ -6641,6 +6975,155 @@ mod tests {
         core
     }
 
+    #[test]
+    fn narrow_home_keeps_every_painted_card_inside_the_surface() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let scene = fixture_core(items)
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 480.0,
+                    logical_height: 800.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Portrait,
+                },
+                "",
+            )
+            .unwrap();
+
+        for card in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("item-"))
+        {
+            assert!(
+                card.bounds.x >= 0.0,
+                "{} starts off-screen",
+                card.id.as_str()
+            );
+            assert!(
+                card.bounds.x + card.bounds.width <= 480.0,
+                "{} ends off-screen at {}",
+                card.id.as_str(),
+                card.bounds.x + card.bounds.width
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_library_keeps_every_painted_card_inside_the_surface() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 480.0,
+                    logical_height: 800.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Portrait,
+                },
+                "",
+            )
+            .unwrap();
+
+        for card in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-item-"))
+        {
+            assert!(
+                card.bounds.x >= 0.0,
+                "{} starts off-screen",
+                card.id.as_str()
+            );
+            assert!(
+                card.bounds.x + card.bounds.width <= 480.0,
+                "{} ends off-screen at {}",
+                card.id.as_str(),
+                card.bounds.x + card.bounds.width
+            );
+        }
+    }
+
+    #[test]
+    fn ready_now_skips_unavailable_catalog_entries_but_library_keeps_their_cues() {
+        let unavailable = item(
+            "offline",
+            "Offline Stream",
+            vec![variant(
+                "stream",
+                "offline-stream",
+                Availability::NeedsNetwork {
+                    reason: "connect to Wi-Fi".into(),
+                },
+            )],
+        );
+        let mut items = vec![unavailable];
+        items.extend((0..6).map(|index| {
+            item(
+                &format!("ready-{index}"),
+                &format!("Ready {index}"),
+                vec![variant(
+                    "native",
+                    &format!("ready-app-{index}"),
+                    Availability::Ready,
+                )],
+            )
+        }));
+        let mut core = fixture_core(items);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let home = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            node_by_id(home.root(), "home-shelf-label").map(|node| node.accessible_label.as_str()),
+            Some("READY NOW · 6")
+        );
+        assert!(node_by_id(home.root(), "item-offline").is_none());
+        for index in 0..6 {
+            assert!(node_by_id(home.root(), &format!("item-ready-{index}")).is_some());
+        }
+
+        core.go(Route::Library);
+        let library = core.scene(metrics, "").unwrap();
+        assert!(node_by_id(library.root(), "library-item-offline").is_some());
+        assert!(node_by_id(library.root(), "library-card-badge-offline").is_some());
+        assert!(node_by_id(library.root(), "library-card-reason-offline").is_some());
+    }
+
     fn node_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
         (node.id.as_str() == id)
             .then_some(node)
@@ -6724,7 +7207,7 @@ mod tests {
         let mut core = fixture_core(items);
         core.go(Route::Library);
 
-        for (width, columns) in [(640.0, 3), (800.0, 4), (1280.0, 6)] {
+        for (width, columns) in [(480.0, 2), (640.0, 3), (800.0, 4), (1280.0, 6)] {
             core.scene(
                 SurfaceMetrics {
                     logical_width: width,
@@ -6741,15 +7224,15 @@ mod tests {
             core.action(&ShellAction::Move(AxisMove::Right));
             assert_eq!(core.focus, 5 + columns - 1, "right edge at {width}px");
 
-            core.focus = 6;
+            core.focus = 5;
             core.action(&ShellAction::Move(AxisMove::Right));
             core.action(&ShellAction::Move(AxisMove::Left));
-            assert_eq!(core.focus, 6, "left/right inverse at {width}px");
+            assert_eq!(core.focus, 5, "left/right inverse at {width}px");
 
             core.action(&ShellAction::Move(AxisMove::Down));
-            assert_eq!(core.focus, 6 + columns, "down at {width}px");
+            assert_eq!(core.focus, 5 + columns, "down at {width}px");
             core.action(&ShellAction::Move(AxisMove::Up));
-            assert_eq!(core.focus, 6, "up/down inverse at {width}px");
+            assert_eq!(core.focus, 5, "up/down inverse at {width}px");
         }
     }
 
@@ -6897,7 +7380,7 @@ mod tests {
     }
 
     #[test]
-    fn library_fold_only_appears_when_content_exceeds_visible_capacity() {
+    fn library_never_paints_a_full_width_fold_band() {
         let scene_for_count = |count| {
             let items = (0..count)
                 .map(|index| {
@@ -6935,9 +7418,44 @@ mod tests {
         };
 
         assert!(!has_fold(&scene_for_count(3)));
-        assert!(has_fold(&scene_for_count(4)));
+        assert!(!has_fold(&scene_for_count(24)));
+    }
 
-        let items = (0..4)
+    #[test]
+    fn library_has_no_empty_painted_grid_container() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "app-0", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        assert!(
+            scene
+                .root()
+                .children
+                .iter()
+                .all(|node| node.id.as_str() != "library-grid-scroll"),
+            "the Library grid must not add an empty full-width painted strip"
+        );
+    }
+
+    #[test]
+    fn second_library_row_keeps_every_card_child_inside_its_card() {
+        let items = (0..7)
             .map(|index| {
                 item(
                     &format!("item-{index}"),
@@ -6952,24 +7470,10 @@ mod tests {
             .collect();
         let mut core = fixture_core(items);
         core.go(Route::Library);
-        core.scene(
-            SurfaceMetrics {
-                logical_width: 640.0,
-                logical_height: 720.0,
-                scale: 1.0,
-                safe_insets: Default::default(),
-                orientation: pf_scene::Orientation::Landscape,
-            },
-            "",
-        )
-        .unwrap();
-        core.focus = 5;
-        core.action(&ShellAction::Move(AxisMove::Down));
-        assert_eq!(core.focus, 8, "content below the fold is navigable");
-        let scrolled = core
+        let scene = core
             .scene(
                 SurfaceMetrics {
-                    logical_width: 640.0,
+                    logical_width: 1280.0,
                     logical_height: 720.0,
                     scale: 1.0,
                     safe_insets: Default::default(),
@@ -6978,37 +7482,21 @@ mod tests {
                 "",
             )
             .unwrap();
-        let focused = scrolled
-            .root()
-            .children
-            .iter()
-            .find(|node| node.state.focused)
-            .expect("focused item below the initial fold");
-        assert_eq!(focused.id.as_str(), "library-item-item-3");
-        assert!((focused.bounds.y - library_geometry(640.0).card_top - 8.0).abs() < f32::EPSILON);
-        assert!(
-            !has_fold(&scrolled),
-            "fold hides when the final row is fully visible"
-        );
+        let card = node_by_id(scene.root(), "library-item-item-6").unwrap();
 
-        core.action(&ShellAction::Move(AxisMove::Up));
-        let scrolled_back = core
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 640.0,
-                    logical_height: 720.0,
-                    scale: 1.0,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        assert_eq!(core.focus, 5);
-        assert!(
-            has_fold(&scrolled_back),
-            "fold reappears when scrolling above the final row"
-        );
+        for required in [
+            "library-card-art-item-6",
+            "library-card-initial-plate-item-6",
+            "library-card-plate-kind-item-6",
+        ] {
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
+        }
+        assert!(card.children.iter().all(|child| {
+            child.bounds.x >= card.bounds.x
+                && child.bounds.y >= card.bounds.y
+                && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
+                && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
+        }));
     }
 
     #[test]
@@ -7054,7 +7542,7 @@ mod tests {
     }
 
     #[test]
-    fn library_cards_are_art_label_and_optional_reason_without_caption_plates() {
+    fn artless_library_cards_keep_identity_plate_label_and_optional_reason() {
         let unavailable = item(
             "setup",
             "Setup Game",
@@ -7082,7 +7570,7 @@ mod tests {
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-setup").unwrap();
         assert_eq!(card.style_token, "--color-surface-canvas");
-        assert!((card.bounds.height - 136.0).abs() < f32::EPSILON);
+        assert!((card.bounds.height - 256.0).abs() < f32::EPSILON);
         for required in [
             "library-card-art-setup",
             "library-title-setup",
@@ -7090,15 +7578,164 @@ mod tests {
         ] {
             assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
-        assert!(card.children.iter().all(|child| {
-            !child.id.as_str().contains("-plate-") && !child.id.as_str().contains("-label-mask-")
-        }));
+        for required in [
+            "library-card-initial-plate-setup",
+            "library-card-plate-kind-setup",
+        ] {
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
+        }
         assert_eq!(
             node_by_id(card, "library-card-reason-setup")
                 .unwrap()
                 .accessible_label,
             "⊘ Finish setup — choose a profile"
         );
+    }
+
+    #[test]
+    fn identity_plate_centers_its_initial_and_kind_stack_without_an_inner_box() {
+        let mut plate = item(
+            "steam-link",
+            "Steam Link",
+            vec![variant("stream", "steam-link", Availability::Ready)],
+        );
+        plate.kind = AppKind::Stream;
+        plate.tags.push("kind-label:Stream".into());
+        let core = fixture_core(vec![plate]);
+        let nodes = plate_art_nodes(
+            &core.items[0],
+            "home-card",
+            48.0,
+            388.0,
+            CARD_ART_WIDTH,
+            CARD_ART_HEIGHT,
+        );
+        let art = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-art-steam-link")
+            .unwrap();
+        let initial = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-initial-plate-steam-link")
+            .unwrap();
+        let kind = nodes
+            .iter()
+            .find(|node| node.id.as_str() == "home-card-plate-kind-steam-link")
+            .unwrap();
+        let art_center_x = art.bounds.x + art.bounds.width / 2.0;
+        let art_center_y = art.bounds.y + art.bounds.height / 2.0;
+        let stack_center_y = (initial.bounds.y + kind.bounds.y + kind.bounds.height) / 2.0;
+
+        assert!(((initial.bounds.x + initial.bounds.width / 2.0) - art_center_x).abs() <= 1.0);
+        assert!(((kind.bounds.x + kind.bounds.width / 2.0) - art_center_x).abs() <= 1.0);
+        assert!((stack_center_y - art_center_y).abs() <= 1.0);
+        assert!((kind.bounds.y - (initial.bounds.y + initial.bounds.height) - 8.0).abs() <= 1.0);
+        assert_eq!(initial.text_align, TextAlign::Center);
+        assert_eq!(kind.text_align, TextAlign::Center);
+        assert_eq!(initial.style_token, "--color-transparent");
+        assert_eq!(kind.style_token, "--color-transparent");
+        assert_eq!(initial.ink_token.as_deref(), Some("--deco-plate-a-fg"));
+        assert_eq!(kind.ink_token.as_deref(), Some("--deco-plate-a-fg"));
+        assert!(matches!(art.content, pf_scene::NodeContent::Image { .. }));
+        assert!(nodes.iter().all(|node| {
+            let id = node.id.as_str();
+            !id.contains("plate-chip")
+                && !id.contains("plate-box")
+                && !id.contains("plate-motif")
+                && !id.contains("plate-frame")
+        }));
+    }
+
+    #[test]
+    fn ready_network_cues_follow_the_selected_variants_requirement_not_item_identity() {
+        let mut differently_named = variant("stream", "moonlight", Availability::Ready);
+        differently_named.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let ordinary = variant("native", "ordinary", Availability::Ready);
+        let mut steam_link = variant("stream", "steam-link", Availability::Ready);
+        steam_link.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let core = fixture_core(vec![
+            item("moonlight", "Moonlight", vec![differently_named]),
+            item("ordinary", "Ordinary", vec![ordinary]),
+            item("steam-link", "Steam Link", vec![steam_link]),
+        ]);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        for id in ["moonlight", "steam-link"] {
+            let card = node_by_id(scene.root(), &format!("item-{id}")).unwrap();
+            assert_eq!(
+                node_by_id(card, &format!("home-card-badge-{id}"))
+                    .unwrap()
+                    .accessible_label,
+                "⊘ Network"
+            );
+            assert_eq!(
+                node_by_id(card, &format!("home-card-reason-{id}"))
+                    .unwrap()
+                    .accessible_label,
+                "⊘ Network required"
+            );
+        }
+        let ordinary = node_by_id(scene.root(), "item-ordinary").unwrap();
+        assert!(node_by_id(ordinary, "home-card-badge-ordinary").is_none());
+        assert!(node_by_id(ordinary, "home-card-reason-ordinary").is_none());
+        assert_eq!(
+            node_by_id(scene.root(), "home-shelf-label")
+                .unwrap()
+                .accessible_label,
+            "READY NOW · 3"
+        );
+    }
+
+    #[test]
+    fn identity_plate_text_uses_the_selected_palette_foreground() {
+        for (id, expected_ink) in [
+            ("steam-link", "--deco-plate-a-fg"),
+            ("tidelines", "--deco-plate-d-fg"),
+            ("button-tester", "--deco-plate-c-fg"),
+            // The hash-picked fallback for `setup` selects plate D.
+            ("setup", "--deco-plate-d-fg"),
+        ] {
+            let plate = item(
+                id,
+                "Plate",
+                vec![variant("native", id, Availability::Ready)],
+            );
+            let core = fixture_core(vec![plate]);
+            let nodes = plate_art_nodes(
+                &core.items[0],
+                "home-card",
+                48.0,
+                388.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+            );
+
+            for suffix in ["initial-plate", "plate-kind"] {
+                let text = nodes
+                    .iter()
+                    .find(|node| node.id.as_str() == format!("home-card-{suffix}-{id}"))
+                    .unwrap();
+                assert_eq!(text.style_token, "--color-transparent");
+                assert_eq!(text.ink_token.as_deref(), Some(expected_ink));
+            }
+        }
     }
 
     #[test]
@@ -7129,7 +7766,7 @@ mod tests {
     }
 
     #[test]
-    fn home_hero_reports_needs_setup_instead_of_ready() {
+    fn home_hero_reports_nothing_ready_when_catalog_only_needs_setup() {
         let core = fixture_core(vec![item(
             "setup",
             "Setup Game",
@@ -7154,8 +7791,12 @@ mod tests {
             )
             .unwrap();
         let status = node_by_id(scene.root(), "hero-status").unwrap();
-        assert_eq!(status.accessible_label, "⊘ Needs setup · Game");
+        assert_eq!(status.accessible_label, "⊘ Unavailable · Game");
         assert!(!status.accessible_label.contains("Ready"));
+        assert_eq!(
+            node_by_id(scene.root(), "hero-title").map(|node| node.accessible_label.as_str()),
+            Some("Nothing ready")
+        );
     }
 
     #[test]
@@ -7164,7 +7805,7 @@ mod tests {
             (
                 "native",
                 "pocketforge/native",
-                "● Ready · Game · Installed on this device",
+                "● Ready · Game · Installed",
                 true,
             ),
             (
@@ -7209,7 +7850,7 @@ mod tests {
                 .accessible_label;
             assert_eq!(status, expected, "case {id}");
             assert_eq!(
-                status.contains("Installed on this device"),
+                status.contains("Installed"),
                 locally_installed,
                 "case {id} local-installation claim"
             );
@@ -7923,7 +8564,7 @@ mod tests {
                 user_projection: UserProjection::default(),
             };
             let mut core =
-                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_| {
+                ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, _| {
                     with_real_art.then(|| Arc::from(&b"png"[..]))
                 });
             core.authority_snapshot(false);
@@ -8210,8 +8851,8 @@ mod tests {
             .unwrap()
         );
 
-        assert!(scene.contains("Not supported on this device"));
-        assert!(scene.contains('…'));
+        assert!(scene.contains("Unavailable"));
+        assert!(!scene.contains("home-card-reason-empty"));
         assert_eq!(core.action(&ShellAction::Activate), None);
     }
 
@@ -8345,7 +8986,7 @@ mod tests {
             user_projection: UserProjection::default(),
         };
         let mut core =
-            ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |reference| {
+            ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, reference| {
                 (reference == "art/paper-comet.png").then(|| Arc::from(&b"png"[..]))
             });
         core.authority_snapshot(false);
@@ -8627,7 +9268,7 @@ mod tests {
 
         assert_eq!(
             emitted_ids,
-            (0..6)
+            (0..12)
                 .map(|index| format!("library-item-item-{index}"))
                 .collect::<Vec<_>>()
         );
@@ -8671,16 +9312,18 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert!(
-                cards
-                    .iter()
-                    .all(|card| card.bounds.y + card.bounds.height <= grid_bottom),
-                "cards must remain above the footer at {width}x{height}"
+                cards.iter().all(|card| card.bounds.y < grid_bottom),
+                "each emitted row must begin above the footer at {width}x{height}"
             );
 
-            let row_height = 292.0;
+            let row_height = 272.0;
             let mut expected_rows = 1;
-            while geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 <= grid_bottom
-            {
+            while if geometry.columns == 6 {
+                geometry.card_top + 8.0 + expected_rows as f32 * row_height < grid_bottom
+            } else {
+                geometry.card_top + 8.0 + expected_rows as f32 * row_height + CARD_ART_HEIGHT
+                    <= grid_bottom
+            } {
                 expected_rows += 1;
             }
             assert_eq!(
@@ -8688,11 +9331,64 @@ mod tests {
                 expected_rows * geometry.columns,
                 "the maximum fitting rows must be emitted at {width}x{height}"
             );
-            assert!(
-                geometry.card_top + (expected_rows + 1) as f32 * row_height - 18.0 > grid_bottom,
-                "one more row must not fit at {width}x{height}"
-            );
         }
+    }
+
+    #[test]
+    fn library_footer_clip_preserves_an_undistorted_second_row_peek() {
+        let items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let footer_top = 720.0 - PROMPTS_AREA_HEIGHT;
+        let second_row_art = node_by_id(root, "library-card-art-item-6").unwrap();
+        assert!(second_row_art.bounds.y < footer_top);
+        assert!(second_row_art.bounds.y + second_row_art.bounds.height > footer_top);
+        assert!((second_row_art.bounds.height - CARD_ART_HEIGHT).abs() < f32::EPSILON);
+
+        let clip_index = root
+            .children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-clip")
+            .unwrap();
+        let last_card_index = root
+            .children
+            .iter()
+            .rposition(|node| node.id.as_str().starts_with("library-item-"))
+            .unwrap();
+        let clip = &root.children[clip_index];
+        assert!(
+            clip_index > last_card_index,
+            "clip must paint after every grid card"
+        );
+        assert!((clip.bounds.y - footer_top).abs() < f32::EPSILON);
+        assert!((clip.bounds.height - PROMPTS_AREA_HEIGHT).abs() < f32::EPSILON);
+        assert_eq!(clip.style_token, "--color-surface-canvas");
     }
 
     #[test]
@@ -8951,7 +9647,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "scene-0"] {
+        for part in ["art", "initial-plate", "plate-kind"] {
             assert!(
                 favorite
                     .children
@@ -8960,19 +9656,15 @@ mod tests {
             );
         }
         assert!(
-            home.root()
-                .children
-                .iter()
-                .any(|node| node.id.as_str() == "home-card-title-ridge"),
-            "the painted Home title is a sibling of its focus owner"
-        );
-        assert!(
             favorite
                 .children
                 .iter()
-                .all(|node| node.id.as_str() != "home-card-plate-ridge"),
-            "the Home label must sit directly on the canvas"
+                .any(|node| node.id.as_str() == "home-card-title-ridge"),
+            "the painted Home title belongs to its focus owner"
         );
+        assert!(favorite.children.iter().any(|node| {
+            node.id.as_str() == "home-card-initial-plate-ridge" && node.accessible_label == "R"
+        }));
         snapshot.user_projection.favorite_item_ids.clear();
         let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
             .scene(metrics, "")
@@ -9183,6 +9875,62 @@ mod tests {
     }
 
     #[test]
+    fn narrow_home_shelf_actionable_cards_do_not_overlap() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("game-{index}"),
+                    &format!("Game {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("game-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let scene = fixture_core(items)
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 480.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let cards = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.action == Some(NodeAction::Activate))
+            .collect::<Vec<_>>();
+
+        assert_eq!(cards.len(), 2, "640px surface fits exactly two shelf cards");
+        for (index, card) in cards.iter().enumerate() {
+            for other in cards.iter().skip(index + 1) {
+                assert!(
+                    !intersects(card.bounds, other.bounds),
+                    "{} {:?} overlaps {} {:?}",
+                    card.id.as_str(),
+                    card.bounds,
+                    other.id.as_str(),
+                    other.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
     fn detail_and_variant_chooser_rows_stack_without_overlap() {
         fn intersects(a: Bounds, b: Bounds) -> bool {
             a.x < b.x + b.width
@@ -9252,24 +10000,17 @@ mod tests {
     }
 
     #[test]
-    fn home_card_focus_owner_is_actionable_and_long_caption_fits_above_footer() {
+    fn home_ready_card_focus_owner_is_actionable() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
                 .then_some(node)
                 .or_else(|| node.children.iter().find_map(|child| find(child, id)))
         }
 
-        let reason = "Content pack not installed until a profile is selected and the optional compatibility files have finished downloading";
         let mut core = fixture_core(vec![item(
-            "setup",
-            "Setup Game",
-            vec![variant(
-                "stream",
-                "setup-app",
-                Availability::NeedsSetup {
-                    reason: reason.into(),
-                },
-            )],
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
         )]);
         core.focus = 0;
         let scene = core
@@ -9284,53 +10025,37 @@ mod tests {
                 "",
             )
             .unwrap();
-        let card = find(scene.root(), "item-setup").unwrap();
-        let art = find(scene.root(), "home-card-art-setup").unwrap();
-        let caption = find(scene.root(), "home-card-reason-setup").unwrap();
-        let footer = find(scene.root(), "prompt-bar").unwrap();
+        let card = find(scene.root(), "item-ready").unwrap();
+        let art = find(scene.root(), "home-card-art-ready").unwrap();
 
         assert_eq!(card.role, Role::ListItem);
-        assert_eq!(card.bounds, art.bounds);
+        assert!(card.bounds.width >= art.bounds.width);
+        assert!(card.bounds.height > art.bounds.height);
         assert_eq!(scene.default_focus(), &card.id);
         assert!(card.action.is_some(), "the focus owner must be actionable");
         assert!(
             !card.accessible_label.trim().is_empty(),
             "the focus owner must have an accessible label"
         );
-        assert_eq!(card.style_token, "--state-focused-ring");
-        assert_eq!(
-            find(scene.root(), scene.default_focus().as_str())
-                .unwrap()
-                .bounds,
-            art.bounds,
-            "the focus ring must use the art bounds"
-        );
-        assert!(find(scene.root(), "home-card-plate-setup").is_none());
-        assert_eq!(
-            find(scene.root(), "home-card-veil-setup").unwrap().bounds,
-            art.bounds,
-            "the unavailable tint is confined to the art"
-        );
-        assert!(caption.accessible_label.ends_with('…'));
+        assert_eq!(card.style_token, "--color-surface-canvas");
+        let focus_bounds = find(scene.root(), scene.default_focus().as_str())
+            .unwrap()
+            .bounds;
+        assert!(focus_bounds.width >= art.bounds.width);
+        assert!(focus_bounds.height > art.bounds.height);
+        assert!(find(scene.root(), "home-card-initial-plate-ready").is_some());
         assert!(
-            caption.bounds.height > 48.0,
-            "the caption must wrap to three lines"
-        );
-        assert!(caption.bounds.y + caption.bounds.height <= footer.bounds.y);
-        assert!(
-            caption.bounds.y + caption.bounds.height < footer.bounds.y,
-            "the final line needs guard-visible breathing room above the footer"
+            find(scene.root(), "home-card-veil-ready").is_none(),
+            "a ready card must not receive an unavailable veil"
         );
         assert!(
-            find(scene.root(), "home-card-title-setup").is_some_and(|title| {
-                scene.root().children.iter().any(|node| node.id == title.id)
-            }),
-            "the painted title must be a sibling of the art-bounded focus owner"
+            find(card, "home-card-title-ready").is_some(),
+            "the painted title must belong to the card focus owner"
         );
     }
 
     #[test]
-    fn home_activation_and_footer_match_each_cards_availability() {
+    fn home_activation_and_footer_follow_the_filtered_ready_shelf() {
         fn prompt(scene: &Scene) -> &str {
             scene
                 .root()
@@ -9386,8 +10111,13 @@ mod tests {
                     },
                 )],
             ),
+            item(
+                "ready-two",
+                "Ready Game Two",
+                vec![variant("native", "ready-app-two", Availability::Ready)],
+            ),
         ]);
-        core.items[2].favorite = true;
+        core.items[3].favorite = true;
         core.set_control_bindings(bindings());
         assert_eq!(
             prompt(&core.scene(metrics, supplied_footer).unwrap()),
@@ -9400,21 +10130,18 @@ mod tests {
             }))
         );
 
-        for (focus, favorite_label) in [(1, "Favorite"), (2, "Unfavorite")] {
-            core.go(Route::Home);
-            core.focus = focus;
-            assert_eq!(
-                prompt(&core.scene(metrics, supplied_footer).unwrap()),
-                format!(
-                    "A Details     PF  Safe Return · button below the d-pad     X  {favorite_label}"
-                )
-            );
-            assert_eq!(core.action(&ShellAction::Activate), None);
-            assert_eq!(
-                (core.route(), core.selected_item),
-                (Route::Details, Some(focus))
-            );
-        }
+        core.go(Route::Home);
+        core.focus = 1;
+        assert_eq!(
+            prompt(&core.scene(metrics, supplied_footer).unwrap()),
+            "A Open     PF  Safe Return · button below the d-pad     X  Unfavorite"
+        );
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "ready-app-two".into(),
+            }))
+        );
     }
 
     #[test]
@@ -9650,10 +10377,10 @@ mod tests {
             assert_eq!(border.style_token, "--color-border-strong");
             assert_eq!(fill.style_token, "--color-surface-raised");
             assert_eq!(label.style_token, "--color-surface-raised");
-            assert!((fill.bounds.x - border.bounds.x - 2.0).abs() < f32::EPSILON);
-            assert!((fill.bounds.y - border.bounds.y - 2.0).abs() < f32::EPSILON);
-            assert!((border.bounds.width - fill.bounds.width - 4.0).abs() < f32::EPSILON);
-            assert!((border.bounds.height - fill.bounds.height - 4.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.x - border.bounds.x - 1.0).abs() < f32::EPSILON);
+            assert!((fill.bounds.y - border.bounds.y - 1.0).abs() < f32::EPSILON);
+            assert!((border.bounds.width - fill.bounds.width - 2.0).abs() < f32::EPSILON);
+            assert!((border.bounds.height - fill.bounds.height - 2.0).abs() < f32::EPSILON);
             assert!(label.bounds.x >= fill.bounds.x && label.bounds.y >= fill.bounds.y);
             assert!(
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
@@ -9710,7 +10437,7 @@ mod tests {
             );
             assert_eq!(
                 find(home.root(), "room-keycap-left").corner_radius,
-                999.0 * multiplier
+                6.0 * multiplier
             );
 
             core.go(Route::Library);

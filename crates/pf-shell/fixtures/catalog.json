@@ -1,11 +1,888 @@
 {
-  "revision": 1, "observed_at_unix_seconds": 0, "provider_results": [],
+  "revision": 1,
+  "observed_at_unix_seconds": 0,
+  "provider_results": [],
   "items": [
-    {"id":"ridgeline","title":"Ridgeline","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:34 hours on the trail"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"ridgeline","descriptor_path":"fixtures/ridgeline.toml","observed_digest":"fixture"}}]},
-    {"id":"hollow-tides","title":"Hollow Tides","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:18 hours beyond the shoals"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"hollow-tides","descriptor_path":"fixtures/hollow-tides.toml","observed_digest":"fixture"}}]},
-    {"id":"sunwake","title":"Sunwake","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:9 hours chasing daylight"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"sunwake","descriptor_path":"fixtures/sunwake.toml","observed_digest":"fixture"}}]},
-    {"id":"glass-harbor","title":"Glass Harbor","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:22 hours among the lights"],"variants":[{"id":"setup","provider_id":"fixture-a","availability":{"state":"needs_setup","reason":"fixture"},"requirements":[],"provenance":{"provider_id":"fixture-a","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"glass-harbor-setup","descriptor_path":"fixtures/glass-harbor-setup.toml","observed_digest":"fixture"}},{"id":"ready","provider_id":"fixture-b","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture-b","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"glass-harbor-ready","descriptor_path":"fixtures/glass-harbor-ready.toml","observed_digest":"fixture"}}]},
-    {"id":"lantern-vale","title":"Lantern Vale","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:12 hours following the glow"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"lantern-vale","descriptor_path":"fixtures/lantern-vale.toml","observed_digest":"fixture"}}]},
-    {"id":"paper-comet","title":"Paper Comet","kind":"game","presentation":{"icon_reference":null},"tags":["ready-now","playtime:7 hours across the sky"],"variants":[{"id":"default","provider_id":"fixture","availability":{"state":"ready"},"requirements":[],"provenance":{"provider_id":"fixture","app_version":"1","upstream_version":null,"runtime_family":"native","runtime_abi":"aarch64","platform_version":null},"launch_target":{"app_id":"paper-comet","descriptor_path":"fixtures/paper-comet.toml","observed_digest":"fixture"}}]}
-  ], "user_projection":{"favorite_item_ids":["ridgeline"]}
+    {
+      "id": "ridgeline",
+      "title": "Ridgeline",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:ridgeline.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "ready-now",
+        "playtime:34 hours on the trail",
+        "developer:Switchback Works"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "ridgeline",
+            "descriptor_path": "fixtures/ridgeline.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "hollow-tides",
+      "title": "Hollow Tides",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:hollow-tides.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "ready-now",
+        "playtime:18 hours beyond the shoals",
+        "developer:Brackish Studio"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "hollow-tides",
+            "descriptor_path": "fixtures/hollow-tides.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sunwake",
+      "title": "Sunwake",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:sunwake.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "ready-now",
+        "playtime:9 hours chasing daylight",
+        "developer:Amberline Games"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "sunwake",
+            "descriptor_path": "fixtures/sunwake.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "moth-and-lantern",
+      "title": "Moth & Lantern",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:moth-and-lantern.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "ready-now",
+        "playtime:16 hours following the lantern",
+        "developer:Paperwing Atelier"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "moth-and-lantern",
+            "descriptor_path": "fixtures/moth-and-lantern.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "steam-link",
+      "title": "Steam Link",
+      "kind": "stream",
+      "presentation": {
+        "icon_reference": null
+      },
+      "tags": [
+        "ready-now",
+        "network-app",
+        "kind-label:Stream",
+        "developer:Valve"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [
+            {
+              "capability": "network",
+              "optional": false
+            }
+          ],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "stream",
+            "runtime_abi": "network",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "steam-link",
+            "descriptor_path": "fixtures/steam-link.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tidelines",
+      "title": "Tidelines",
+      "kind": "media",
+      "presentation": {
+        "icon_reference": null
+      },
+      "tags": [
+        "ready-now",
+        "kind-label:Web app",
+        "developer:Estuary Digital"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "web",
+            "runtime_abi": "browser",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "tidelines",
+            "descriptor_path": "fixtures/tidelines.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "button-tester",
+      "title": "Button Tester",
+      "kind": "system",
+      "presentation": {
+        "icon_reference": null
+      },
+      "tags": [
+        "kind-label:Tool",
+        "developer:PocketForge"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "button-tester",
+            "descriptor_path": "fixtures/button-tester.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "low-orbit",
+      "title": "Low Orbit",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:low-orbit.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:31 hours circling home",
+        "developer:Apogee House"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "incompatible_runtime",
+            "required": "2",
+            "available": "1"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "low-orbit",
+            "descriptor_path": "fixtures/low-orbit.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "northlight",
+      "title": "Northlight",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:northlight.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:22 hours under the aurora",
+        "developer:Boreal Workshop"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "northlight",
+            "descriptor_path": "fixtures/northlight.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "torchbug",
+      "title": "Torchbug",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:torchbug.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:7 hours after dark",
+        "developer:Firefly Assembly"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "torchbug",
+            "descriptor_path": "fixtures/torchbug.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "petrichor",
+      "title": "Petrichor",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:petrichor.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:5 hours after rain",
+        "developer:Loam & Cloud"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "petrichor",
+            "descriptor_path": "fixtures/petrichor.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "lumen-vale",
+      "title": "Lumen Vale",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:lumen-vale.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:11 hours aglow",
+        "developer:Soft Beacon"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "lumen-vale",
+            "descriptor_path": "fixtures/lumen-vale.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "cinder-loop",
+      "title": "Cinder Loop",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:cinder-loop.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:17 hours around again",
+        "developer:Ember Circuit"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "cinder-loop",
+            "descriptor_path": "fixtures/cinder-loop.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "iron-meridian",
+      "title": "Iron Meridian",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:iron-meridian.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:42 hours eastbound",
+        "developer:Compass Foundry"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "iron-meridian",
+            "descriptor_path": "fixtures/iron-meridian.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "halfmoon-harbor",
+      "title": "Halfmoon Harbor",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:halfmoon-harbor.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:24 hours by the quay",
+        "developer:Tidal Clock"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "halfmoon-harbor",
+            "descriptor_path": "fixtures/halfmoon-harbor.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "vega-crossing",
+      "title": "Vega Crossing",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:vega-crossing.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:19 hours between stars",
+        "developer:Night Ferry"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "vega-crossing",
+            "descriptor_path": "fixtures/vega-crossing.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "paper-armada",
+      "title": "Paper Armada",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:paper-armada.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:8 hours at sea",
+        "developer:Folded Fleet"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "paper-armada",
+            "descriptor_path": "fixtures/paper-armada.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchard-of-glass",
+      "title": "Orchard of Glass",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:orchard-of-glass.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:13 hours among the trees",
+        "developer:Clearfruit"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "orchard-of-glass",
+            "descriptor_path": "fixtures/orchard-of-glass.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "fern-and-fathom",
+      "title": "Fern & Fathom",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:fern-and-fathom.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:10 hours below green",
+        "developer:Moss Current"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "fern-and-fathom",
+            "descriptor_path": "fixtures/fern-and-fathom.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "signal-decay",
+      "title": "Signal Decay",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:signal-decay.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:6 hours off frequency",
+        "developer:Carrier Lost"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "signal-decay",
+            "descriptor_path": "fixtures/signal-decay.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "quiet-machines",
+      "title": "Quiet Machines",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:quiet-machines.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:14 hours in the workshop",
+        "developer:Stillmotor"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "quiet-machines",
+            "descriptor_path": "fixtures/quiet-machines.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "redshift-alley",
+      "title": "Redshift Alley",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:redshift-alley.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:26 hours in transit",
+        "developer:Parallax Arcade"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "redshift-alley",
+            "descriptor_path": "fixtures/redshift-alley.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bellwether",
+      "title": "Bellwether",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:bellwether.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:12 hours in the fold",
+        "developer:North Pasture"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "bellwether",
+            "descriptor_path": "fixtures/bellwether.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    },
+    {
+      "id": "milewide",
+      "title": "Milewide",
+      "kind": "game",
+      "presentation": {
+        "icon_reference": "fixture-art:milewide.png",
+        "icon_decodable": true
+      },
+      "tags": [
+        "playtime:15 hours on the road",
+        "developer:Long Measure"
+      ],
+      "variants": [
+        {
+          "id": "default",
+          "provider_id": "fixture",
+          "availability": {
+            "state": "ready"
+          },
+          "requirements": [],
+          "provenance": {
+            "provider_id": "fixture",
+            "app_version": "1",
+            "upstream_version": null,
+            "runtime_family": "native",
+            "runtime_abi": "aarch64",
+            "platform_version": null
+          },
+          "launch_target": {
+            "app_id": "milewide",
+            "descriptor_path": "fixtures/milewide.toml",
+            "observed_digest": "fixture"
+          }
+        }
+      ]
+    }
+  ],
+  "user_projection": {
+    "favorite_item_ids": [
+      "moth-and-lantern",
+      "torchbug"
+    ]
+  }
 }

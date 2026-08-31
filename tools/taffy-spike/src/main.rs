@@ -5,7 +5,9 @@ use pf_scene::{
     Bounds, Insets, Node, NodeId as SceneNodeId, Orientation, Role, Scene, SurfaceMetrics, TypeRole,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, env, fmt::Write as _, fs, process::Command, time::Instant};
+use std::{
+    collections::HashMap, env, fmt::Write as _, fs, path::Path, process::Command, time::Instant,
+};
 use taffy::prelude::*;
 
 const LABELS: [&str; 6] = [
@@ -48,11 +50,11 @@ struct RectF {
 fn main() {
     if env::args().any(|arg| arg == "--matrix-child") {
         let (digest, p95) = run_matrix().unwrap_or_else(|error| panic!("{error}"));
+        let binary_delta = binary_delta_metric();
         eprintln!(
-            "SMOKE cpu_layout_p95_us={p95} peak_rss_kib={} binary_bytes={} binary_delta_vs_pf_shell_bytes={}",
+            "SMOKE cpu_layout_p95_us={p95} peak_rss_kib={} binary_bytes={} {binary_delta}",
             peak_rss_kib(),
-            binary_size(),
-            binary_delta()
+            binary_size()
         );
         println!("MATRIX digest={digest}");
         return;
@@ -560,18 +562,67 @@ fn binary_size() -> i64 {
         .and_then(|path| fs::metadata(path).ok())
         .map_or(0, |meta| i64::try_from(meta.len()).unwrap_or(i64::MAX))
 }
-fn binary_delta() -> i64 {
-    let shell = env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|dir| dir.join("pf-shell")))
-        .and_then(|path| fs::metadata(path).ok())
-        .map_or(0, |meta| i64::try_from(meta.len()).unwrap_or(i64::MAX));
-    binary_size() - shell
+fn binary_delta_metric() -> String {
+    let Some(executable) = env::current_exe().ok() else {
+        return "binary_delta_vs_pf_shell_bytes=unavailable reason=current-exe-unavailable".into();
+    };
+    binary_delta_metric_for(&executable)
+}
+
+fn binary_delta_metric_for(executable: &Path) -> String {
+    let shell = executable.with_file_name("pf-shell");
+    if fs::metadata(&shell).is_err() {
+        return "binary_delta_vs_pf_shell_bytes=unavailable reason=pf-shell-artifact-missing"
+            .into();
+    }
+    match binary_delta(executable, &shell) {
+        Some(delta) => format!("binary_delta_vs_pf_shell_bytes={delta}"),
+        None => "binary_delta_vs_pf_shell_bytes=unavailable reason=spike-artifact-missing".into(),
+    }
+}
+
+fn binary_delta(executable: &Path, shell: &Path) -> Option<i64> {
+    let executable = i64::try_from(fs::metadata(executable).ok()?.len()).unwrap_or(i64::MAX);
+    let shell = i64::try_from(fs::metadata(shell).ok()?.len()).unwrap_or(i64::MAX);
+    Some(executable - shell)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn binary_delta_requires_a_real_pf_shell_artifact() {
+        let fixture =
+            env::temp_dir().join(format!("taffy-spike-binary-delta-{}", std::process::id()));
+        fs::create_dir_all(&fixture).unwrap();
+        let spike = fixture.join("taffy-spike");
+        let shell = fixture.join("pf-shell");
+        let _ = fs::remove_file(&shell);
+        fs::File::create(&spike)
+            .unwrap()
+            .write_all(&[0; 13])
+            .unwrap();
+
+        assert_eq!(binary_delta(&spike, &shell), None);
+        assert_eq!(
+            binary_delta_metric_for(&spike),
+            "binary_delta_vs_pf_shell_bytes=unavailable reason=pf-shell-artifact-missing"
+        );
+
+        fs::File::create(&shell)
+            .unwrap()
+            .write_all(&[0; 21])
+            .unwrap();
+        assert_eq!(binary_delta(&spike, &shell), Some(-8));
+        assert_eq!(
+            binary_delta_metric_for(&spike),
+            "binary_delta_vs_pf_shell_bytes=-8"
+        );
+
+        fs::remove_dir_all(fixture).unwrap();
+    }
 
     #[test]
     fn overflow_is_attributed_to_the_text_node_that_produced_it() {

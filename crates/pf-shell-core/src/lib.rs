@@ -23,7 +23,7 @@ use pf_ports::{
 };
 use pf_scene::{
     AxisMove, Bounds, Elevation, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene,
-    SurfaceMetrics, TypeRole,
+    SurfaceMetrics, TextAlign, TypeRole,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
@@ -5124,10 +5124,6 @@ fn plate_art_nodes(
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
         });
-    // Text nodes paint their surface before their glyphs. Keep the plate and its two text
-    // nodes on one opaque surface so the centered monogram and kind remain plain ink rather
-    // than producing darker, chip-shaped alpha overlays.
-    let background = "--color-surface-raised";
     let favorite = context == "favorite-card";
     let detail = context == "detail-art";
     let art_x = if favorite { x + 4.0 } else { x };
@@ -5140,101 +5136,49 @@ fn plate_art_nodes(
         .unwrap_or_else(|| sentence_kind(&item.kind))
         .to_uppercase();
     let initial = item.title.chars().next().unwrap_or('?').to_string();
-    let mut nodes = vec![node(
+    let (plate_name, plate_bytes): (&str, &'static [u8]) = match identity {
+        "steam-link" => (
+            "plate-a",
+            include_bytes!("../../pf-shell/fixtures/art/plate-a.png"),
+        ),
+        "tidelines" => (
+            "plate-d",
+            include_bytes!("../../pf-shell/fixtures/art/plate-d.png"),
+        ),
+        "button-tester" => (
+            "plate-c",
+            include_bytes!("../../pf-shell/fixtures/art/plate-c.png"),
+        ),
+        _ => [
+            (
+                "plate-a",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-a.png")[..],
+            ),
+            (
+                "plate-d",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-d.png")[..],
+            ),
+            (
+                "plate-c",
+                &include_bytes!("../../pf-shell/fixtures/art/plate-c.png")[..],
+            ),
+        ][(hash % 3) as usize],
+    };
+    let mut art = node(
         &format!("{context}-art-{}", item.id),
         Role::Group,
-        &format!("{} identity plate", item.title),
+        &format!("{} {plate_name} identity plate", item.title),
         art_x,
         art_y,
         art_width,
         art_height,
-        background,
-    )];
-    // Match the authored per-kind line work. Hairline ink is the theme's translucent
-    // foreground treatment (the former background-colored motif disappeared into the plate).
-    let motif = match identity {
-        "steam-link" => 0,
-        "tidelines" => 1,
-        "button-tester" => 4,
-        _ => (hash / 6) % 6,
-    };
-    for line in 0..5 {
-        let (left, top, motif_width, motif_height) = match motif {
-            0 => (
-                if line % 2 == 0 { 0.08 } else { 0.70 },
-                0.12 + line as f32 * 0.16,
-                art_width * 0.22,
-                1.0,
-            ),
-            1 => (
-                if line % 2 == 0 { 0.08 } else { 0.67 },
-                0.14 + line as f32 * 0.17,
-                art_width * 0.25,
-                1.0,
-            ),
-            2 => (0.14 + line as f32 * 0.15, 0.08, 1.0, art_height * 0.84),
-            3 => (
-                0.10 + line as f32 * 0.08,
-                0.16 + line as f32 * 0.13,
-                art_width * 0.72,
-                1.0,
-            ),
-            4 => (
-                0.12 + line as f32 * 0.17,
-                0.12 + (line % 2) as f32 * 0.12,
-                2.0,
-                2.0,
-            ),
-            _ => (
-                0.12,
-                0.18 + line as f32 * 0.14,
-                art_width * (0.76 - line as f32 * 0.08),
-                1.0,
-            ),
-        };
-        nodes.push(node(
-            &format!("{context}-plate-motif-{line}-{}", item.id),
-            Role::Group,
-            "",
-            art_x + art_width * left,
-            art_y + art_height * top,
-            motif_width,
-            motif_height,
-            "--color-border-hairline",
-        ));
-    }
-    // CSS reference: `.plate .frame { inset: space-2; border: 1px; border-radius:
-    // calc(radius-m - 4px) }`. Four one-pixel scene edges preserve the exact 8 px inset
-    // without covering the translucent plate fill.
-    for (edge, edge_x, edge_y, edge_width, edge_height) in [
-        ("top", art_x + 8.0, art_y + 8.0, art_width - 16.0, 1.0),
-        (
-            "bottom",
-            art_x + 8.0,
-            art_y + art_height - 9.0,
-            art_width - 16.0,
-            1.0,
-        ),
-        ("left", art_x + 8.0, art_y + 8.0, 1.0, art_height - 16.0),
-        (
-            "right",
-            art_x + art_width - 9.0,
-            art_y + 8.0,
-            1.0,
-            art_height - 16.0,
-        ),
-    ] {
-        nodes.push(node(
-            &format!("{context}-plate-frame-{edge}-{}", item.id),
-            Role::Group,
-            "",
-            edge_x,
-            edge_y,
-            edge_width,
-            edge_height,
-            "--color-border-hairline",
-        ));
-    }
+        "--color-surface-raised",
+    );
+    art = art.with_image(
+        ImageSource::new(format!("fixture-art:{plate_name}.png"), plate_bytes),
+        ImageFit::Cover,
+    );
+    let mut nodes = vec![art];
     nodes.push(
         node(
             &format!("{context}-initial-plate-{}", item.id),
@@ -5244,9 +5188,10 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0,
             72.0,
             56.0,
-            background,
+            "--color-surface-raised",
         )
-        .with_type_role(TypeRole::Plate),
+        .with_type_role(TypeRole::Plate)
+        .with_text_align(TextAlign::Center),
     );
     nodes.push(
         node(
@@ -5257,9 +5202,10 @@ fn plate_art_nodes(
             art_y + (art_height - 56.0 - 8.0 - 24.0) / 2.0 + 64.0,
             88.0,
             24.0,
-            background,
+            "--color-surface-raised",
         )
-        .with_type_role(TypeRole::Eyebrow),
+        .with_type_role(TypeRole::Eyebrow)
+        .with_text_align(TextAlign::Center),
     );
     if !detail {
         nodes.push(
@@ -7331,10 +7277,6 @@ mod tests {
             "library-card-art-item-6",
             "library-card-initial-plate-item-6",
             "library-card-plate-kind-item-6",
-            "library-card-plate-frame-top-item-6",
-            "library-card-plate-frame-bottom-item-6",
-            "library-card-plate-frame-left-item-6",
-            "library-card-plate-frame-right-item-6",
         ] {
             assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
@@ -7428,7 +7370,6 @@ mod tests {
         for required in [
             "library-card-initial-plate-setup",
             "library-card-plate-kind-setup",
-            "library-card-plate-frame-top-setup",
         ] {
             assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
@@ -7478,9 +7419,15 @@ mod tests {
         assert!(((kind.bounds.x + kind.bounds.width / 2.0) - art_center_x).abs() <= 1.0);
         assert!((stack_center_y - art_center_y).abs() <= 1.0);
         assert!((kind.bounds.y - (initial.bounds.y + initial.bounds.height) - 8.0).abs() <= 1.0);
+        assert_eq!(initial.text_align, TextAlign::Center);
+        assert_eq!(kind.text_align, TextAlign::Center);
+        assert!(matches!(art.content, pf_scene::NodeContent::Image { .. }));
         assert!(nodes.iter().all(|node| {
             let id = node.id.as_str();
-            !id.contains("plate-chip") && !id.contains("plate-box")
+            !id.contains("plate-chip")
+                && !id.contains("plate-box")
+                && !id.contains("plate-motif")
+                && !id.contains("plate-frame")
         }));
     }
 
@@ -9332,7 +9279,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "initial-plate", "plate-kind", "plate-frame-top"] {
+        for part in ["art", "initial-plate", "plate-kind"] {
             assert!(
                 favorite
                     .children

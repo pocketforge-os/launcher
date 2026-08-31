@@ -233,6 +233,15 @@ fn vendored_art(reference: &str) -> Option<Arc<[u8]>> {
         "fixture-art:corrupt.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/corrupt.png")[..],
         )),
+        "fixture-art:plate-a.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/plate-a.png")[..],
+        )),
+        "fixture-art:plate-c.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/plate-c.png")[..],
+        )),
+        "fixture-art:plate-d.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/plate-d.png")[..],
+        )),
         _ => None,
     }
 }
@@ -2746,9 +2755,8 @@ mod durable_tests {
                 .iter()
                 .find(|node| node.id.as_str() == format!("home-card-art-{}", item.id))
                 .unwrap();
-            assert_eq!(
+            assert!(
                 matches!(art.content, pf_scene::NodeContent::Image { .. }),
-                !matches!(item.id.as_str(), "steam-link" | "tidelines"),
                 "{} art source",
                 item.id
             );

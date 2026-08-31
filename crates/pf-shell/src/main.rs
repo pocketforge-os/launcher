@@ -52,6 +52,8 @@ const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
+const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const LOW_BATTERY_PERCENT: u8 = 20;
 const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
@@ -427,11 +429,97 @@ impl DeviceStatusPort for FakeDeviceStatusPort {
     }
 }
 
-struct UnavailableDeviceStatusPort;
-impl DeviceStatusPort for UnavailableDeviceStatusPort {
-    fn status(&self) -> Result<DeviceStatus, String> {
-        Err("Device status unavailable".into())
+struct SysfsDeviceStatusPort {
+    power_supply_root: PathBuf,
+}
+
+impl SysfsDeviceStatusPort {
+    fn new(power_supply_root: impl Into<PathBuf>) -> Self {
+        Self {
+            power_supply_root: power_supply_root.into(),
+        }
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BatteryScope {
+    System,
+    Controller,
+    Unknown,
+}
+
+struct ObservedBattery {
+    capacity: u8,
+    status: String,
+    scope: BatteryScope,
+}
+
+impl DeviceStatusPort for SysfsDeviceStatusPort {
+    fn status(&self) -> Result<DeviceStatus, String> {
+        let entries = fs::read_dir(&self.power_supply_root)
+            .map_err(|error| format!("read {}: {error}", self.power_supply_root.display()))?;
+        let mut batteries = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            let Ok(kind) = read_sysfs_value(&path.join("type")) else {
+                continue;
+            };
+            if !kind.eq_ignore_ascii_case("battery") {
+                continue;
+            }
+            let Ok(capacity) = read_sysfs_value(&path.join("capacity")) else {
+                continue;
+            };
+            let Ok(capacity) = capacity.parse::<u8>() else {
+                continue;
+            };
+            if capacity > 100 {
+                continue;
+            }
+            let Ok(status) = read_sysfs_value(&path.join("status")) else {
+                continue;
+            };
+            let scope = match read_sysfs_value(&path.join("scope")) {
+                Ok(scope) if scope.eq_ignore_ascii_case("system") => BatteryScope::System,
+                Ok(scope) if scope.eq_ignore_ascii_case("device") => BatteryScope::Controller,
+                _ => BatteryScope::Unknown,
+            };
+            batteries.push(ObservedBattery {
+                capacity,
+                status,
+                scope,
+            });
+        }
+
+        let displayed = batteries
+            .iter()
+            .find(|battery| battery.scope == BatteryScope::System)
+            .or_else(|| {
+                batteries
+                    .iter()
+                    .find(|battery| battery.scope == BatteryScope::Unknown)
+            })
+            .or_else(|| batteries.first())
+            .ok_or_else(|| "Device status unavailable".to_owned())?;
+        let low = batteries.iter().find(|battery| {
+            battery.capacity <= LOW_BATTERY_PERCENT
+                && !battery.status.eq_ignore_ascii_case("charging")
+                && !battery.status.eq_ignore_ascii_case("full")
+        });
+        let attention_message = low.map(|battery| match battery.scope {
+            BatteryScope::Controller => "Controller battery low".to_owned(),
+            BatteryScope::System | BatteryScope::Unknown => "Battery low".to_owned(),
+        });
+        Ok(DeviceStatus {
+            battery_percent: displayed.capacity,
+            attention_message,
+        })
+    }
+}
+
+fn read_sysfs_value(path: &Path) -> Result<String, std::io::Error> {
+    fs::read_to_string(path).map(|value| value.trim().to_owned())
 }
 
 fn load_durable_map_or_shipped(
@@ -611,11 +699,14 @@ fn main() -> Result<(), String> {
     };
     core.load_network(&mut *network);
     core.load_system(&*time, &*transfer);
-    core.load_device_status(if device_fixture_mode {
-        &FakeDeviceStatusPort { attention: true }
+    let fake_device_status = FakeDeviceStatusPort { attention: true };
+    let production_device_status = SysfsDeviceStatusPort::new("/sys/class/power_supply");
+    let device_status: &dyn DeviceStatusPort = if device_fixture_mode {
+        &fake_device_status
     } else {
-        &UnavailableDeviceStatusPort
-    });
+        &production_device_status
+    };
+    core.load_device_status(device_status);
     if args.iter().any(|a| a == "--sim-frame") {
         let path = value(&args, "--device").map_or_else(
             || env::var("PF_FB0").unwrap_or_else(|_| "/dev/fb0".into()),
@@ -644,6 +735,7 @@ fn main() -> Result<(), String> {
             network,
             time,
             transfer,
+            device_status,
             &state_dir,
             JsonRemapStore::at(remap_path),
         );
@@ -666,6 +758,7 @@ fn main() -> Result<(), String> {
             network,
             time,
             transfer,
+            device_status,
             &state_dir,
             JsonRemapStore::at(remap_path),
         );
@@ -1062,6 +1155,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     network: &mut dyn NetworkPort,
     time: &mut dyn TimePort,
     transfer: &mut dyn TransferPort,
+    device_status: &dyn DeviceStatusPort,
     state_dir: &Path,
     remap_store: JsonRemapStore,
 ) -> Result<(), String> {
@@ -1078,10 +1172,15 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     apply_text_scale(host, core)?;
     present_interactive(host, core, &activate)?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
+    let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     loop {
         let before = redraw_state(core);
         let poll = actions.next_action(host, deadline)?;
         drive_socket_session(core, &mut session)?;
+        if Instant::now() >= next_device_status_refresh {
+            core.load_device_status(device_status);
+            next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
+        }
         let ActionPoll::Event(ActionEvent::Action(action)) = poll else {
             if matches!(poll, ActionPoll::Closed) {
                 return Ok(());
@@ -4242,6 +4341,57 @@ exec="./launch"
             status.attention_message.as_deref(),
             Some("Controller battery low")
         );
+    }
+
+    fn write_power_supply(root: &Path, name: &str, capacity: &str, status: &str, scope: &str) {
+        let supply = root.join(name);
+        fs::create_dir(&supply).unwrap();
+        fs::write(supply.join("type"), "Battery\n").unwrap();
+        fs::write(supply.join("capacity"), format!("{capacity}\n")).unwrap();
+        fs::write(supply.join("status"), format!("{status}\n")).unwrap();
+        fs::write(supply.join("scope"), format!("{scope}\n")).unwrap();
+    }
+
+    #[test]
+    fn sysfs_device_status_reads_system_battery_and_ignores_non_batteries() {
+        let sysfs = tempfile::tempdir().unwrap();
+        write_power_supply(sysfs.path(), "BAT0", "73", "Discharging", "System");
+        let mains = sysfs.path().join("AC");
+        fs::create_dir(&mains).unwrap();
+        fs::write(mains.join("type"), "Mains\n").unwrap();
+        fs::write(mains.join("capacity"), "1\n").unwrap();
+        fs::write(mains.join("status"), "Unknown\n").unwrap();
+
+        let status = SysfsDeviceStatusPort::new(sysfs.path()).status().unwrap();
+
+        assert_eq!(status.battery_percent, 73);
+        assert_eq!(status.attention_message, None);
+    }
+
+    #[test]
+    fn sysfs_device_status_is_unavailable_without_a_valid_battery() {
+        let sysfs = tempfile::tempdir().unwrap();
+        write_power_supply(sysfs.path(), "BAT0", "unknown", "Discharging", "System");
+
+        assert!(SysfsDeviceStatusPort::new(sysfs.path()).status().is_err());
+    }
+
+    #[test]
+    fn sysfs_device_status_attention_tracks_low_battery_threshold_and_charging_state() {
+        let sysfs = tempfile::tempdir().unwrap();
+        write_power_supply(sysfs.path(), "BAT0", "64", "Discharging", "System");
+        write_power_supply(sysfs.path(), "controller", "21", "Discharging", "Device");
+        let port = SysfsDeviceStatusPort::new(sysfs.path());
+        assert_eq!(port.status().unwrap().attention_message, None);
+
+        fs::write(sysfs.path().join("controller/capacity"), "20\n").unwrap();
+        assert_eq!(
+            port.status().unwrap().attention_message.as_deref(),
+            Some("Controller battery low")
+        );
+
+        fs::write(sysfs.path().join("controller/status"), "Charging\n").unwrap();
+        assert_eq!(port.status().unwrap().attention_message, None);
     }
 
     #[test]

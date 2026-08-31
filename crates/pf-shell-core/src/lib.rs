@@ -1358,18 +1358,14 @@ impl ShellCore {
                 .copied(),
             Route::Search => self.search_results.get(self.focus).copied(),
             Route::Details | Route::VariantChooser => self.selected_item,
-            Route::Home => {
-                if self.focus < self.items.len() {
-                    Some(self.focus)
-                } else {
-                    self.items
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, item)| item.favorite)
-                        .nth(self.focus - self.items.len())
-                        .map(|(i, _)| i)
-                }
-            }
+            Route::Home => self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                .take(HOME_SHELF_LIMIT)
+                .nth(self.focus)
+                .map(|(index, _)| index),
             _ => None,
         }
     }
@@ -1393,7 +1389,13 @@ impl ShellCore {
             && let Some(item_id) = id.strip_prefix("item-")
             && let Some(index) = self.items.iter().position(|item| item.id == item_id)
             && let Some(focus) = match self.caller_route {
-                Route::Home => (index < self.focus_count()).then_some(index),
+                Route::Home => self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                    .take(HOME_SHELF_LIMIT)
+                    .position(|(item_index, _)| item_index == index),
                 Route::Library => self
                     .library_items
                     .iter()
@@ -2181,7 +2183,13 @@ impl ShellCore {
     }
     fn focus_count(&self) -> usize {
         match self.route {
-            Route::Home => self.items.len().clamp(1, HOME_SHELF_LIMIT),
+            Route::Home => self
+                .items
+                .iter()
+                .filter(|item| matches!(best_availability(item), Availability::Ready))
+                .take(HOME_SHELF_LIMIT)
+                .count()
+                .max(1),
             Route::Library => self.library_items.len() + 5,
             Route::Search => self.search_results.len().max(1),
             Route::Details => self.detail_pin_focus() + 1,
@@ -2915,12 +2923,13 @@ impl ShellCore {
                     "--color-status-attention",
                 ));
             }
-            let ready_count = self
+            let ready_items = self
                 .items
                 .iter()
-                .take(HOME_SHELF_LIMIT)
                 .filter(|item| matches!(best_availability(item), Availability::Ready))
-                .count();
+                .take(HOME_SHELF_LIMIT)
+                .collect::<Vec<_>>();
+            let ready_count = ready_items.len();
             content.push(
                 node(
                     "home-shelf-label",
@@ -2934,12 +2943,14 @@ impl ShellCore {
                 )
                 .with_type_role(TypeRole::Eyebrow),
             );
-            let shelf_count = self.items.len().min(HOME_SHELF_LIMIT);
+            let shelf_count = ready_items.len();
             let card_width = CARD_ART_WIDTH;
-            let available = (w - 96.0).max(0.0);
+            let horizontal_margin = 48.0;
+            let available = (w - horizontal_margin * 2.0).max(0.0);
             let mut visible_count = 1;
             let mut occupied = card_width;
-            while visible_count < shelf_count && occupied + HOME_SHELF_GAP + card_width <= available
+            while visible_count < shelf_count
+                && horizontal_margin * 2.0 + occupied + HOME_SHELF_GAP + card_width <= w
             {
                 visible_count += 1;
                 occupied += HOME_SHELF_GAP + card_width;
@@ -2953,16 +2964,14 @@ impl ShellCore {
             } else {
                 0.0
             };
-            for (i, item) in self
-                .items
-                .iter()
-                .take(HOME_SHELF_LIMIT)
+            for (i, item) in ready_items
+                .into_iter()
                 .skip(first_visible)
                 .take(visible_count)
                 .enumerate()
             {
                 let availability = best_availability(item);
-                let x = 48.0 + i as f32 * (card_width + gap);
+                let x = horizontal_margin + i as f32 * (card_width + gap);
                 let mut n = node(
                     &format!("item-{}", item.id),
                     Role::ListItem,
@@ -5333,7 +5342,6 @@ fn add_unavailable_card_cues(
     width: f32,
     footer_top: Option<f32>,
 ) {
-    let home = context == "home-card";
     let art_height = CARD_ART_HEIGHT;
     if matches!(availability, Availability::Ready)
         && best_variant(item).is_some_and(|variant| {
@@ -5369,7 +5377,6 @@ fn add_unavailable_card_cues(
             )
             .with_type_role(TypeRole::Caption),
         );
-        return;
     }
     if matches!(availability, Availability::IncompatibleRuntime { .. }) {
         nodes.push(
@@ -5388,12 +5395,6 @@ fn add_unavailable_card_cues(
         return;
     }
     if matches!(availability, Availability::Ready) {
-        return;
-    }
-    // Home is a six-item ready rail in the approved composition. Should live data place an
-    // unavailable item in that rail, its hero status remains truthful without adding a second
-    // state treatment or reason line to the compact card.
-    if home {
         return;
     }
     let badge = match availability {
@@ -6965,6 +6966,105 @@ mod tests {
         core
     }
 
+    #[test]
+    fn narrow_home_keeps_every_painted_card_inside_the_surface() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let scene = fixture_core(items)
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 480.0,
+                    logical_height: 800.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Portrait,
+                },
+                "",
+            )
+            .unwrap();
+
+        for card in scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("item-"))
+        {
+            assert!(
+                card.bounds.x >= 0.0,
+                "{} starts off-screen",
+                card.id.as_str()
+            );
+            assert!(
+                card.bounds.x + card.bounds.width <= 480.0,
+                "{} ends off-screen at {}",
+                card.id.as_str(),
+                card.bounds.x + card.bounds.width
+            );
+        }
+    }
+
+    #[test]
+    fn ready_now_skips_unavailable_catalog_entries_but_library_keeps_their_cues() {
+        let unavailable = item(
+            "offline",
+            "Offline Stream",
+            vec![variant(
+                "stream",
+                "offline-stream",
+                Availability::NeedsNetwork {
+                    reason: "connect to Wi-Fi".into(),
+                },
+            )],
+        );
+        let mut items = vec![unavailable];
+        items.extend((0..6).map(|index| {
+            item(
+                &format!("ready-{index}"),
+                &format!("Ready {index}"),
+                vec![variant(
+                    "native",
+                    &format!("ready-app-{index}"),
+                    Availability::Ready,
+                )],
+            )
+        }));
+        let mut core = fixture_core(items);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let home = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            node_by_id(home.root(), "home-shelf-label").map(|node| node.accessible_label.as_str()),
+            Some("READY NOW · 6")
+        );
+        assert!(node_by_id(home.root(), "item-offline").is_none());
+        for index in 0..6 {
+            assert!(node_by_id(home.root(), &format!("item-ready-{index}")).is_some());
+        }
+
+        core.go(Route::Library);
+        let library = core.scene(metrics, "").unwrap();
+        assert!(node_by_id(library.root(), "library-item-offline").is_some());
+        assert!(node_by_id(library.root(), "library-card-badge-offline").is_some());
+        assert!(node_by_id(library.root(), "library-card-reason-offline").is_some());
+    }
+
     fn node_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
         (node.id.as_str() == id)
             .then_some(node)
@@ -7607,7 +7707,7 @@ mod tests {
     }
 
     #[test]
-    fn home_hero_reports_needs_setup_instead_of_ready() {
+    fn home_hero_reports_nothing_ready_when_catalog_only_needs_setup() {
         let core = fixture_core(vec![item(
             "setup",
             "Setup Game",
@@ -7632,8 +7732,12 @@ mod tests {
             )
             .unwrap();
         let status = node_by_id(scene.root(), "hero-status").unwrap();
-        assert_eq!(status.accessible_label, "⊘ Needs setup · Game");
+        assert_eq!(status.accessible_label, "⊘ Unavailable · Game");
         assert!(!status.accessible_label.contains("Ready"));
+        assert_eq!(
+            node_by_id(scene.root(), "hero-title").map(|node| node.accessible_label.as_str()),
+            Some("Nothing ready")
+        );
     }
 
     #[test]
@@ -9837,24 +9941,17 @@ mod tests {
     }
 
     #[test]
-    fn home_card_focus_owner_is_actionable_without_a_duplicate_reason_caption() {
+    fn home_ready_card_focus_owner_is_actionable() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
                 .then_some(node)
                 .or_else(|| node.children.iter().find_map(|child| find(child, id)))
         }
 
-        let reason = "Content pack not installed until a profile is selected and the optional compatibility files have finished downloading";
         let mut core = fixture_core(vec![item(
-            "setup",
-            "Setup Game",
-            vec![variant(
-                "stream",
-                "setup-app",
-                Availability::NeedsSetup {
-                    reason: reason.into(),
-                },
-            )],
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
         )]);
         core.focus = 0;
         let scene = core
@@ -9869,8 +9966,8 @@ mod tests {
                 "",
             )
             .unwrap();
-        let card = find(scene.root(), "item-setup").unwrap();
-        let art = find(scene.root(), "home-card-art-setup").unwrap();
+        let card = find(scene.root(), "item-ready").unwrap();
+        let art = find(scene.root(), "home-card-art-ready").unwrap();
 
         assert_eq!(card.role, Role::ListItem);
         assert!(card.bounds.width >= art.bounds.width);
@@ -9887,23 +9984,19 @@ mod tests {
             .bounds;
         assert!(focus_bounds.width >= art.bounds.width);
         assert!(focus_bounds.height > art.bounds.height);
-        assert!(find(scene.root(), "home-card-initial-plate-setup").is_some());
+        assert!(find(scene.root(), "home-card-initial-plate-ready").is_some());
         assert!(
-            find(scene.root(), "home-card-veil-setup").is_none(),
-            "an unavailable artless plate retains its identity instead of receiving a veil"
+            find(scene.root(), "home-card-veil-ready").is_none(),
+            "a ready card must not receive an unavailable veil"
         );
         assert!(
-            find(scene.root(), "home-card-reason-setup").is_none(),
-            "Home cards must not repeat availability reasons below the canvas label"
-        );
-        assert!(
-            find(card, "home-card-title-setup").is_some(),
+            find(card, "home-card-title-ready").is_some(),
             "the painted title must belong to the card focus owner"
         );
     }
 
     #[test]
-    fn home_activation_and_footer_match_each_cards_availability() {
+    fn home_activation_and_footer_follow_the_filtered_ready_shelf() {
         fn prompt(scene: &Scene) -> &str {
             scene
                 .root()
@@ -9959,8 +10052,13 @@ mod tests {
                     },
                 )],
             ),
+            item(
+                "ready-two",
+                "Ready Game Two",
+                vec![variant("native", "ready-app-two", Availability::Ready)],
+            ),
         ]);
-        core.items[2].favorite = true;
+        core.items[3].favorite = true;
         core.set_control_bindings(bindings());
         assert_eq!(
             prompt(&core.scene(metrics, supplied_footer).unwrap()),
@@ -9973,21 +10071,18 @@ mod tests {
             }))
         );
 
-        for (focus, favorite_label) in [(1, "Favorite"), (2, "Unfavorite")] {
-            core.go(Route::Home);
-            core.focus = focus;
-            assert_eq!(
-                prompt(&core.scene(metrics, supplied_footer).unwrap()),
-                format!(
-                    "A Details     PF  Safe Return · button below the d-pad     X  {favorite_label}"
-                )
-            );
-            assert_eq!(core.action(&ShellAction::Activate), None);
-            assert_eq!(
-                (core.route(), core.selected_item),
-                (Route::Details, Some(focus))
-            );
-        }
+        core.go(Route::Home);
+        core.focus = 1;
+        assert_eq!(
+            prompt(&core.scene(metrics, supplied_footer).unwrap()),
+            "A Open     PF  Safe Return · button below the d-pad     X  Unfavorite"
+        );
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "ready-app-two".into(),
+            }))
+        );
     }
 
     #[test]

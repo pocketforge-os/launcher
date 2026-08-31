@@ -175,12 +175,12 @@ fn vertical_slice_frame_hashes_are_stable() {
         "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
         "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
-        // Library hashes intentionally rebaseline for the CSS-authoritative 76px toolbar,
-        // 160px grid content origin, six fluid columns, and 232px art height. Art remains
-        // below the footer fade with their intact label children; the fade and prompts
-        // now paint over row-two labels in the CSS-authoritative stacking order.
-        "6ec39d8712e1f645e2002cd1c5293efd0c1771cee9d582b581544e56c805ee78  ",
-        "6ec39d8712e1f645e2002cd1c5293efd0c1771cee9d582b581544e56c805ee78  ",
+        // Library hashes intentionally rebaseline for the CSS flex row's natural-width
+        // chips, divider-free 16px gaps, uniform selected border, and separator-free,
+        // right-aligned prompt groups. The approved design golden remains unchanged;
+        // the similarity ratchet rises with this fidelity correction.
+        "1b188263710705cfecac8949655749707fae47e425acb9e4380a0bd8b79931ed  ",
+        "1b188263710705cfecac8949655749707fae47e425acb9e4380a0bd8b79931ed  ",
         "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
         "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
         "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",

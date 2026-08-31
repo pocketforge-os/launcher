@@ -400,6 +400,7 @@ fn generate(design: &Path) -> Result<String, String> {
         "CARD_ART_HEIGHT",
     )?;
     component(&mut output, &shell, ".chip", "height", "CHIP_HEIGHT")?;
+    component_border_width(&mut output, &shell, ".chip", "border", "CHIP_BORDER_WIDTH")?;
     component_padding(
         &mut output,
         &shell,
@@ -414,6 +415,7 @@ fn generate(design: &Path) -> Result<String, String> {
         "border-left",
         "SEGMENT_DIVIDER_WIDTH",
     )?;
+    component(&mut output, &shell, "\n.keycap", "height", "KEYCAP_HEIGHT")?;
     output.push_str("pub const CARD_ART_ASPECT: f32 = CARD_ART_WIDTH / CARD_ART_HEIGHT;\n");
     Ok(output)
 }

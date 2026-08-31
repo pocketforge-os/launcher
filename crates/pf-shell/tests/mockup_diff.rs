@@ -7,7 +7,7 @@ const HEIGHT: u32 = 720;
 // explicitly forbids lowering these values; improvements should raise them.
 const SCREENS: [(&str, &str, f64); 5] = [
     ("home", "boot-home.png", 0.938_694),
-    ("library", "library.png", 0.976_297_852_271_696),
+    ("library", "library.png", 0.976_464_6),
     ("detail", "details.png", 0.940_459),
     ("settings", "settings.png", 0.959_066),
     ("high-contrast", "high-contrast.png", 0.911_423),

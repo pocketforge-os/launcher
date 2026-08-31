@@ -38,16 +38,17 @@ mod design_generated;
 mod design_manual;
 
 use design_generated::{
-    CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
+    CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
     COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
     COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
-    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
+    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_HEIGHT,
     LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_3, SPACE_4, SPACE_5,
-    SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
-    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
-    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4,
+    SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
+    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
+    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
+    STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -86,9 +87,8 @@ fn caption_text_width(text: &str) -> f32 {
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
-        + 20.0
         + count.map_or(0.0, |value| {
-            CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
+            CHIP_COUNT_GAP + label_text_width(&value.to_string())
         })
         + CHIP_HORIZONTAL_PADDING
 }
@@ -2827,7 +2827,7 @@ impl ShellCore {
                 {
                     prompts.push(prompt);
                 }
-                prompts.join(" · ")
+                prompts.join("     ")
             }
             Route::Details => {
                 let ready = self
@@ -3353,7 +3353,6 @@ impl ShellCore {
                 let active = self.library_filter == filter;
                 let chip_height = CHIP_HEIGHT;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
-                let label_width = label_text_width(&label) + 20.0;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -3367,6 +3366,49 @@ impl ShellCore {
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
+                if active {
+                    for (edge, x, y, width, height) in [
+                        (
+                            "top",
+                            chip.bounds.x,
+                            chip.bounds.y,
+                            chip.bounds.width,
+                            CHIP_BORDER_WIDTH,
+                        ),
+                        (
+                            "right",
+                            chip.bounds.x + chip.bounds.width - CHIP_BORDER_WIDTH,
+                            chip.bounds.y,
+                            CHIP_BORDER_WIDTH,
+                            chip.bounds.height,
+                        ),
+                        (
+                            "bottom",
+                            chip.bounds.x,
+                            chip.bounds.y + chip.bounds.height - CHIP_BORDER_WIDTH,
+                            chip.bounds.width,
+                            CHIP_BORDER_WIDTH,
+                        ),
+                        (
+                            "left",
+                            chip.bounds.x,
+                            chip.bounds.y,
+                            CHIP_BORDER_WIDTH,
+                            chip.bounds.height,
+                        ),
+                    ] {
+                        chip.children.push(node(
+                            &format!("library-filter-{index}-border-{edge}"),
+                            Role::Group,
+                            "",
+                            x,
+                            y,
+                            width,
+                            height,
+                            COLOR_BORDER_STRONG_TOKEN,
+                        ));
+                    }
+                }
                 chip.children.push({
                     let mut label_node = node(
                         &format!("library-filter-{index}-label"),
@@ -3374,7 +3416,7 @@ impl ShellCore {
                         &label,
                         chip.bounds.x + CHIP_HORIZONTAL_PADDING,
                         chip.bounds.y + 5.0,
-                        label_width,
+                        label_text_width(&label),
                         26.0,
                         chip.style_token.as_str(),
                     )
@@ -3388,11 +3430,9 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width
-                                - CHIP_HORIZONTAL_PADDING
-                                - (count_width + 12.0),
+                            chip.bounds.x + chip_width - CHIP_HORIZONTAL_PADDING - count_width,
                             chip.bounds.y + 5.0,
-                            count_width + 12.0,
+                            count_width,
                             26.0,
                             chip.style_token.as_str(),
                         )
@@ -3407,9 +3447,9 @@ impl ShellCore {
                         &format!("library-selected-underline-{index}"),
                         Role::Group,
                         "",
-                        chip_x + CHIP_HORIZONTAL_PADDING,
+                        chip_x + CHIP_BORDER_WIDTH,
                         toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
-                        chip_width - 2.0 * CHIP_HORIZONTAL_PADDING,
+                        chip_width - 2.0 * CHIP_BORDER_WIDTH,
                         3.0,
                         STATE_SELECTED_ACCENT_TOKEN,
                     ));
@@ -5938,7 +5978,25 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
 }
 
 fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
-    let mut nodes = home_prompt_nodes(footer, surface_width, surface_height);
+    let normalized = footer.replace("     ", " · ");
+    let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height);
+    nodes.retain(|node| !node.id.as_str().contains("prompt-separator"));
+    let prompt_top = surface_height - PROMPTS_AREA_HEIGHT;
+    let centered_y = prompt_top + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+    for node in &mut nodes {
+        let id = node.id.as_str();
+        let suffix = id
+            .strip_prefix("home-prompt-keycap-")
+            .or_else(|| id.strip_prefix("home-prompt-verb-"));
+        let Some(index) = suffix
+            .and_then(|suffix| suffix.split('-').next())
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        node.bounds.x -= index as f32 * SPACE_2;
+        node.bounds.y = centered_y;
+    }
     let right = nodes
         .iter()
         .map(|node| node.bounds.x + node.bounds.width)
@@ -10273,6 +10331,8 @@ mod tests {
             ("Games", Some(21)),
             ("Everything else", Some(3)),
         ];
+        assert!((search.bounds.x - SPACE_7).abs() < f32::EPSILON);
+        assert!(node_by_id(scene.root(), "library-toolbar-divider").is_none());
         for (index, (chip, (label, count))) in chips.iter().zip(expected_content).enumerate() {
             assert!(
                 (chip.bounds.width - library_chip_width(label, count)).abs() < f32::EPSILON,
@@ -10287,10 +10347,7 @@ mod tests {
                     && label_node.bounds.x + label_node.bounds.width <= inner_right,
                 "chip {index} label bounds must fit inside both horizontal paddings"
             );
-            assert!(
-                label_node.bounds.width >= label_text_width(label) + 20.0,
-                "chip {index} label must retain its shaped-text reserve"
-            );
+            assert!((label_node.bounds.width - label_text_width(label)).abs() < f32::EPSILON);
             if count.is_some() {
                 let count_node =
                     node_by_id(chip, &format!("library-filter-{index}-count")).unwrap();
@@ -10313,6 +10370,109 @@ mod tests {
         }
         let toolbar_gap = chips[0].bounds.x - search.bounds.x - search.bounds.width;
         assert!((toolbar_gap - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn desktop_library_footer_matches_promptbar_css_without_separators() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "item-0", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "shell".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let prompts = node_by_id(scene.root(), "prompts").unwrap();
+        assert!(!prompts.accessible_label.contains('·'));
+        assert!(
+            !prompts
+                .children
+                .iter()
+                .any(|node| node.accessible_label == "·" || node.id.as_str().contains("separator"))
+        );
+        let right = prompts
+            .children
+            .iter()
+            .map(|node| node.bounds.x + node.bounds.width)
+            .fold(0.0_f32, f32::max);
+        assert!((right - (1280.0 - SPACE_7)).abs() < f32::EPSILON);
+        let expected_top =
+            720.0 - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+        assert!(
+            prompts
+                .children
+                .iter()
+                .all(|node| (node.bounds.y - expected_top).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn selected_library_chip_uses_uniform_strong_border_and_full_inner_accent() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "item-0", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-0").unwrap();
+        assert_eq!(chip.style_token, STATE_REST_SURFACE_TOKEN);
+        for edge in ["top", "right", "bottom", "left"] {
+            assert_eq!(
+                node_by_id(chip, &format!("library-filter-0-border-{edge}"))
+                    .unwrap()
+                    .style_token,
+                COLOR_BORDER_STRONG_TOKEN
+            );
+        }
+        let accent = node_by_id(scene.root(), "library-selected-underline-0").unwrap();
+        assert!((accent.bounds.x - chip.bounds.x - CHIP_BORDER_WIDTH).abs() < f32::EPSILON);
+        assert!(
+            (accent.bounds.width - chip.bounds.width + 2.0 * CHIP_BORDER_WIDTH).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

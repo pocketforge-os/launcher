@@ -3350,7 +3350,9 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width - CHIP_HORIZONTAL_PADDING - count_width,
+                            chip.bounds.x + chip_width
+                                - CHIP_HORIZONTAL_PADDING
+                                - (count_width + 12.0),
                             chip.bounds.y + 5.0,
                             count_width + 12.0,
                             26.0,
@@ -8004,6 +8006,37 @@ mod tests {
         }
         assert!(debug.contains("library-filter-2-count"));
         assert!(debug.contains("library-filter-3-count"));
+    }
+
+    #[test]
+    fn library_filter_count_respects_chip_trailing_padding() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-2").unwrap();
+        let count_node = node_by_id(chip, "library-filter-2-count").unwrap();
+
+        let count_right = count_node.bounds.x + count_node.bounds.width;
+        let padded_chip_right = chip.bounds.x + chip.bounds.width - CHIP_HORIZONTAL_PADDING;
+        assert!(
+            (count_right - padded_chip_right).abs() < f32::EPSILON,
+            "library count must end at the generated chip trailing padding: {count_right} != {padded_chip_right}"
+        );
     }
 
     #[test]

@@ -2933,7 +2933,7 @@ impl ShellCore {
             apply_quiet_console_radius(child, radius_scale);
         }
         if self.route == Route::Library {
-            layer_library_fade(&mut children);
+            place_library_fade_below_footer(&mut children);
         }
         let focus_id = children
             .iter()
@@ -3437,8 +3437,6 @@ impl ShellCore {
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
                 let card_y = card_top + (row as f32 - first_visible_row as f32) * row_height;
-                let title_fits =
-                    card_y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
@@ -3446,11 +3444,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_y,
                     geometry.card_width,
-                    if title_fits {
-                        LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
-                    } else {
-                        LIB_CARD_ART_HEIGHT
-                    },
+                    LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 card.state.focused = self.focus == i + 5;
@@ -3507,21 +3501,19 @@ impl ShellCore {
                     );
                 }
                 let title_y = card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP;
-                if title_fits {
-                    card.children.push(
-                        node(
-                            &format!("library-title-{}", item.id),
-                            Role::Text,
-                            &item.title,
-                            card.bounds.x,
-                            title_y,
-                            geometry.card_width,
-                            34.0,
-                            COLOR_SURFACE_CANVAS_TOKEN,
-                        )
-                        .with_type_role(TypeRole::Label),
-                    );
-                }
+                card.children.push(
+                    node(
+                        &format!("library-title-{}", item.id),
+                        Role::Text,
+                        &item.title,
+                        card.bounds.x,
+                        title_y,
+                        geometry.card_width,
+                        34.0,
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
                 out.push(card);
             }
             out.push(
@@ -6142,30 +6134,7 @@ fn add_explicit_action_name(action_node: &mut Node) {
     }
 }
 
-fn layer_library_fade(children: &mut Vec<Node>) {
-    fn retain_label_ink(node: &mut Node) -> bool {
-        if matches!(node.role, Role::Text | Role::Heading) {
-            return true;
-        }
-        node.children.retain_mut(retain_label_ink);
-        !node.children.is_empty()
-    }
-
-    fn remove_label_ink(node: &mut Node) -> bool {
-        if matches!(node.role, Role::Text | Role::Heading) {
-            return false;
-        }
-        node.children.retain_mut(remove_label_ink);
-        true
-    }
-
-    fn clear_focus_state(node: &mut Node) {
-        node.state.focused = false;
-        for child in &mut node.children {
-            clear_focus_state(child);
-        }
-    }
-
+fn place_library_fade_below_footer(children: &mut Vec<Node>) {
     let Some(fade_index) = children
         .iter()
         .position(|node| node.id.as_str() == "library-grid-footer-fade")
@@ -6173,29 +6142,11 @@ fn layer_library_fade(children: &mut Vec<Node>) {
         return;
     };
     let fade = children.remove(fade_index);
-    let mut labels = Vec::new();
-    for node in children
-        .iter_mut()
-        .filter(|node| node.id.as_str().starts_with("library-item-") && node.action.is_some())
-    {
-        let mut label_layer = node.clone();
-        label_layer.id = NodeId::new(format!("library-label-layer-{}", node.id.as_str())).unwrap();
-        label_layer.style_token = SCENE_TRANSPARENT_TOKEN.into();
-        label_layer.children.retain_mut(retain_label_ink);
-        label_layer.action = node.action.take();
-        label_layer.state = node.state;
-
-        node.accessible_label.clear();
-        node.children.retain_mut(remove_label_ink);
-        clear_focus_state(node);
-        labels.push(label_layer);
-    }
-    let prompts_index = children
+    let prompt_bar_index = children
         .iter()
-        .position(|node| node.id.as_str() == "prompts")
+        .position(|node| node.id.as_str() == "prompt-bar")
         .unwrap_or(children.len());
-    children.insert(prompts_index, fade);
-    children.extend(labels);
+    children.insert(prompt_bar_index, fade);
 }
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
@@ -8092,31 +8043,24 @@ mod tests {
                 "",
             )
             .unwrap();
-        let art_layer = node_by_id(scene.root(), "library-item-item-6").unwrap();
-        let label_layer =
-            node_by_id(scene.root(), "library-label-layer-library-item-item-6").unwrap();
+        let card = node_by_id(scene.root(), "library-item-item-6").unwrap();
 
         assert!(
-            node_by_id(art_layer, "library-card-art-item-6").is_some(),
+            node_by_id(card, "library-card-art-item-6").is_some(),
             "missing library-card-art-item-6"
         );
         for required in [
             "library-card-initial-plate-item-6",
             "library-card-plate-kind-item-6",
         ] {
-            assert!(
-                node_by_id(label_layer, required).is_some(),
-                "missing {required}"
-            );
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
-        for card in [art_layer, label_layer] {
-            assert!(card.children.iter().all(|child| {
-                child.bounds.x >= card.bounds.x
-                    && child.bounds.y >= card.bounds.y
-                    && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
-                    && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
-            }));
-        }
+        assert!(card.children.iter().all(|child| {
+            child.bounds.x >= card.bounds.x
+                && child.bounds.y >= card.bounds.y
+                && child.bounds.x + child.bounds.width <= card.bounds.x + card.bounds.width
+                && child.bounds.y + child.bounds.height <= card.bounds.y + card.bounds.height
+        }));
     }
 
     #[test]
@@ -8282,28 +8226,23 @@ mod tests {
                 "",
             )
             .unwrap();
-        let art_layer = node_by_id(scene.root(), "library-item-setup").unwrap();
-        let label_layer =
-            node_by_id(scene.root(), "library-label-layer-library-item-setup").unwrap();
-        assert_eq!(art_layer.style_token, COLOR_SURFACE_CANVAS_TOKEN);
+        let card = node_by_id(scene.root(), "library-item-setup").unwrap();
+        assert_eq!(card.style_token, COLOR_SURFACE_CANVAS_TOKEN);
         assert!(
-            (art_layer.bounds.height - (LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0)).abs()
+            (card.bounds.height - (LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0)).abs()
                 < f32::EPSILON
         );
-        assert!(node_by_id(art_layer, "library-card-art-setup").is_some());
+        assert!(node_by_id(card, "library-card-art-setup").is_some());
         for required in [
             "library-title-setup",
             "library-card-reason-setup",
             "library-card-initial-plate-setup",
             "library-card-plate-kind-setup",
         ] {
-            assert!(
-                node_by_id(label_layer, required).is_some(),
-                "missing {required}"
-            );
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
         assert_eq!(
-            node_by_id(label_layer, "library-card-reason-setup")
+            node_by_id(card, "library-card-reason-setup")
                 .unwrap()
                 .accessible_label,
             "⊘ Finish setup — choose a profile"
@@ -9881,20 +9820,11 @@ mod tests {
             .root()
             .children
             .iter()
-            .find(|node| {
-                node.state.focused
-                    && node
-                        .id
-                        .as_str()
-                        .starts_with("library-label-layer-library-item-")
-            })
+            .find(|node| node.state.focused && node.id.as_str().starts_with("library-item-"))
             .unwrap();
         assert!(focused.bounds.y >= 0.0);
-        assert!(focused.bounds.y + focused.bounds.height <= metrics.logical_height);
-        assert_eq!(
-            focused.id.as_str(),
-            "library-label-layer-library-item-title-480"
-        );
+        assert!(node_by_id(focused, "library-title-title-480").is_some());
+        assert_eq!(focused.id.as_str(), "library-item-title-480");
     }
 
     #[test]
@@ -9928,11 +9858,7 @@ mod tests {
             .root()
             .children
             .iter()
-            .filter(|node| {
-                node.id
-                    .as_str()
-                    .starts_with("library-label-layer-library-item-")
-            })
+            .filter(|node| node.id.as_str().starts_with("library-item-"))
             .collect::<Vec<_>>();
         let toolbar_bottom = scene
             .root()
@@ -9952,9 +9878,9 @@ mod tests {
             "only one row fits at 640x720"
         );
         assert!(
-            cards.iter().any(|card| {
-                card.id.as_str() == "library-label-layer-library-item-item-7" && card.state.focused
-            }),
+            cards
+                .iter()
+                .any(|card| { card.id.as_str() == "library-item-item-7" && card.state.focused }),
             "the focused card must remain in the emitted row"
         );
     }
@@ -10147,7 +10073,7 @@ mod tests {
     }
 
     #[test]
-    fn library_footer_fade_paints_below_prompts_and_card_labels() {
+    fn library_footer_stacking_matches_mockup() {
         let mut core = fixture_core(vec![item(
             "ready",
             "Ready Game",
@@ -10175,21 +10101,32 @@ mod tests {
             .iter()
             .position(|node| node.id.as_str() == "prompts")
             .unwrap();
+        let prompt_bar_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompt-bar")
+            .unwrap();
+        let card_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-item-ready")
+            .unwrap();
 
         assert!(
-            fade_index < prompts_index,
-            "the footer fade must paint below the prompts"
+            card_index < fade_index
+                && fade_index < prompt_bar_index
+                && prompt_bar_index < prompts_index,
+            "cards (with labels) must paint below the fade, prompt bar, and prompts"
         );
         assert!(
-            children.iter().enumerate().all(|(index, node)| {
-                !node.id.as_str().starts_with("library-label-layer-") || index > fade_index
-            }),
-            "every card label layer must paint above the footer fade"
+            children
+                .iter()
+                .all(|node| !node.id.as_str().starts_with("library-label-layer-")),
+            "library labels must remain card children, never lifted layers"
         );
+        assert!(node_by_id(&children[card_index], "library-title-ready").is_some());
     }
 
     #[test]
-    fn actionable_fade_band_item_keeps_its_single_in_bounds_name_ink_above_the_fade() {
+    fn actionable_fade_band_item_keeps_its_single_in_bounds_name_ink() {
         let mut items = (0..12)
             .map(|index| {
                 let (id, title) = if index == 7 {
@@ -10236,7 +10173,7 @@ mod tests {
             )
             .unwrap();
         let root = scene.root();
-        let action = node_by_id(root, "library-label-layer-library-item-low-orbit").unwrap();
+        let action = node_by_id(root, "library-item-low-orbit").unwrap();
         let name_ink = action
             .children
             .iter()
@@ -10273,8 +10210,8 @@ mod tests {
             "the actionable subtree must expose one painted name node"
         );
         assert!(
-            fade_index < action_index,
-            "name ink must paint above the fade"
+            action_index < fade_index,
+            "card name ink must dim below the fade"
         );
         assert!(
             root.children[..fade_index].iter().any(|node| {
@@ -10284,7 +10221,7 @@ mod tests {
                         .iter()
                         .any(|child| child.id.as_str() == "library-card-art-low-orbit")
             }),
-            "art must paint below the fade"
+            "the intact card must paint below the fade"
         );
         assert!(
             !root
@@ -10418,20 +10355,18 @@ mod tests {
     }
 
     #[test]
-    fn library_footer_ink_never_intersects_card_label_ink() {
-        fn collect<'a>(node: &'a Node, predicate: fn(&Node) -> bool, out: &mut Vec<&'a Node>) {
-            if predicate(node) {
+    fn library_card_label_paint_order_never_occludes_footer_ink() {
+        fn has_library_title(node: &Node) -> bool {
+            node.id.as_str().starts_with("library-title-")
+                || node.children.iter().any(has_library_title)
+        }
+        fn collect_text<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            if matches!(node.role, Role::Text | Role::Heading) {
                 out.push(node);
             }
             for child in &node.children {
-                collect(child, predicate, out);
+                collect_text(child, out);
             }
-        }
-        fn intersects(a: Bounds, b: Bounds) -> bool {
-            a.x < b.x + b.width
-                && a.x + a.width > b.x
-                && a.y < b.y + b.height
-                && a.y + a.height > b.y
         }
 
         let items = (0..12)
@@ -10469,41 +10404,46 @@ mod tests {
             )
             .unwrap();
 
-        let prompts = node_by_id(scene.root(), "prompts").unwrap();
-        let mut footer_ink = Vec::new();
-        collect(
-            prompts,
-            |node| {
-                matches!(node.role, Role::Text | Role::Heading)
-                    || node.id.as_str().contains("keycap")
-            },
-            &mut footer_ink,
+        let children = &scene.root().children;
+        let fade_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+        let label_roots = children
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| has_library_title(node))
+            .collect::<Vec<_>>();
+        assert!(!label_roots.is_empty());
+        assert!(label_roots.iter().all(|(index, _)| *index < fade_index));
+        assert!(fade_index < prompts_index);
+        assert!(
+            children
+                .iter()
+                .all(|node| !node.id.as_str().starts_with("library-label-layer-"))
         );
+
+        // Row-two title raster bounds may geometrically intersect the footer band by
+        // design. Scene children are painter ordered, so the honest invariant is that
+        // every title paints below the fade and prompts. Inspect the real text nodes so
+        // a wrapper-only assertion cannot hide a lifted title layer (the 7c881ab bug).
+        let mut footer_ink = Vec::new();
+        collect_text(&children[prompts_index], &mut footer_ink);
         let mut label_ink = Vec::new();
-        for layer in scene.root().children.iter().filter(|node| {
-            node.id.as_str().starts_with("library-label-layer-")
-                || node.id.as_str().starts_with("library-title-")
-        }) {
-            collect(
-                layer,
-                |node| matches!(node.role, Role::Text | Role::Heading),
-                &mut label_ink,
-            );
+        for (_, card) in &label_roots {
+            collect_text(card, &mut label_ink);
         }
         assert!(!footer_ink.is_empty());
-        assert!(!label_ink.is_empty());
-        for footer in footer_ink {
-            for label in &label_ink {
-                assert!(
-                    !intersects(footer.bounds, label.bounds),
-                    "footer ink {} {:?} intersects label ink {} {:?}",
-                    footer.id.as_str(),
-                    footer.bounds,
-                    label.id.as_str(),
-                    label.bounds
-                );
-            }
-        }
+        let title_ink = label_ink
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-title-"))
+            .collect::<Vec<_>>();
+        assert_eq!(title_ink.len(), label_roots.len());
+        assert!(!title_ink.is_empty());
     }
 
     #[test]

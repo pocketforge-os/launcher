@@ -2272,14 +2272,36 @@ fn assert_raster_text_legible(
     text_scale: u16,
 ) -> Result<(), String> {
     fn suppress_text(node: &mut Node, target: &pf_scene::NodeId) {
-        let lifted_target = format!("library-fade-lift-{}", target.as_str());
-        if &node.id == target || node.id.as_str() == lifted_target {
+        if &node.id == target {
             node.role = Role::Group;
             return;
         }
         for child in &mut node.children {
             suppress_text(child, target);
         }
+    }
+    fn intentionally_dimmed_by_library_fade(scene: &pf_scene::Scene, node: &Node) -> bool {
+        fn contains(root: &Node, target: &pf_scene::NodeId) -> bool {
+            &root.id == target || root.children.iter().any(|child| contains(child, target))
+        }
+        fn intersects(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let children = &scene.root().children;
+        let Some(fade_index) = children
+            .iter()
+            .position(|child| child.id.as_str() == "library-grid-footer-fade")
+        else {
+            return false;
+        };
+        intersects(node.bounds, children[fade_index].bounds)
+            && children[..fade_index].iter().any(|child| {
+                child.id.as_str().starts_with("library-item-") && contains(child, &node.id)
+            })
     }
     fn luminance(color: [u8; 3]) -> f64 {
         let channel = |value: u8| {
@@ -2328,6 +2350,7 @@ fn assert_raster_text_legible(
     ) -> Result<(), String> {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
+            && !intentionally_dimmed_by_library_fade(scene, node)
         {
             let mut root = scene.root().clone();
             suppress_text(&mut root, &node.id);

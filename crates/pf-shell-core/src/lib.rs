@@ -3173,7 +3173,12 @@ impl ShellCore {
                     "--color-surface-canvas",
                 );
                 card.state.focused = self.focus == i + 5;
-                card.state.unavailable = !matches!(availability, Availability::Ready);
+                // The renderer's unavailable state scrims the complete subtree after children.
+                // Keep it for illustrated covers; an artless identity plate carries its own
+                // badge/reason and must retain legible mono and kind text.
+                card.state.unavailable = !matches!(availability, Availability::Ready)
+                    && item.art.is_some()
+                    && !item.art_failed;
                 card.action = Some(NodeAction::Activate);
                 card.children = art_nodes(
                     item,
@@ -3197,7 +3202,6 @@ impl ShellCore {
                 card.children.retain(|child| {
                     !child.id.as_str().contains("-title-")
                         && !child.id.as_str().contains("-label-mask-")
-                        && !child.id.as_str().contains("-plate-")
                 });
                 if self.focus == i + 5
                     && let Some(art) = card
@@ -4786,6 +4790,7 @@ impl ShellCore {
     }
 }
 
+#[allow(dead_code)]
 fn procedural_art_nodes(
     id: &str,
     title: &str,
@@ -5048,6 +5053,138 @@ fn procedural_art_nodes(
     nodes
 }
 
+fn plate_art_nodes(
+    item: &Item,
+    context: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    art_height: f32,
+) -> Vec<Node> {
+    let identity = item.id.rsplit(':').next().unwrap_or(&item.id);
+    let hash = identity
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
+        });
+    let palette = match identity {
+        "steam-link" => 0,
+        "tidelines" => 3,
+        _ => (hash % 6) as usize,
+    };
+    let background = [
+        "--deco-plate-a-bg",
+        "--deco-plate-b-bg",
+        "--deco-plate-c-bg",
+        "--deco-plate-d-bg",
+        "--deco-plate-e-bg",
+        "--deco-plate-f-bg",
+    ][palette];
+    let foreground = [
+        "--deco-plate-a-fg",
+        "--deco-plate-b-fg",
+        "--deco-plate-c-fg",
+        "--deco-plate-d-fg",
+        "--deco-plate-e-fg",
+        "--deco-plate-f-fg",
+    ][palette];
+    let favorite = context == "favorite-card";
+    let detail = context == "detail-art";
+    let art_x = if favorite { x + 4.0 } else { x + 8.0 };
+    let art_y = if favorite { y + 4.0 } else { y };
+    let art_width = if favorite { 56.0 } else { width - 16.0 };
+    let kind = item
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("kind-label:"))
+        .unwrap_or_else(|| sentence_kind(&item.kind));
+    let initial = item.title.chars().next().unwrap_or('?').to_string();
+    let mut nodes = vec![node(
+        &format!("{context}-art-{}", item.id),
+        Role::Group,
+        &format!("{} identity plate", item.title),
+        art_x,
+        art_y,
+        art_width,
+        art_height,
+        background,
+    )];
+    // CSS reference: `.plate .frame { inset: space-2; border: 1px; border-radius:
+    // calc(radius-m - 4px) }`. Four one-pixel scene edges preserve the exact 4 px inset
+    // without covering the translucent plate fill.
+    for (edge, edge_x, edge_y, edge_width, edge_height) in [
+        ("top", art_x + 4.0, art_y + 4.0, art_width - 8.0, 1.0),
+        (
+            "bottom",
+            art_x + 4.0,
+            art_y + art_height - 5.0,
+            art_width - 8.0,
+            1.0,
+        ),
+        ("left", art_x + 4.0, art_y + 4.0, 1.0, art_height - 8.0),
+        (
+            "right",
+            art_x + art_width - 5.0,
+            art_y + 4.0,
+            1.0,
+            art_height - 8.0,
+        ),
+    ] {
+        nodes.push(node(
+            &format!("{context}-plate-frame-{edge}-{}", item.id),
+            Role::Group,
+            "",
+            edge_x,
+            edge_y,
+            edge_width,
+            edge_height,
+            foreground,
+        ));
+    }
+    nodes.push(
+        node(
+            &format!("{context}-initial-plate-{}", item.id),
+            Role::Text,
+            &initial,
+            art_x,
+            art_y + art_height * 0.28,
+            art_width,
+            72.0,
+            background,
+        )
+        .with_type_role(TypeRole::Plate),
+    );
+    nodes.push(
+        node(
+            &format!("{context}-plate-kind-{}", item.id),
+            Role::Text,
+            kind,
+            art_x,
+            art_y + art_height * 0.62,
+            art_width,
+            24.0,
+            background,
+        )
+        .with_type_role(TypeRole::Eyebrow),
+    );
+    if !detail {
+        nodes.push(
+            node(
+                &format!("{context}-title-{}", item.id),
+                Role::Text,
+                &item.title,
+                if favorite { x + 68.0 } else { x },
+                if favorite { y + 32.0 } else { y + 176.0 },
+                if favorite { width - 72.0 } else { width },
+                if favorite { 32.0 } else { 28.0 },
+                "--color-surface-canvas",
+            )
+            .with_type_role(TypeRole::Label),
+        );
+    }
+    nodes
+}
+
 fn art_nodes(
     item: &Item,
     context: &str,
@@ -5097,17 +5234,8 @@ fn art_nodes(
             .with_type_role(TypeRole::Label),
         ];
     }
-    procedural_art_nodes(
-        &item.id,
-        &item.title,
-        Some(kind_text(&item.kind)),
-        context,
-        x,
-        y,
-        width,
-        art_height,
-        focused,
-    )
+    let _ = focused;
+    plate_art_nodes(item, context, x, y, width, art_height)
 }
 
 fn add_unavailable_card_cues(
@@ -5132,16 +5260,20 @@ fn add_unavailable_card_cues(
         Availability::UnsupportedCapability { .. } => "Unavailable",
         Availability::Ready => return,
     };
-    nodes.push(node(
-        &format!("{context}-veil-{}", item.id),
-        Role::Group,
-        "",
-        x + 8.0,
-        y,
-        width - 16.0,
-        art_height,
-        "--state-unavailable-veil",
-    ));
+    // Illustrated covers receive a dimming veil. Identity plates already encode their
+    // unavailable state with the art badge; veiling the plate would erase its mono/kind identity.
+    if item.art.is_some() && !item.art_failed {
+        nodes.push(node(
+            &format!("{context}-veil-{}", item.id),
+            Role::Group,
+            "",
+            x + 8.0,
+            y,
+            width - 16.0,
+            art_height,
+            "--state-unavailable-veil",
+        ));
+    }
     nodes.push(
         node(
             &format!("{context}-badge-{}", item.id),
@@ -5151,7 +5283,7 @@ fn add_unavailable_card_cues(
             y + 10.0,
             84.0,
             28.0,
-            "--color-surface-scrim",
+            "--color-surface-canvas",
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -5182,7 +5314,7 @@ fn add_unavailable_card_cues(
             reason_y,
             width,
             8.0 + 20.0 * reason_lines,
-            "--color-text-muted",
+            "--color-surface-canvas",
         )
         .with_type_role(TypeRole::Caption),
     );
@@ -7054,7 +7186,7 @@ mod tests {
     }
 
     #[test]
-    fn library_cards_are_art_label_and_optional_reason_without_caption_plates() {
+    fn artless_library_cards_keep_identity_plate_label_and_optional_reason() {
         let unavailable = item(
             "setup",
             "Setup Game",
@@ -7090,9 +7222,13 @@ mod tests {
         ] {
             assert!(node_by_id(card, required).is_some(), "missing {required}");
         }
-        assert!(card.children.iter().all(|child| {
-            !child.id.as_str().contains("-plate-") && !child.id.as_str().contains("-label-mask-")
-        }));
+        for required in [
+            "library-card-initial-plate-setup",
+            "library-card-plate-kind-setup",
+            "library-card-plate-frame-top-setup",
+        ] {
+            assert!(node_by_id(card, required).is_some(), "missing {required}");
+        }
         assert_eq!(
             node_by_id(card, "library-card-reason-setup")
                 .unwrap()
@@ -8951,7 +9087,7 @@ mod tests {
                 .iter()
                 .any(|node| node.id.as_str() == "favorite-pin-ridge")
         );
-        for part in ["art", "scene-0"] {
+        for part in ["art", "initial-plate", "plate-kind", "plate-frame-top"] {
             assert!(
                 favorite
                     .children
@@ -8966,13 +9102,9 @@ mod tests {
                 .any(|node| node.id.as_str() == "home-card-title-ridge"),
             "the painted Home title is a sibling of its focus owner"
         );
-        assert!(
-            favorite
-                .children
-                .iter()
-                .all(|node| node.id.as_str() != "home-card-plate-ridge"),
-            "the Home label must sit directly on the canvas"
-        );
+        assert!(favorite.children.iter().any(|node| {
+            node.id.as_str() == "home-card-initial-plate-ridge" && node.accessible_label == "R"
+        }));
         snapshot.user_projection.favorite_item_ids.clear();
         let empty = ShellCore::boot(&snapshot, &pf_theme::flagship(), false)
             .scene(metrics, "")
@@ -9305,11 +9437,10 @@ mod tests {
             art.bounds,
             "the focus ring must use the art bounds"
         );
-        assert!(find(scene.root(), "home-card-plate-setup").is_none());
-        assert_eq!(
-            find(scene.root(), "home-card-veil-setup").unwrap().bounds,
-            art.bounds,
-            "the unavailable tint is confined to the art"
+        assert!(find(scene.root(), "home-card-initial-plate-setup").is_some());
+        assert!(
+            find(scene.root(), "home-card-veil-setup").is_none(),
+            "an unavailable artless plate retains its identity instead of receiving a veil"
         );
         assert!(caption.accessible_label.ends_with('…'));
         assert!(

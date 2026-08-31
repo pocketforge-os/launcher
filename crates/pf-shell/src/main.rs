@@ -1,4 +1,7 @@
-use pf_catalog::{CatalogSnapshot, InstalledAppProvider};
+use pf_catalog::{
+    CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
+    VariantPinCommitResult,
+};
 use pf_framehost::{FbdevHost, OffscreenHost};
 #[cfg(feature = "wayland")]
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
@@ -50,7 +53,7 @@ const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact CatalogSnapshot JSON (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -162,10 +165,31 @@ impl KeyRepeatScheduler {
     }
 }
 
-fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
+fn vendored_art(reference: &str) -> Option<Arc<[u8]>> {
     match reference {
         "art/ridgeline.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/ridgeline.png")[..],
+        )),
+        "art/hollow-tides.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/hollow-tides.png")[..],
+        )),
+        "art/sunwake.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/sunwake.png")[..],
+        )),
+        "art/moth-and-lantern.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/moth-and-lantern.png")[..],
+        )),
+        "art/bellwether.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/bellwether.png")[..],
+        )),
+        "art/torchbug.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/torchbug.png")[..],
+        )),
+        "art/northlight.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/northlight.png")[..],
+        )),
+        "art/petrichor.png" => Some(Arc::from(
+            &include_bytes!("../fixtures/art/petrichor.png")[..],
         )),
         "art/corrupt.png" => Some(Arc::from(
             &include_bytes!("../fixtures/art/corrupt.png")[..],
@@ -175,7 +199,7 @@ fn fixture_art(reference: &str) -> Option<Arc<[u8]>> {
 }
 
 fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
-    ShellCore::boot_with_art(snapshot, theme, reduced, fixture_art)
+    ShellCore::boot_with_art(snapshot, theme, reduced, vendored_art)
 }
 
 fn catalog_art_paths(snapshot: &CatalogSnapshot) -> VecDeque<(String, PathBuf)> {
@@ -214,12 +238,48 @@ fn read_catalog_art(manifest_dir: &Path, reference: &str) -> Option<Arc<[u8]>> {
 fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
     let mut paths = catalog_art_paths(snapshot);
     ShellCore::boot_with_art(snapshot, theme, reduced, move |reference| {
+        if let Some(bytes) = vendored_art(reference) {
+            return Some(bytes);
+        }
         let index = paths
             .iter()
             .position(|(candidate, _)| candidate == reference)?;
         let (_, manifest_dir) = paths.remove(index)?;
         read_catalog_art(&manifest_dir, reference)
     })
+}
+
+struct SnapshotCatalog(CatalogSnapshot);
+
+impl FavoriteCatalog for SnapshotCatalog {
+    fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+        Ok(self.0.clone())
+    }
+
+    fn set_favorite(
+        &self,
+        _id: &str,
+        _value: bool,
+        _expected: CatalogRevision,
+    ) -> Result<FavoriteCommitResult, String> {
+        Err("catalog snapshots are read-only".into())
+    }
+
+    fn set_pinned_variant(
+        &self,
+        _item_id: &str,
+        _variant_id: Option<&str>,
+        _expected: CatalogRevision,
+    ) -> Result<VariantPinCommitResult, String> {
+        Err("catalog snapshots are read-only".into())
+    }
+}
+
+fn load_catalog_snapshot(path: &Path) -> Result<CatalogSnapshot, String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("catalog snapshot {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("catalog snapshot {}: {error}", path.display()))
 }
 
 fn fixture_device_ports() -> (FakeNetworkPort, FakeTimePort, FakeTransferPort) {
@@ -333,13 +393,27 @@ fn main() -> Result<(), String> {
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
-    let catalog = (!fixture_mode)
+    let snapshot_path = value(&args, "--catalog-snapshot").map(PathBuf::from);
+    let installed = (!fixture_mode && snapshot_path.is_none())
         .then(|| installed_app_provider(&catalog_root, state_dir.join("favorites.json")));
-    let snapshot: CatalogSnapshot = if let Some(provider) = &catalog {
+    let snapshot: CatalogSnapshot = if let Some(path) = &snapshot_path {
+        load_catalog_snapshot(path)?
+    } else if let Some(provider) = &installed {
         catalog_snapshot(provider, &catalog_root)?
     } else {
         serde_json::from_str(include_str!("../fixtures/catalog.json")).map_err(|e| e.to_string())?
     };
+    let snapshot_catalog = snapshot_path
+        .as_ref()
+        .map(|_| SnapshotCatalog(snapshot.clone()));
+    let catalog: Option<&dyn FavoriteCatalog> = installed
+        .as_ref()
+        .map(|provider| provider as &dyn FavoriteCatalog)
+        .or_else(|| {
+            snapshot_catalog
+                .as_ref()
+                .map(|provider| provider as &dyn FavoriteCatalog)
+        });
     let theme = pf_theme::flagship();
     let reduced = env::var_os("PF_REDUCE_MOTION").is_some();
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
@@ -359,7 +433,7 @@ fn main() -> Result<(), String> {
             footer.push_str(glyph);
         }
     }
-    let mut core = if fixture_mode {
+    let mut core = if fixture_mode || snapshot_path.is_some() {
         fixture_core(&snapshot, &theme, reduced)
     } else {
         catalog_core(&snapshot, &theme, reduced)
@@ -462,7 +536,7 @@ fn main() -> Result<(), String> {
             preferences,
             power,
             glyphs,
-            catalog.as_ref().expect("fbdev catalog"),
+            catalog.expect("fbdev catalog"),
             Path::new(session_socket),
             network,
             time,
@@ -484,7 +558,7 @@ fn main() -> Result<(), String> {
             preferences,
             power,
             glyphs,
-            catalog.as_ref().expect("wayland catalog"),
+            catalog.expect("wayland catalog"),
             Path::new(session_socket),
             network,
             time,
@@ -603,7 +677,7 @@ fn emit_f10_evidence(
     let unavailable_item = unavailable_snapshot
         .items
         .iter_mut()
-        .find(|item| item.id == "glass-harbor")
+        .find(|item| item.id == "steam-link")
         .ok_or("unavailable details fixture item missing")?;
     unavailable_item
         .variants
@@ -621,7 +695,7 @@ fn emit_f10_evidence(
     let item = chooser_snapshot
         .items
         .iter_mut()
-        .find(|item| item.id == "glass-harbor")
+        .find(|item| item.id == "moth-and-lantern")
         .ok_or("chooser fixture item missing")?;
     let mut second = item
         .variants
@@ -632,7 +706,7 @@ fn emit_f10_evidence(
     second.id = "handheld".into();
     second.provider_id = "fixture-c".into();
     second.provenance.provider_id = "fixture-c".into();
-    second.launch_target.app_id = "glass-harbor-handheld".into();
+    second.launch_target.app_id = "moth-and-lantern-handheld".into();
     item.variants.push(second);
     let mut chooser = fixture_core(&chooser_snapshot, theme, false);
     chooser.authority_snapshot(false);
@@ -2196,6 +2270,11 @@ fn validate_args(args: &[String]) -> Result<(), String> {
     {
         return Err("usage error: --fbdev conflicts with --settings-evidence".into());
     }
+    if value(args, "--catalog-root").is_some() && value(args, "--catalog-snapshot").is_some() {
+        return Err(
+            "usage error: --catalog-root and --catalog-snapshot cannot be used together".into(),
+        );
+    }
     Ok(())
 }
 fn hex(bytes: &[u8]) -> String {
@@ -2503,21 +2582,34 @@ mod durable_tests {
     }
 
     #[test]
-    fn fixture_library_has_six_distinct_scenic_ready_covers_and_honest_hero_fact() {
+    fn fixture_library_matches_the_six_item_mockup_roster_and_art_treatments() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         assert_eq!(snapshot.items.len(), 6);
-        assert!(snapshot.items.iter().all(|item| {
-            item.variants
-                .iter()
-                .any(|variant| matches!(variant.availability, pf_catalog::Availability::Ready))
-        }));
-        assert!(
+        assert_eq!(
             snapshot
                 .items
                 .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Ridgeline",
+                "Hollow Tides",
+                "Sunwake",
+                "Moth & Lantern",
+                "Steam Link",
+                "Tidelines"
+            ]
+        );
+        assert!(
+            snapshot.items[..4]
+                .iter()
                 .all(|item| item.tags.iter().any(|tag| tag.starts_with("playtime:")))
         );
+        assert!(matches!(
+            snapshot.items[4].variants[0].availability,
+            pf_catalog::Availability::NeedsNetwork { .. }
+        ));
 
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
@@ -2533,9 +2625,7 @@ mod durable_tests {
                 "",
             )
             .unwrap();
-        let mut palettes = std::collections::BTreeSet::new();
-        let expected_layers = [3, 4, 2, 5, 3, 4];
-        for (item, expected) in snapshot.items.iter().zip(expected_layers) {
+        for item in &snapshot.items {
             let card = scene
                 .root()
                 .children
@@ -2547,18 +2637,24 @@ mod durable_tests {
                 .iter()
                 .find(|node| node.id.as_str() == format!("home-card-art-{}", item.id))
                 .unwrap();
-            palettes.insert(art.style_token.clone());
             assert_eq!(
-                card.children
-                    .iter()
-                    .filter(|node| { node.id.as_str().starts_with("home-card-scene-") })
-                    .count(),
-                expected,
-                "{} scenic layer count",
+                matches!(art.content, pf_scene::NodeContent::Image { .. }),
+                !matches!(item.id.as_str(), "steam-link" | "tidelines"),
+                "{} art source",
                 item.id
             );
         }
-        assert_eq!(palettes.len(), 6);
+        for (id, initial, kind) in [("steam-link", "S", "Stream"), ("tidelines", "T", "Web app")] {
+            assert!(scene.root().children.iter().any(|card| {
+                card.children.iter().any(|node| {
+                    node.id.as_str() == format!("home-card-initial-plate-{id}")
+                        && node.accessible_label == initial
+                }) && card.children.iter().any(|node| {
+                    node.id.as_str() == format!("home-card-plate-kind-{id}")
+                        && node.accessible_label == kind
+                })
+            }));
+        }
         assert_eq!(
             scene
                 .root()
@@ -3643,6 +3739,45 @@ exec="./launch"
         assert!(error.contains("--settings-evidence"));
     }
 
+    #[test]
+    fn catalog_snapshot_flag_is_exact_and_conflicts_with_catalog_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        fs::write(&path, include_bytes!("../fixtures/catalog.json")).unwrap();
+        let snapshot = load_catalog_snapshot(&path).unwrap();
+        assert_eq!(
+            snapshot
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Ridgeline",
+                "Hollow Tides",
+                "Sunwake",
+                "Moth & Lantern",
+                "Steam Link",
+                "Tidelines"
+            ]
+        );
+        assert_eq!(
+            snapshot.items[0]
+                .tags
+                .iter()
+                .find(|tag| tag.starts_with("playtime:"))
+                .map(String::as_str),
+            Some("playtime:34 hours on the trail")
+        );
+        let args = vec![
+            "--catalog-root".into(),
+            "/path/that/must/not/be/scanned".into(),
+            "--catalog-snapshot".into(),
+            path.display().to_string(),
+        ];
+        let error = validate_args(&args).unwrap_err();
+        assert!(error.contains("cannot be used together"));
+    }
+
     #[cfg(not(feature = "wayland"))]
     #[test]
     fn wayland_flag_requires_wayland_feature() {
@@ -3750,7 +3885,7 @@ exec="./launch"
         let item = snapshot
             .items
             .iter_mut()
-            .find(|item| item.id == "glass-harbor")
+            .find(|item| item.id == "moth-and-lantern")
             .unwrap();
         let mut second = item
             .variants
@@ -3772,8 +3907,8 @@ exec="./launch"
         else {
             panic!("chooser must not emit a variant-memory effect");
         };
-        assert_eq!(item_id, "glass-harbor");
-        assert!(favorite);
+        assert_eq!(item_id, "moth-and-lantern");
+        assert!(!favorite);
         assert!(snapshot.user_projection.pinned_variant_ids.is_empty());
     }
 

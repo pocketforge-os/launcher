@@ -102,25 +102,90 @@ fn rendered_chrome_contains_sparse_shaped_glyph_ink() {
 }
 
 #[test]
+fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
+    let out = tempfile::tempdir().unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
+        .args([
+            "--offscreen",
+            "--device-fixtures",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let decoder = png::Decoder::new(std::fs::File::open(out.path().join("boot-home.png")).unwrap());
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    let pixels = &pixels[..info.buffer_size()];
+    let stride = info.width as usize * 4;
+
+    // Dusk secondary text is a light, nearly neutral tone. Restricting the scan to
+    // the text half of the pill excludes its amber status dot and surrounding wash.
+    let mut ink_rows = Vec::new();
+    let mut min_x = usize::MAX;
+    let mut max_x = 0;
+    for y in 77..110 {
+        let mut row_has_ink = false;
+        for x in 1070..1217 {
+            let offset = y * stride + x * 4;
+            let [red, green, blue] = [pixels[offset], pixels[offset + 1], pixels[offset + 2]];
+            if red > 120
+                && green > 120
+                && blue > 120
+                && red.abs_diff(green) < 35
+                && green.abs_diff(blue) < 35
+            {
+                row_has_ink = true;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+        }
+        if row_has_ink {
+            ink_rows.push(y);
+        }
+    }
+
+    assert!(
+        !ink_rows.is_empty(),
+        "attention message must produce raster ink"
+    );
+    assert!(
+        ink_rows.last().unwrap() - ink_rows[0] < 15,
+        "attention text must occupy one caption line-height band, got ink rows {ink_rows:?}"
+    );
+    assert!(
+        min_x >= 1070 && 1232 - max_x >= 15,
+        "capsule must enclose text ink with about 16px right padding (ink x={min_x}..={max_x})"
+    );
+}
+
+#[test]
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "6c8a608fe42231c94e9b4376dede8cc8991d697e4071ffbc3c0ddd220fa57101  ",
-        "cd671ca5ee78a5cc02def874f6028d28ef48a6704b67df81886318854745458b  ",
-        "6ef656141666316afb2e47039f0ad597c0513e3b89b51df11c70e9eeff42f7c6  ",
-        "e881a2c98af710b91336134a4372e8ad3cc568f19473979cae21787bfd4d2856  ",
-        "95a25fde1e26c61456c1ad3d99bff61e638c398c0eece86e46eed96631acb595  ",
-        "fe7468396a359f54c7d3501cdd30355ec76bcd049bc3fda3d877786ef5b8b8c1  ",
-        "2f838f36593acf7d5404a807aacb07ce21a8163c62dca9b77b2fbb651e912810  ",
-        "e3fde00407fdf0e290f51e659943f1869712734fffc9675bd54048c70f8e3d92  ",
-        "da92daa80fc3fe3a83d95ed670647345a1d1526ca7c477114e00b11e6af25927  ",
-        "34b7dce250b09a115ac1c3594f2dbf0fb5f96164c7a9fd56c4cd6454a10f0824  ",
+        "bd46c60817ed6916d21f0819c7badd79932493f03ac7b186c40b05ce94f934b7  ",
+        "0b0463b554d9086123b2641d0421aa4c0165e20565f3875b15c550007a3b9cca  ",
+        "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
+        "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
+        "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
+        "a1e4c99a83e2bcdfa326ca54534d3c8da7b22707278c7f3412e02f4133f7785f  ",
+        "a1e4c99a83e2bcdfa326ca54534d3c8da7b22707278c7f3412e02f4133f7785f  ",
+        "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
+        "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
+        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("cd671ca"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("0b0463b"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("e881a2c"),
+        lines.lines().nth(3).unwrap().starts_with("d3bca43"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -155,19 +220,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("e161e06a050d62ae22d69a8bdfdabb1bc93ff24e913e67172632f987e17e65f5  ")
+        transcript.contains("e8a86aa8e934d6b4fd6f1c10e774ccdc8d57aae0ff385c7ceab64a70d1a94c1c  ")
     );
     assert!(
-        transcript.contains("b81fac91ab3de7e699ee70d63272fc76bfdcc7392b3d8645cc27b30c4d9851a9  ")
+        transcript.contains("0b1ab03bd728fa5d17f3270bc5aaf7c010e7a9c525acbf658121682a3b11f669  ")
     );
     assert!(
-        transcript.contains("8ec6486f9be9a727a2afdf83f692d34a968be24dede9c371391177f96f2cb413  ")
+        transcript.contains("708578c894f705162d60c72056a32e8b5add474bd799754c531b4aa718051a3a  ")
     );
     assert!(
-        transcript.contains("f136866218046c6c1f0c1156f0354c7e660452ddc7da00b65d39fb09dc54c18d  ")
+        transcript.contains("6c345ac2580e69d6449ae92876d8e752bbdc3f6bedc04bfc9aad04882229228d  ")
     );
     assert!(
-        transcript.contains("633fed0596488cbd08a4f56f1ec3c69144218f9b3186bc2b53b3f47c2f6411af  ")
+        transcript.contains("38ae161596dfca2d70b353c1937f54feebd49de481e1fe6a2a2ad5eeb43c9cc9  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());
@@ -195,6 +260,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("979316d53111457d9deede97b9744517a66f3be7e2f57742b29f86e5afe235b5  ")
+        transcript.contains("30e2194cfc6af8252a42940ba7f37020e3c77bcf207a3cf9e8d9bb00f29c6e92  ")
     );
 }

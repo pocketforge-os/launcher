@@ -64,10 +64,10 @@ fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * 8.0
 }
 
-// The flagship caption role is 12 px Manrope medium. Keep capsule geometry
-// renderer-independent while approximating its average glyph advance.
+// The flagship caption role is 12 px Manrope medium. This conservative advance is
+// calibrated against the deterministic Cosmic Text/Manrope rasterizer.
 fn caption_text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * 6.0
+    text.chars().count() as f32 * 6.5
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
@@ -2721,7 +2721,7 @@ impl ShellCore {
                         16.0,
                         width,
                         32.0,
-                        "--color-surface-raised",
+                        "--color-transparent",
                     )
                     .with_type_role(TypeRole::Label),
                 );
@@ -3057,10 +3057,8 @@ impl ShellCore {
                 const PILL_HORIZONTAL_PADDING: f32 = 16.0;
                 const PILL_GAP: f32 = 8.0;
                 const DOT_SIZE: f32 = 6.4;
-                let pill_width = PILL_HORIZONTAL_PADDING * 2.0
-                    + DOT_SIZE
-                    + PILL_GAP
-                    + caption_text_width(message);
+                let text_width = caption_text_width(message);
+                let pill_width = PILL_HORIZONTAL_PADDING * 2.0 + DOT_SIZE + PILL_GAP + text_width;
                 let pill_left = w - PILL_RIGHT_MARGIN - pill_width;
                 content.push(node(
                     "attention-pill-border",
@@ -3099,7 +3097,7 @@ impl ShellCore {
                         message,
                         pill_left + PILL_HORIZONTAL_PADDING + DOT_SIZE + PILL_GAP,
                         PILL_TOP,
-                        caption_text_width(message),
+                        text_width,
                         PILL_HEIGHT,
                         "--color-transparent",
                     )
@@ -10005,9 +10003,9 @@ mod tests {
             Some("Controller battery low")
         );
         let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
-        assert!((pill_border.bounds.x - 1054.0).abs() <= 2.0);
+        assert!((pill_border.bounds.x - 1043.0).abs() <= 2.0);
         assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
-        assert!((pill_border.bounds.width - 178.0).abs() <= 2.0);
+        assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
         assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
         assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
         assert_eq!(pill_border.style_token, "--color-border-hairline");
@@ -10055,7 +10053,13 @@ mod tests {
         )]);
         let scene = core.scene(metrics, "").unwrap();
 
-        for id in ["rooms", "status-cluster"] {
+        for id in [
+            "rooms",
+            "status-cluster",
+            "room-home",
+            "room-library",
+            "room-settings",
+        ] {
             assert_eq!(
                 node_by_id(scene.root(), id).unwrap().style_token,
                 "--color-transparent",

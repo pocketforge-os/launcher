@@ -85,6 +85,7 @@ fn caption_text_width(text: &str) -> f32 {
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
+        + 20.0
         + count.map_or(0.0, |value| {
             CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
         })
@@ -3350,7 +3351,7 @@ impl ShellCore {
                 let active = self.library_filter == filter;
                 let chip_height = CHIP_HEIGHT;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
-                let label_width = label_text_width(&label);
+                let label_width = label_text_width(&label) + 20.0;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -10026,11 +10027,23 @@ mod tests {
 
     #[test]
     fn desktop_library_toolbar_uses_mockup_flex_geometry() {
-        let mut core = fixture_core(vec![item(
-            "game",
-            "Game",
-            vec![variant("native", "game", Availability::Ready)],
-        )]);
+        let mut items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("item-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &mut items[21..] {
+            item.kind = AppKind::Media;
+        }
+        let mut core = fixture_core(items);
         core.go(Route::Library);
         let scene = core
             .scene(
@@ -10048,6 +10061,45 @@ mod tests {
         let chips = (0..4)
             .map(|index| node_by_id(scene.root(), &format!("library-filter-{index}")).unwrap())
             .collect::<Vec<_>>();
+        let expected_content = [
+            ("Recent", None),
+            ("A–Z", None),
+            ("Games", Some(21)),
+            ("Everything else", Some(3)),
+        ];
+        for (index, (chip, (label, count))) in chips.iter().zip(expected_content).enumerate() {
+            assert!(
+                (chip.bounds.width - library_chip_width(label, count)).abs() < f32::EPSILON,
+                "chip {index} must use its natural content width"
+            );
+
+            let inner_left = chip.bounds.x + CHIP_HORIZONTAL_PADDING;
+            let inner_right = chip.bounds.x + chip.bounds.width - CHIP_HORIZONTAL_PADDING;
+            let label_node = node_by_id(chip, &format!("library-filter-{index}-label")).unwrap();
+            assert!(
+                label_node.bounds.x >= inner_left
+                    && label_node.bounds.x + label_node.bounds.width <= inner_right,
+                "chip {index} label bounds must fit inside both horizontal paddings"
+            );
+            assert!(
+                label_node.bounds.width >= label_text_width(label) + 20.0,
+                "chip {index} label must retain its shaped-text reserve"
+            );
+            if count.is_some() {
+                let count_node =
+                    node_by_id(chip, &format!("library-filter-{index}-count")).unwrap();
+                assert!(
+                    count_node.bounds.x >= inner_left
+                        && count_node.bounds.x + count_node.bounds.width <= inner_right,
+                    "chip {index} count bounds must fit inside both horizontal paddings"
+                );
+                assert!(
+                    count_node.bounds.x
+                        >= label_node.bounds.x + label_node.bounds.width + CHIP_COUNT_GAP,
+                    "chip {index} label and count must retain the design gap"
+                );
+            }
+        }
         assert!((chips[3].bounds.x + chips[3].bounds.width - 1232.0).abs() < f32::EPSILON);
         for pair in chips.windows(2) {
             let gap = pair[1].bounds.x - pair[0].bounds.x - pair[0].bounds.width;

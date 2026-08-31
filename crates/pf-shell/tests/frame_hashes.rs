@@ -175,11 +175,12 @@ fn vertical_slice_frame_hashes_are_stable() {
         "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
         "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
-        "a1e4c99a83e2bcdfa326ca54534d3c8da7b22707278c7f3412e02f4133f7785f  ",
-        "a1e4c99a83e2bcdfa326ca54534d3c8da7b22707278c7f3412e02f4133f7785f  ",
+        // Library chips reserve the generated 16px horizontal padding on both sides.
+        "263c9b3ef7d3f8d361b04f813317430f8a3feb821d8513b0acb33d216c560d17  ",
+        "263c9b3ef7d3f8d361b04f813317430f8a3feb821d8513b0acb33d216c560d17  ",
         "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
         "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
-        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
+        "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }

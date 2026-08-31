@@ -1,0 +1,310 @@
+/* ============================================================================
+   QUIET CONSOLE — semantic token vocabulary + flagship binding
+   direction: quiet-console (tsp-op5a.7)
+
+   Structure (theme-architecture §4.2 three-layer model):
+     1. BRAND PRIMITIVES  (--qc-*)      — this direction's raw palette. Themes
+        replace this layer wholesale. Nothing outside this file may reference
+        a primitive directly.
+     2. SEMANTIC TOKENS   (--color-*, --type-*, --space-*, --radius-*,
+        --elev-*, --motion-*, --state-*) — the named vocabulary components
+        consume. The SET of these names is the deliverable; this file's values
+        are merely the first (flagship) binding.
+     3. Components (shell.css) reference ONLY layer 2. No literal color,
+        duration, or easing exists outside this file and declared art assets.
+
+   Three first-class bases (§5 req 7), same vocabulary, three bindings:
+     :root                     — "Dusk"  (dark default)
+     [data-base="day"]         — "Day"   (light, first-class)
+     [data-base="contrast"]    — "High Contrast"
+
+   Motion intents (§5 req 3): named intents with one timing table per theme.
+   Reduced motion is structural: the [data-reduce-motion] / media-query block
+   at the end resolves EVERY intent to a complete stop; no theme can defeat it.
+   ========================================================================= */
+
+/* ---------- Typography (committed OFL assets, fonts/) --------------------- */
+
+@font-face {
+  font-family: "Manrope";
+  src: url("fonts/manrope/Manrope[wght].ttf") format("truetype-variations");
+  font-weight: 200 800;
+  font-display: block;
+}
+@font-face {
+  font-family: "Fraunces";
+  src: url("fonts/fraunces/Fraunces[SOFT,WONK,opsz,wght].ttf") format("truetype-variations");
+  font-weight: 100 900;
+  font-display: block;
+}
+@font-face {
+  font-family: "Fraunces";
+  font-style: italic;
+  src: url("fonts/fraunces/Fraunces-Italic[SOFT,WONK,opsz,wght].ttf") format("truetype-variations");
+  font-weight: 100 900;
+  font-display: block;
+}
+
+/* ============================================================================
+   1. BRAND PRIMITIVES — "Dusk" palette (warm graphite + lamplight)
+   ========================================================================= */
+:root {
+  /* graphite ramp (warm, never blue) */
+  --qc-g0:  #100f0d;   /* deepest — letterbox / launch dim            */
+  --qc-g1:  #171512;   /* canvas                                      */
+  --qc-g2:  #201d19;   /* raised surface (cards, rows)                */
+  --qc-g3:  #2a2621;   /* higher surface (overlay, chips)             */
+  --qc-g4:  #37322b;   /* hairline / sunken border                    */
+  --qc-g5:  #4a443b;   /* strong border                               */
+
+  /* ink ramp (warm ivory) */
+  --qc-i0:  #f4efe6;   /* primary text                                */
+  --qc-i1:  #c9c2b4;   /* secondary text                              */
+  --qc-i2:  #8f8879;   /* muted text / captions                       */
+
+  /* lamplight (the focus identity — warm shelf-light, NOT ember orange) */
+  --qc-lamp:      #f3dfae;
+  --qc-lamp-deep: #d9b96f;
+
+  /* state hues */
+  --qc-ready:  #8fd6a4;
+  --qc-warn:   #e5b567;
+  --qc-danger: #e07a6e;
+
+  /* selection (persistent, quieter than focus) */
+  --qc-select: #b7ae9b;
+
+  /* plate duotone pairs — decoration primitives for generated fallback art.
+     Plates are theme-reskinnable BY CONSTRUCTION because they bind here. */
+  --qc-plate-a-bg: #23303048; --qc-plate-a-fg: #9fc4bc;
+  --qc-plate-b-bg: #322b3948; --qc-plate-b-fg: #b3a3cf;
+  --qc-plate-c-bg: #38302348; --qc-plate-c-fg: #cfb08a;
+  --qc-plate-d-bg: #2b333f48; --qc-plate-d-fg: #93b1cd;
+  --qc-plate-e-bg: #35292948; --qc-plate-e-fg: #cf9d9d;
+  --qc-plate-f-bg: #29352948; --qc-plate-f-fg: #a3c79f;
+}
+
+/* ============================================================================
+   2. SEMANTIC TOKENS — the vocabulary. Components consume ONLY these.
+   ========================================================================= */
+:root {
+  /* -- surfaces ---------------------------------------------------------- */
+  --color-surface-canvas:  var(--qc-g1);
+  --color-surface-raised:  var(--qc-g2);
+  --color-surface-overlay: var(--qc-g3);
+  --color-surface-sunken:  var(--qc-g0);
+  /* scrim: the declared surface contrast-sensitive content sits on when it
+     meets a decoration layer (§4.3a composition rule). Opaque enough that
+     the token pair (scrim, text) is what a validation gate checks. */
+  --color-surface-scrim:   rgba(16, 15, 13, 0.78);
+
+  /* -- text roles -------------------------------------------------------- */
+  --color-text-primary:   var(--qc-i0);
+  --color-text-secondary: var(--qc-i1);
+  --color-text-muted:     var(--qc-i2);
+  --color-text-inverse:   var(--qc-g1);
+
+  /* -- borders ----------------------------------------------------------- */
+  --color-border-hairline: var(--qc-g4);
+  --color-border-strong:   var(--qc-g5);
+
+  /* -- focus (structural primitive, §5 req 6 — theme supplies color only) - */
+  --color-focus-ring:  var(--qc-lamp);
+  --color-focus-glow:  rgba(243, 223, 174, 0.28);
+  --focus-ring-width:  2px;
+  --focus-ring-offset: 3px;
+
+  /* -- the seven-state grammar (§5 req 5) --------------------------------
+     Each state = surface/text/accent tokens + a MANDATORY non-color cue
+     (cue is component structure, listed here for the record):
+       rest        — baseline; cue: none needed
+       focused     — cue: lamplight ring + scale (shape, not hue alone)
+       selected    — cue: corner pip glyph + underline bar
+       pressed     — cue: 1px inset offset
+       disabled    — cue: dashed hairline + em-dash prompt (no action exists)
+       unavailable — cue: slash-circle glyph + exact reason text
+       destructive — cue: warning glyph + confirm language                  */
+  --state-rest-surface:        var(--color-surface-raised);
+  --state-rest-text:           var(--color-text-primary);
+  --state-focused-ring:        var(--color-focus-ring);
+  --state-focused-text:        var(--color-text-primary);
+  --state-selected-accent:     var(--qc-select);
+  --state-pressed-shift:       1px;
+  --state-disabled-text:       var(--qc-i2);
+  --state-disabled-border:     var(--qc-g4);
+  --state-unavailable-text:    var(--qc-i1);
+  --state-unavailable-veil:    rgba(23, 21, 18, 0.55);
+  --state-destructive-accent:  var(--qc-danger);
+
+  /* -- availability / status roles --------------------------------------- */
+  --color-status-ready:     var(--qc-ready);
+  --color-status-attention: var(--qc-warn);
+  --color-status-stopped:   var(--qc-i2);
+
+  /* -- decoration slots (§5 req 4 — absent-safe, never load-bearing) ------ */
+  --deco-plate-a-bg: var(--qc-plate-a-bg); --deco-plate-a-fg: var(--qc-plate-a-fg);
+  --deco-plate-b-bg: var(--qc-plate-b-bg); --deco-plate-b-fg: var(--qc-plate-b-fg);
+  --deco-plate-c-bg: var(--qc-plate-c-bg); --deco-plate-c-fg: var(--qc-plate-c-fg);
+  --deco-plate-d-bg: var(--qc-plate-d-bg); --deco-plate-d-fg: var(--qc-plate-d-fg);
+  --deco-plate-e-bg: var(--qc-plate-e-bg); --deco-plate-e-fg: var(--qc-plate-e-fg);
+  --deco-plate-f-bg: var(--qc-plate-f-bg); --deco-plate-f-fg: var(--qc-plate-f-fg);
+  /* aura: stand-in for the per-item PRE-BAKED backdrop gradient asset
+     (render-capability row 2 — static gradient, CONFIRMED-cheap). */
+  --deco-aura-opacity: 0.55;
+
+  /* -- type -------------------------------------------------------------- */
+  --type-family-ui:      "Manrope", system-ui, sans-serif;
+  --type-family-display: "Manrope", system-ui, sans-serif;
+  --type-family-plate:   "Fraunces", serif;      /* generated-art monograms */
+
+  --text-scale: 1;   /* accessibility text-scale multiplier (200% proof) */
+
+  --type-hero-size:    3.25rem;  --type-hero-weight: 800;
+  --type-title-size:   2.125rem; --type-title-weight: 800;
+  --type-h1-size:      1.375rem; --type-h1-weight: 700;
+  --type-body-size:    0.9375rem;--type-body-weight: 500;
+  --type-label-size:   0.875rem; --type-label-weight: 600;
+  --type-caption-size: 0.78125rem; --type-caption-weight: 600;
+  --type-eyebrow-size: 0.71875rem; --type-eyebrow-weight: 700;
+  --type-eyebrow-tracking: 0.14em;
+
+  /* -- space rhythm (4px base — fixed; text reflows, rhythm holds) -------- */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+
+  /* -- radius ------------------------------------------------------------ */
+  --radius-s: 6px; --radius-m: 10px; --radius-l: 16px; --radius-pill: 999px;
+
+  /* -- elevation ---------------------------------------------------------
+     In the mockups these are box-shadows; on device each is a PRE-BAKED
+     9-slice shadow sprite (render-capability row 3, CONFIRMED). No live
+     blur exists anywhere in this direction (row 4 is ✗ on CPU).           */
+  --elev-1: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --elev-2: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --elev-focus: 0 6px 26px var(--color-focus-glow);
+
+  /* -- motion intents (§5 req 3): flagship timing table ------------------ */
+  --motion-focus-duration:   140ms;  /* focus ring/scale arrives            */
+  --motion-shelf-duration:   240ms;  /* shelf glide                         */
+  --motion-route-duration:   220ms;  /* route crossfade/slide               */
+  --motion-launch-duration:  420ms;  /* the signature "lights down" moment  */
+  --motion-return-duration:  260ms;  /* lights back up on the last route
+                                        (normal exit + boot-to-Home arrival;
+                                        spec/MOTION.md — no receipt exists)  */
+  --motion-overlay-duration: 180ms;  /* Quick / chooser panel + scrim       */
+  --motion-crash-duration:   320ms;  /* crash surface settles in from black */
+  --ease-out:   cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ease-inout: cubic-bezier(0.45, 0, 0.25, 1);
+}
+
+/* ============================================================================
+   BASE: "Day" — first-class light binding (not an inversion; warm paper)
+   ========================================================================= */
+[data-base="day"] {
+  --qc-g0: #d8d2c4;
+  --qc-g1: #f2eee4;   /* canvas: warm paper                              */
+  --qc-g2: #faf8f2;   /* raised: brighter than canvas (paper on paper)   */
+  --qc-g3: #ffffff;
+  --qc-g4: #d9d2c2;
+  --qc-g5: #b5ac97;
+
+  --qc-i0: #26221a;
+  --qc-i1: #57503f;
+  --qc-i2: #6b634d;
+
+  --qc-lamp:      #8a6414;   /* lamplight becomes warm amber INK on paper */
+  --qc-lamp-deep: #6d4e0e;
+  --color-focus-glow: rgba(138, 100, 20, 0.18);
+
+  --qc-ready:  #23713c;
+  --qc-warn:   #8a5a10;
+  --qc-danger: #a83a2e;
+  --qc-select: #6b6350;
+
+  --color-surface-scrim: rgba(250, 248, 242, 0.82);
+  --color-text-inverse:  #f2eee4;
+  --state-unavailable-veil: rgba(242, 238, 228, 0.55);
+
+  --qc-plate-a-bg: #dce7e448; --qc-plate-a-fg: #3c6a60;
+  --qc-plate-b-bg: #e4deec48; --qc-plate-b-fg: #5d4a80;
+  --qc-plate-c-bg: #ece2d048; --qc-plate-c-fg: #7a5a28;
+  --qc-plate-d-bg: #dde4ec48; --qc-plate-d-fg: #3e5a78;
+  --qc-plate-e-bg: #ecdcdc48; --qc-plate-e-fg: #7c4646;
+  --qc-plate-f-bg: #deeadc48; --qc-plate-f-fg: #45683f;
+
+  --elev-1: 0 2px 10px rgba(84, 74, 55, 0.18);
+  --elev-2: 0 10px 28px rgba(84, 74, 55, 0.26);
+  --elev-focus: 0 6px 26px var(--color-focus-glow);
+}
+
+/* ============================================================================
+   BASE: "High Contrast" — same structure, maximum legibility
+   Flat (no shadows), heavier borders, single loud focus. Non-color cues
+   already structural, so this base only re-binds values.
+   ========================================================================= */
+[data-base="contrast"] {
+  --qc-g0: #000000;
+  --qc-g1: #000000;
+  --qc-g2: #0a0a0a;
+  --qc-g3: #141414;
+  --qc-g4: #8a8a8a;
+  --qc-g5: #ffffff;
+
+  --qc-i0: #ffffff;
+  --qc-i1: #e8e8e8;
+  --qc-i2: #bdbdbd;
+
+  --qc-lamp:      #ffd83d;
+  --qc-lamp-deep: #ffd83d;
+  --color-focus-glow: rgba(0, 0, 0, 0);
+  --focus-ring-width: 3px;
+
+  --qc-ready:  #6fe595;
+  --qc-warn:   #ffc266;
+  --qc-danger: #ff8d80;
+  --qc-select: #ffffff;
+
+  --color-surface-scrim: rgba(0, 0, 0, 0.92);
+  --color-text-inverse:  #000000;
+  --state-unavailable-veil: rgba(0, 0, 0, 0.6);
+
+  --qc-plate-a-bg: #0a0a0a48; --qc-plate-a-fg: #baf0e4;
+  --qc-plate-b-bg: #0a0a0a48; --qc-plate-b-fg: #d8c8f8;
+  --qc-plate-c-bg: #0a0a0a48; --qc-plate-c-fg: #f2d8a8;
+  --qc-plate-d-bg: #0a0a0a48; --qc-plate-d-fg: #bcd8f4;
+  --qc-plate-e-bg: #0a0a0a48; --qc-plate-e-fg: #f4c2c2;
+  --qc-plate-f-bg: #0a0a0a48; --qc-plate-f-fg: #c6ecc0;
+
+  --elev-1: none;
+  --elev-2: none;
+  --elev-focus: none;
+  --deco-aura-opacity: 0;   /* decoration layer absent — screen stays whole */
+}
+
+/* ============================================================================
+   REDUCED MOTION — structural stop (§5 req 3). Both the OS-level media query
+   and the preference-service attribute resolve every intent to zero;
+   themes cannot override this block (it follows all bindings).
+   ========================================================================= */
+@media (prefers-reduced-motion: reduce) {
+  :root, [data-base] {
+    --motion-focus-duration:   0ms;
+    --motion-shelf-duration:   0ms;
+    --motion-route-duration:   0ms;
+    --motion-launch-duration:  0ms;
+    --motion-return-duration:  0ms;
+    --motion-overlay-duration: 0ms;
+    --motion-crash-duration:   0ms;
+  }
+}
+[data-text-scale="2"] { --text-scale: 2; }
+
+[data-reduce-motion="true"] {
+  --motion-focus-duration:   0ms !important;
+  --motion-shelf-duration:   0ms !important;
+  --motion-route-duration:   0ms !important;
+  --motion-launch-duration:  0ms !important;
+  --motion-return-duration:  0ms !important;
+  --motion-overlay-duration: 0ms !important;
+  --motion-crash-duration:   0ms !important;
+}

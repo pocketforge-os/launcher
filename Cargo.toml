@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/pf-catalog", "crates/pf-shell-core", "crates/pf-shell"]
+members = [
+  "crates/pf-catalog",
+  "crates/pf-shell-core",
+  "crates/pf-shell",
+  "tools/design-token-codegen",
+]
 resolver = "2"
 
 [workspace.package]

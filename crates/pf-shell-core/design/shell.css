@@ -1,0 +1,796 @@
+/* ============================================================================
+   QUIET CONSOLE — component + layout library (token-only)
+   Every color/duration/easing here is a var(--…) from tokens.css.
+   No literal colors, durations, or easings in this file or in screen markup
+   (§5 req 1). Declared art assets (assets/) carry their own palettes.
+   ========================================================================= */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { font-size: calc(16px * var(--text-scale, 1)); }
+
+body.screen {
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  position: relative;
+  background: var(--color-surface-canvas);
+  color: var(--color-text-primary);
+  font-family: var(--type-family-ui);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-body-weight);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================================
+   FOCUS — one structural primitive (§5 req 6). Anything focusable gets
+   .focusable; the current focus target carries data-focused="true".
+   Cue = ring (shape) + glow; scale is applied by the component's own
+   motion.focus transition. Never a bespoke per-screen highlight.
+   ========================================================================= */
+.focusable { position: relative; }
+.focusable::after {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--focus-ring-offset));
+  border-radius: inherit;
+  border: var(--focus-ring-width) solid transparent;
+  pointer-events: none;
+  transition: border-color var(--motion-focus-duration) var(--ease-out);
+}
+.focusable[data-focused="true"]::after {
+  border-color: var(--color-focus-ring);
+  box-shadow: var(--elev-focus);
+}
+
+/* ============================================================================
+   PERSISTENT FRAME — status bar with room strip (the stable skeleton)
+   ========================================================================= */
+.statusbar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 64px;
+  padding: 0 var(--space-7);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 30;
+}
+/* The top-left carries NO wordmark (owner note, 2026-08-29): the chrome does
+   not sign itself; the freed real estate stays deliberately quiet. The empty
+   side keeps the room strip optically centered against .sys on the right. */
+.statusbar-side { width: 200px; flex: none; }
+.sys {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-caption-weight);
+  width: 200px;
+  justify-content: flex-end;
+}
+.sys .glyph { width: 1.05em; height: 1.05em; display: inline-block; }
+.glyph { background: currentColor; -webkit-mask: var(--glyph) center / contain no-repeat; mask: var(--glyph) center / contain no-repeat; }
+
+/* room strip: current room = brighter + underline bar (selected cue) */
+.rooms {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.room {
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  color: var(--color-text-muted);
+  padding: var(--space-2) 2px;
+  position: relative;
+}
+.room[data-current="true"] {
+  color: var(--color-text-primary);
+}
+.room[data-current="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--state-selected-accent);
+}
+.rooms .keycap { opacity: 0.7; }
+
+/* ============================================================================
+   PROMPT BAR — semantic actions resolved to the device's PRINTED labels
+   (mockup shows the TrimUI resolution; strings come from the resolver).
+   ========================================================================= */
+.promptbar {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 60px;
+  padding: 0 var(--space-7);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-5);
+  z-index: 30;
+}
+.prompt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+}
+.keycap {
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.3rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.71875rem;
+  font-weight: 700;
+}
+.keycap.wide { border-radius: var(--radius-s); }
+
+/* Binding-shape grammar. GlyphResolver emits one atomic .binding-glyph so a
+   chord or press modifier never breaks away from the action it describes. */
+.binding-glyph,
+.chord {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  white-space: nowrap;
+}
+.chord { gap: var(--space-1); }
+.chord-plus {
+  color: var(--color-text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: 700;
+  line-height: 1;
+}
+.press-marker {
+  min-width: 1.5rem;
+  height: 1.5rem;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-s);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-caption-weight);
+  line-height: 1;
+}
+
+/* ============================================================================
+   DECORATION LAYERS (§5 req 4) — aria-hidden, absent-safe, never load-bearing
+   ========================================================================= */
+.deco {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--deco-aura-opacity);
+}
+
+/* ============================================================================
+   SHELF (Home) — one confident composition: hero mirror + one row of cards
+   ========================================================================= */
+.hero {
+  position: absolute;
+  top: 100px;
+  left: var(--space-7);
+  right: var(--space-7);
+  height: 244px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  z-index: 10;
+}
+.attention-slot { position: absolute; top: 76px; right: var(--space-7); z-index: 20; }
+.hero-copy { max-width: 620px; padding-bottom: var(--space-2); }
+.hero-eyebrow {
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-3);
+}
+.hero-title {
+  font-family: var(--type-family-display);
+  font-size: var(--type-hero-size);
+  font-weight: var(--type-hero-weight);
+  line-height: 1.04;
+  letter-spacing: -0.015em;
+  margin-bottom: var(--space-4);
+}
+.hero-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--type-body-size);
+}
+.hero-meta .sep { color: var(--color-border-strong); }
+
+/* status line: dot is reinforced by text — never color alone */
+.status { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 600; }
+.status .dot { width: 0.5rem; height: 0.5rem; border-radius: var(--radius-pill); background: var(--color-status-ready); }
+.status.ready { color: var(--color-status-ready); }
+.status.attention { color: var(--color-status-attention); }
+.status.attention .dot { background: var(--color-status-attention); }
+.status.stopped { color: var(--color-status-stopped); }
+.status.stopped .dot { background: var(--color-status-stopped); }
+.status .glyph { width: 1em; height: 1em; }
+
+/* attention: bounded to ONE quiet pill (IA: zero or one) */
+.attention-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border-hairline);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-pill);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-caption-weight);
+}
+.attention-pill .dot { width: 0.4rem; height: 0.4rem; border-radius: var(--radius-pill); background: var(--color-status-attention); }
+
+.shelf-label {
+  position: absolute;
+  top: 398px;
+  left: var(--space-7);
+  z-index: 10;
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.shelf {
+  position: absolute;
+  top: 430px;
+  left: var(--space-7);
+  right: var(--space-7);
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  z-index: 10;
+}
+
+/* ---- cards ---------------------------------------------------------------- */
+.card {
+  width: 158px;
+  flex: none;
+  transition: transform var(--motion-focus-duration) var(--ease-out);
+}
+.card .art {
+  width: 158px;
+  height: 210px;
+  border-radius: var(--radius-m);
+  background: var(--color-surface-raised);
+  box-shadow: var(--elev-1);
+  position: relative;
+}
+.card .art img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+.card .art .plate { border-radius: inherit; overflow: hidden; }
+.card:has(.art[data-focused="true"]) { transform: translateY(-4px) scale(1.04); }
+.card:has(.art[data-focused="true"]) .art { box-shadow: var(--elev-2); }
+.card:has(.art[data-focused="true"]) .label { color: var(--color-text-primary); }
+
+
+.card .label {
+  margin-top: var(--space-3);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card .sub {
+  margin-top: 2px;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-caption-weight);
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+.card .sub .glyph { width: 0.9em; height: 0.9em; flex: none; }
+
+/* favorite pip (selected-family persistent cue: glyph, not color) */
+.pip {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-scrim);
+  color: var(--state-selected-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.pip .glyph { width: 0.7rem; height: 0.7rem; }
+
+/* unavailable: veil + slash glyph + exact reason (three cues, one honest) */
+.card[data-state="unavailable"] .art::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--state-unavailable-veil);
+  z-index: 1;
+}
+.card[data-state="unavailable"] .badge { z-index: 2; }
+.card[data-state="unavailable"] .badge {
+  position: absolute;
+  bottom: var(--space-2);
+  left: var(--space-2);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--color-surface-scrim);
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-s);
+  padding: 2px var(--space-2);
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-caption-weight);
+}
+.card[data-state="unavailable"] .badge .glyph { width: 0.85em; height: 0.85em; }
+
+/* ============================================================================
+   PLATES — generated fallback identity (deterministic monogram plates).
+   An art-less item is DESIGNED, not broken: duotone tint + motif + Fraunces
+   monogram + kind eyebrow. hash(item) → plate palette (a–f) + motif (1–6).
+   ========================================================================= */
+.plate {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.plate .motif {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+}
+.plate .mono {
+  font-family: var(--type-family-plate);
+  font-weight: 500;
+  font-size: 3.5rem;
+  line-height: 1;
+  z-index: 1;
+}
+.plate .kind {
+  z-index: 1;
+  margin-top: var(--space-2);
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+.plate .frame {
+  position: absolute;
+  inset: var(--space-2);
+  border: 1px solid currentColor;
+  opacity: 0.5;
+  border-radius: calc(var(--radius-m) - 4px);
+  z-index: 1;
+}
+.plate-a { background: var(--deco-plate-a-bg); color: var(--deco-plate-a-fg); }
+.plate-b { background: var(--deco-plate-b-bg); color: var(--deco-plate-b-fg); }
+.plate-c { background: var(--deco-plate-c-bg); color: var(--deco-plate-c-fg); }
+.plate-d { background: var(--deco-plate-d-bg); color: var(--deco-plate-d-fg); }
+.plate-e { background: var(--deco-plate-e-bg); color: var(--deco-plate-e-fg); }
+.plate-f { background: var(--deco-plate-f-bg); color: var(--deco-plate-f-fg); }
+
+/* motifs: inline SVG stroked in currentColor — token-colored by the plate */
+.plate svg.motif { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.3; }
+
+/* ============================================================================
+   LIBRARY — rail-less; searchbar + chips + 5-col cover grid (scroll region)
+   ========================================================================= */
+.lib-head {
+  position: absolute;
+  top: 76px;
+  left: var(--space-7);
+  right: var(--space-7);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  z-index: 10;
+}
+.searchbox {
+  flex: 1;
+  height: 44px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--color-border-hairline);
+  background: var(--color-surface-raised);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--type-body-size);
+}
+.searchbox .glyph { width: 1em; height: 1em; }
+.chip {
+  height: 44px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-m);
+  border: 1px solid var(--color-border-hairline);
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  flex: none;
+}
+.chip[data-state="selected"] {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-strong);
+  box-shadow: inset 0 -3px 0 0 var(--state-selected-accent);
+}
+.chip .count { color: var(--color-text-muted); font-weight: var(--type-caption-weight); }
+
+.lib-grid {
+  position: absolute;
+  top: 148px;
+  left: var(--space-7);
+  right: var(--space-7);
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--space-5);
+  overflow-y: auto;          /* the ONE declared scroll region — real */
+  scrollbar-width: none;     /* console UI: focus drives scroll, no scrollbar chrome */
+  scroll-behavior: smooth;
+  scroll-padding-top: var(--space-3);
+  z-index: 10;
+  padding-top: var(--space-3);
+}
+.lib-grid .card { width: auto; }
+.lib-grid .card .art { width: 100%; height: 232px; }
+
+/* ============================================================================
+   DETAIL — cover + facts column; variant chooser only when choice is real
+   ========================================================================= */
+.detail-wrap {
+  position: absolute;
+  top: 96px;
+  left: var(--space-7);
+  right: var(--space-7);
+  bottom: 72px;
+  display: flex;
+  gap: var(--space-7);
+  z-index: 10;
+}
+.detail-cover {
+  width: 320px;
+  flex: none;
+}
+.detail-cover .art {
+  width: 320px;
+  height: 428px;
+  border-radius: var(--radius-l);
+  overflow: hidden;
+  box-shadow: var(--elev-2);
+  background: var(--color-surface-raised);
+}
+.detail-cover .art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.detail-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.detail-title {
+  font-family: var(--type-family-display);
+  font-size: var(--type-title-size);
+  font-weight: var(--type-title-weight);
+  letter-spacing: -0.01em;
+  margin: var(--space-2) 0 var(--space-3);
+}
+.provenance {
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-caption-weight);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.variants { margin-top: var(--space-5); display: flex; flex-direction: column; gap: var(--space-3); }
+.variant {
+  border: 1px solid var(--color-border-hairline);
+  background: var(--state-rest-surface);
+  border-radius: var(--radius-m);
+  padding: var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.variant .v-name { font-weight: 700; font-size: var(--type-body-size); }
+.variant .v-sub { color: var(--color-text-muted); font-size: var(--type-caption-size); margin-top: 2px; }
+.variant[data-state="selected"] { border-color: var(--color-border-strong); box-shadow: inset 3px 0 0 0 var(--state-selected-accent); }
+.variant .v-pick { color: var(--state-selected-accent); display: flex; align-items: center; }
+.variant .v-pick .glyph { width: 1.1rem; height: 1.1rem; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 52px;
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-m);
+  font-size: var(--type-body-size);
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-hairline);
+  background: var(--color-surface-raised);
+}
+.btn.primary {
+  background: var(--color-focus-ring);
+  border-color: var(--color-focus-ring);
+  color: var(--color-text-inverse);
+}
+.btn .glyph { width: 1em; height: 1em; }
+.btn[data-state="disabled"] {
+  color: var(--state-disabled-text);
+  border-style: dashed;
+  background: none;
+}
+
+/* ============================================================================
+   SETTINGS — sections column + rows; toggles carry ON/OFF text (non-color)
+   ========================================================================= */
+.set-wrap {
+  position: absolute;
+  top: 96px;
+  left: var(--space-7);
+  right: var(--space-7);
+  bottom: 72px;
+  display: flex;
+  gap: var(--space-7);
+  z-index: 10;
+}
+.set-nav { width: 260px; flex: none; display: flex; flex-direction: column; gap: var(--space-1); }
+.set-nav .item {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-m);
+  color: var(--color-text-secondary);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-label-weight);
+}
+.set-nav .item[data-current="true"] {
+  background: var(--color-surface-raised);
+  color: var(--color-text-primary);
+  box-shadow: inset 3px 0 0 0 var(--state-selected-accent);
+}
+.set-col { flex: 1; min-width: 0; }
+.set-title { font-size: var(--type-h1-size); font-weight: var(--type-h1-weight); margin-bottom: var(--space-4); }
+.rows { display: flex; flex-direction: column; }
+.row {
+  min-height: 64px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-m);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  border: 1px solid transparent;
+}
+.row + .row { border-top: 0; }
+.row .r-name { font-weight: 700; font-size: var(--type-body-size); }
+.row .r-sub { color: var(--color-text-muted); font-size: var(--type-caption-size); margin-top: 2px; max-width: 460px; }
+.row .r-control { display: flex; align-items: center; gap: var(--space-3); flex: none; }
+.row .r-value { color: var(--color-text-secondary); font-size: var(--type-caption-size); }
+.rowsep { height: 1px; background: var(--color-border-hairline); margin: var(--space-2) var(--space-4); }
+
+/* toggle: position + label = two non-color cues */
+.toggle { display: inline-flex; align-items: center; gap: var(--space-3); }
+.toggle .t-state { font-size: var(--type-caption-size); font-weight: 700; color: var(--color-text-muted); letter-spacing: 0.06em; }
+.toggle .t-track {
+  width: 3rem;
+  height: 1.625rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border-strong);
+  position: relative;
+}
+.toggle .t-knob {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: calc(1.625rem - 6px);
+  height: calc(1.625rem - 6px);
+  border-radius: var(--radius-pill);
+  background: var(--color-text-muted);
+}
+.toggle[data-on="true"] .t-track { background: var(--color-focus-ring); border-color: var(--color-focus-ring); }
+.toggle[data-on="true"] .t-knob { left: auto; right: 2px; background: var(--color-text-inverse); }
+.toggle[data-on="true"] .t-state { color: var(--color-text-primary); }
+
+/* segmented control (text size) */
+.seg { display: inline-flex; border: 1px solid var(--color-border-hairline); border-radius: var(--radius-m); overflow: hidden; }
+.seg .opt {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  color: var(--color-text-muted);
+}
+.seg .opt + .opt { border-left: 1px solid var(--color-border-hairline); }
+.seg .opt[data-state="selected"] {
+  background: var(--color-surface-overlay);
+  color: var(--color-text-primary);
+  box-shadow: inset 0 -3px 0 0 var(--state-selected-accent);
+}
+
+/* diagnostic line (unavailable is never a toggle — §11.1) */
+.diag {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
+}
+.diag .glyph { width: 1em; height: 1em; flex: none; margin-top: 0.15em; }
+
+/* ============================================================================
+   SAFE RETURN — the receipt moment
+   ========================================================================= */
+.receipt {
+  width: 560px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-hairline);
+  border-radius: var(--radius-l);
+  box-shadow: var(--elev-2);
+  padding: var(--space-6);
+  z-index: 10;
+}
+.receipt .r-eyebrow {
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-status-ready);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.receipt .r-eyebrow .glyph { width: 1em; height: 1em; }
+.receipt .r-title {
+  font-family: var(--type-family-display);
+  font-size: var(--type-title-size);
+  font-weight: var(--type-title-weight);
+  margin: var(--space-3) 0 var(--space-2);
+  letter-spacing: -0.01em;
+}
+.receipt .r-fact {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--space-3) 0;
+  font-size: var(--type-body-size);
+}
+.receipt .r-fact .k { color: var(--color-text-muted); }
+.receipt .r-fact + .r-fact { border-top: 1px solid var(--color-border-hairline); }
+.receipt .r-actions { display: flex; gap: var(--space-3); margin-top: var(--space-5); }
+
+/* ============================================================================
+   GLYPH LIBRARY — masked vector glyphs, currentColor, no glyph fonts
+   ========================================================================= */
+.g-wifi     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 19.6a1.8 1.8 0 1 1 0-3.6 1.8 1.8 0 0 1 0 3.6zM4.9 12.9l-2-2C6.5 8.6 9.5 7.2 12 7.2s5.5 1.4 9.1 3.7l-2 2c-3-1.9-5.2-2.9-7.1-2.9s-4.1 1-7.1 2.9zm3.2 3.2-1.9-2c2.1-1.3 3.9-2 5.8-2s3.7.7 5.8 2l-1.9 2c-1.5-.9-2.8-1.4-3.9-1.4s-2.4.5-3.9 1.4z%22/></svg>"); }
+.g-batt     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M3 8a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8zm2 .5v7h13v-7H5zm1.5 1.5h7v4h-7v-4zM21 10h1.2a.8.8 0 0 1 .8.8v2.4a.8.8 0 0 1-.8.8H21v-4z%22/></svg>"); }
+.g-search   { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M10.5 4a6.5 6.5 0 1 1 0 13c-1.5 0-2.9-.5-4-1.4l-3.4 3.5-1.6-1.6 3.4-3.4A6.5 6.5 0 0 1 10.5 4zm0 2.2a4.3 4.3 0 1 0 0 8.6 4.3 4.3 0 0 0 0-8.6z%22/></svg>"); }
+.g-star     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2.5l2.8 6 6.6.7-4.9 4.4 1.4 6.4L12 16.7 6.1 20l1.4-6.4L2.6 9.2l6.6-.7 2.8-6z%22/></svg>"); }
+.g-slash    { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20zm0 2.3a7.7 7.7 0 0 0-6 12.6L16.9 6a7.6 7.6 0 0 0-4.9-1.7zm6 3.1L7.1 18a7.7 7.7 0 0 0 10.9-10.6z%22/></svg>"); }
+.g-check    { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M9.6 16.2 5.4 12l-1.9 1.9 6.1 6.1L20.5 9.1l-1.9-1.9-9 9z%22/></svg>"); }
+.g-warn     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2.5 23 21H1L12 2.5zm-1.2 7v6h2.4v-6h-2.4zm0 7.6v2.3h2.4v-2.3h-2.4z%22/></svg>"); }
+.g-info     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20zm-1.2 8.5v7h2.4v-7h-2.4zm0-4v2.4h2.4V6.5h-2.4z%22/></svg>"); }
+.g-play     { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M7 4.5 19.5 12 7 19.5v-15z%22/></svg>"); }
+.g-net      { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20zm0 2.2c-1.1 0-2.4 3-2.6 7.8h5.2c-.2-4.8-1.5-7.8-2.6-7.8zM7.2 12c.1-2 .5-3.9 1-5.4A7.8 7.8 0 0 0 4.3 12h2.9zm.1 2.3H4.4a7.8 7.8 0 0 0 3.9 5.2c-.5-1.5-.9-3.2-1-5.2zm2.2 0c.3 4.4 1.5 7.2 2.5 7.2s2.2-2.8 2.5-7.2H9.5zm7.2 0c-.1 2-.5 3.7-1 5.2a7.8 7.8 0 0 0 3.9-5.2h-2.9zm3-2.3a7.8 7.8 0 0 0-3.9-5.4c.5 1.5.9 3.4 1 5.4h2.9z%22/></svg>"); }
+.g-clock    { --glyph: url("data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20zm0 2.3a7.7 7.7 0 1 0 0 15.4 7.7 7.7 0 0 0 0-15.4zM11 7h2v5.4l3.8 2.2-1 1.7L11 13.6V7z%22/></svg>"); }
+
+
+/* bottom fade — grid recedes under the prompt bar (pre-baked gradient) */
+.fade-bottom {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 96px;
+  z-index: 20;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--color-surface-canvas));
+}
+
+.v-label {
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+.variant[data-state="unavailable"] { color: var(--state-unavailable-text); background: none; }
+.variant[data-state="unavailable"] .v-name { color: var(--color-text-secondary); }
+.inline-glyph { display: inline-block; width: 0.85em; height: 0.85em; vertical-align: -0.05em; margin-right: 2px; }
+.detail-actions { display: flex; gap: var(--space-3); margin-top: var(--space-6); }
+.detail-col .hero-meta { margin-bottom: var(--space-2); }
+.detail-col .detail-title { margin-top: var(--space-2); }
+
+.detail-desc {
+  margin-top: var(--space-4);
+  color: var(--color-text-secondary);
+  font-size: var(--type-body-size);
+  line-height: 1.55;
+  max-width: 640px;
+}
+.facts {
+  margin-top: var(--space-6);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border-hairline);
+  display: flex;
+  gap: var(--space-7);
+}
+.fact .f-k {
+  font-size: var(--type-eyebrow-size);
+  font-weight: var(--type-eyebrow-weight);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+.fact .f-v { font-size: var(--type-label-size); font-weight: var(--type-label-weight); color: var(--color-text-secondary); }
+
+.row[data-state="disabled"] .r-name,
+.row[data-state="disabled"] .r-sub { color: var(--state-disabled-text); }
+.row[data-state="disabled"] { border: 1px dashed var(--state-disabled-border); }
+.row .r-dash { color: var(--state-disabled-text); font-weight: 700; }
+
+/* settings: the ROWS area is the constrained scrollable descendant */
+.set-col { display: flex; flex-direction: column; min-height: 0; }
+.set-title { flex: none; }
+.rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;          /* the declared scroll region — real */
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+  scroll-padding: var(--space-3) 0 var(--space-5);
+}
+.lib-grid::-webkit-scrollbar, .rows::-webkit-scrollbar { display: none; }
+.rows > * { flex: none; }    /* rows never shrink-collapse inside the scroll region */
+@media (prefers-reduced-motion: reduce) {
+  .lib-grid, .rows { scroll-behavior: auto; }
+}
+[data-reduce-motion="true"] .lib-grid,
+[data-reduce-motion="true"] .rows { scroll-behavior: auto; }
+
+/* centered stage (Safe Return) */
+body.center-stage { display: flex; align-items: center; justify-content: center; }
+.receipt .r-note {
+  margin-top: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
+}
+.receipt .r-fact .status { font-size: var(--type-body-size); }

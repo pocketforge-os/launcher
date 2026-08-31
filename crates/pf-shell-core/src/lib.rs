@@ -21,9 +21,11 @@ use pf_ports::{
     TerminalReceipt, TimeCapabilities, TimePort, TransferPort, TransferService,
     TransferServiceState, WifiCredential, WifiNetwork,
 };
+use pf_render::Rasterizer;
 use pf_scene::{
-    AxisMove, Bounds, Elevation, ImageFit, ImageSource, Node, NodeAction, NodeId, Role, Scene,
-    SurfaceMetrics, TextAlign, TypeRole,
+    AlignItems, AxisMove, Bounds, Edges, Elevation, FlexDirection, ImageFit, ImageSource,
+    LayoutCache, LayoutStyle, LayoutValue, Node, NodeAction, NodeId, Position, Role, Scene,
+    SurfaceMetrics, TextAlign, TypeRole, resolve_layout,
 };
 use pf_session_authority::{EndPrecision, HistoryEntry};
 use pf_theme::{Base, Theme};
@@ -80,12 +82,6 @@ const TEXT_NODE_INLINE_INSET: f32 = 6.0;
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
 fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * LABEL_GLYPH_ADVANCE
-}
-
-// The flagship caption role is 12 px Manrope medium. This conservative advance is
-// calibrated against the deterministic Cosmic Text/Manrope rasterizer.
-fn caption_text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
 }
 
 // Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
@@ -2697,19 +2693,7 @@ impl ShellCore {
             );
         }
         let room_left = w / 2.0 - 220.0;
-        children.push(
-            node(
-                "rooms",
-                Role::Group,
-                "",
-                room_left,
-                12.0,
-                424.0,
-                40.0,
-                SCENE_TRANSPARENT_TOKEN,
-            )
-            .with_type_role(TypeRole::Label),
-        );
+        let mut room_nodes = Vec::new();
         for (id, label, x, width) in [
             ("room-keycap-left", "L", room_left + 8.0, 32.0),
             ("room-home", "Home", room_left + 56.0, 72.0),
@@ -2728,7 +2712,7 @@ impl ShellCore {
                     | ("room-settings", Route::Settings)
             );
             if keycap {
-                children.push(node(
+                room_nodes.push(node(
                     &format!("{id}-border"),
                     Role::Group,
                     "",
@@ -2738,7 +2722,7 @@ impl ShellCore {
                     24.0,
                     COLOR_BORDER_STRONG_TOKEN,
                 ));
-                children.push(node(
+                room_nodes.push(node(
                     &format!("{id}-fill"),
                     Role::Group,
                     "",
@@ -2748,7 +2732,7 @@ impl ShellCore {
                     22.0,
                     COLOR_SURFACE_RAISED_TOKEN,
                 ));
-                children.push(
+                room_nodes.push(
                     node(
                         id,
                         Role::Text,
@@ -2762,7 +2746,7 @@ impl ShellCore {
                     .with_type_role(TypeRole::Caption),
                 );
             } else {
-                children.push(
+                room_nodes.push(
                     node(
                         id,
                         Role::Text,
@@ -2776,7 +2760,7 @@ impl ShellCore {
                     .with_type_role(TypeRole::Label),
                 );
                 if selected {
-                    children.push(node(
+                    room_nodes.push(node(
                         &format!("{id}-underline"),
                         Role::Group,
                         "",
@@ -2788,6 +2772,24 @@ impl ShellCore {
                     ));
                 }
             }
+        }
+        let mut rooms = node(
+            "rooms",
+            Role::Group,
+            "",
+            room_left,
+            12.0,
+            424.0,
+            40.0,
+            SCENE_TRANSPARENT_TOKEN,
+        )
+        .with_type_role(TypeRole::Label);
+        if self.route == Route::Home {
+            rooms = home_rooms_layout(rooms, room_nodes, w);
+            children.push(rooms);
+        } else {
+            children.push(rooms);
+            children.extend(room_nodes);
         }
         if let Some(status) = self.session_status() {
             children.push(node(
@@ -2948,10 +2950,12 @@ impl ShellCore {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h);
         }
         children.push(prompt_node);
+        if self.route == Route::Home {
+            wrap_home_system_layout(&mut children, w);
+        }
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
-            apply_quiet_console_radius(child, radius_scale);
         }
         if self.route == Route::Library {
             place_library_fade_below_footer(&mut children);
@@ -2961,7 +2965,7 @@ impl ShellCore {
             .find_map(focused_node_id)
             .map_or("quiet-console", |n| n.id.as_str())
             .to_owned();
-        let root = Node::new(
+        let mut root = Node::new(
             NodeId::new("quiet-console").unwrap(),
             Role::Group,
             "",
@@ -2969,6 +2973,20 @@ impl ShellCore {
             COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_children(children);
+        if self.route == Route::Home {
+            #[cfg(test)]
+            let semantics_before = semantic_snapshot(&root);
+            resolve_layout(
+                &mut root,
+                metrics,
+                f32::from(self.text_scale) / 100.0,
+                &Rasterizer::new(),
+                &mut LayoutCache::default(),
+            );
+            #[cfg(test)]
+            assert_eq!(semantic_snapshot(&root), semantics_before);
+        }
+        apply_quiet_console_radius(&mut root, radius_scale);
         Some(
             Scene::new(root, NodeId::new(focus_id).unwrap())
                 .expect("one deterministic focus owner"),
@@ -3127,53 +3145,93 @@ impl ShellCore {
                 const PILL_HORIZONTAL_PADDING: f32 = 16.0;
                 const PILL_GAP: f32 = 8.0;
                 const DOT_SIZE: f32 = 6.4;
-                let text_width = caption_text_width(message);
-                let pill_width = PILL_HORIZONTAL_PADDING * 2.0 + DOT_SIZE + PILL_GAP + text_width;
-                let pill_left = w - PILL_RIGHT_MARGIN - pill_width;
-                content.push(node(
+                let mut pill_border = node(
                     "attention-pill-border",
                     Role::Group,
                     "",
-                    pill_left,
+                    0.0,
                     PILL_TOP,
-                    pill_width,
+                    0.0,
                     PILL_HEIGHT,
                     COLOR_BORDER_HAIRLINE_TOKEN,
-                ));
-                content.push(node(
+                );
+                pill_border.layout = Some(LayoutStyle {
+                    position: Position::Absolute,
+                    align_items: Some(AlignItems::Center),
+                    gap: (LayoutValue::Px(0.0), LayoutValue::Px(PILL_GAP)),
+                    padding: px_edges(0.0, PILL_HORIZONTAL_PADDING, 0.0, PILL_HORIZONTAL_PADDING),
+                    inset: Edges {
+                        top: LayoutValue::Px(PILL_TOP),
+                        right: LayoutValue::Px(PILL_RIGHT_MARGIN),
+                        bottom: LayoutValue::Auto,
+                        left: LayoutValue::Auto,
+                    },
+                    height: LayoutValue::Px(PILL_HEIGHT),
+                    ..LayoutStyle::default()
+                });
+                let mut pill_fill = node(
                     "attention-pill",
                     Role::Group,
                     "",
-                    pill_left + 1.0,
-                    PILL_TOP + 1.0,
-                    pill_width - 2.0,
-                    PILL_HEIGHT - 2.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                     COLOR_SURFACE_RAISED_TOKEN,
-                ));
-                content.push(node(
+                );
+                pill_fill.layout = Some(LayoutStyle {
+                    position: Position::Absolute,
+                    inset: px_edges(1.0, 1.0, 1.0, 1.0),
+                    ..LayoutStyle::default()
+                });
+                let mut dot = node(
                     "attention-dot",
                     Role::Group,
                     "",
-                    pill_left + PILL_HORIZONTAL_PADDING,
-                    PILL_TOP + (PILL_HEIGHT - DOT_SIZE) / 2.0,
+                    0.0,
+                    0.0,
                     DOT_SIZE,
                     DOT_SIZE,
                     COLOR_STATUS_ATTENTION_TOKEN,
-                ));
-                content.push(
-                    node(
-                        "attention",
-                        Role::Text,
-                        message,
-                        pill_left + PILL_HORIZONTAL_PADDING + DOT_SIZE + PILL_GAP,
-                        PILL_TOP,
-                        text_width,
-                        PILL_HEIGHT,
-                        SCENE_TRANSPARENT_TOKEN,
-                    )
-                    .with_type_role(TypeRole::Caption)
-                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
                 );
+                dot.layout = Some(fixed_layout(DOT_SIZE, DOT_SIZE));
+                let mut text = node(
+                    "attention",
+                    Role::Text,
+                    message,
+                    0.0,
+                    0.0,
+                    0.0,
+                    PILL_HEIGHT,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN);
+                text.layout = Some(LayoutStyle {
+                    height: LayoutValue::Px(PILL_HEIGHT),
+                    // Production shaping owns intrinsic measurement. Preserve the legacy
+                    // caption reserve as a minimum so the seam cannot move the anchored
+                    // capsule's left cap by a subpixel on this conversion.
+                    min_width: LayoutValue::Px(
+                        message.chars().count() as f32 * CAPTION_GLYPH_ADVANCE,
+                    ),
+                    flex_shrink: 0.0,
+                    ..LayoutStyle::default()
+                });
+                pill_border.children = vec![pill_fill, dot, text];
+                let mut anchor = node(
+                    "attention-layout-anchor",
+                    Role::Group,
+                    "",
+                    0.0,
+                    0.0,
+                    w,
+                    STATUS_BAR_HEIGHT,
+                    SCENE_TRANSPARENT_TOKEN,
+                );
+                anchor.layout = Some(fixed_layout(w, STATUS_BAR_HEIGHT));
+                anchor.children.push(pill_border);
+                content.push(anchor);
             }
             let ready_items = self
                 .items
@@ -5918,6 +5976,206 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+#[cfg(test)]
+fn semantic_snapshot(node: &Node) -> Vec<(String, Role, String, Option<NodeAction>, bool)> {
+    fn collect(node: &Node, out: &mut Vec<(String, Role, String, Option<NodeAction>, bool)>) {
+        out.push((
+            node.id.as_str().to_owned(),
+            node.role,
+            node.accessible_label.clone(),
+            node.action.clone(),
+            node.state.focused,
+        ));
+        for child in &node.children {
+            collect(child, out);
+        }
+    }
+    let mut snapshot = Vec::new();
+    collect(node, &mut snapshot);
+    snapshot
+}
+
+fn px_edges(top: f32, right: f32, bottom: f32, left: f32) -> Edges<LayoutValue> {
+    Edges {
+        top: LayoutValue::Px(top),
+        right: LayoutValue::Px(right),
+        bottom: LayoutValue::Px(bottom),
+        left: LayoutValue::Px(left),
+    }
+}
+
+fn fixed_layout(width: f32, height: f32) -> LayoutStyle {
+    LayoutStyle {
+        flex_shrink: 0.0,
+        width: LayoutValue::Px(width),
+        height: LayoutValue::Px(height),
+        ..LayoutStyle::default()
+    }
+}
+
+fn wrap_home_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
+    let system_id = |id: &str| {
+        matches!(
+            id,
+            "wifi-glyph"
+                | "battery-outline"
+                | "battery-cavity"
+                | "battery-level"
+                | "battery-terminal"
+                | "status-cluster"
+        )
+    };
+    let insertion = nodes
+        .iter()
+        .position(|node| system_id(node.id.as_str()))
+        .unwrap_or(0);
+    let mut system_nodes = Vec::new();
+    nodes.retain(|node| {
+        if system_id(node.id.as_str()) {
+            system_nodes.push(node.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if system_nodes.is_empty() {
+        return;
+    }
+    for node in &mut system_nodes {
+        let (right, top, width, height) = match node.id.as_str() {
+            "wifi-glyph" => (180.0, 22.0, 20.0, 20.0),
+            "battery-outline" => (144.0, 24.0, 24.0, 14.0),
+            "battery-cavity" => (148.0, 26.0, 18.0, 10.0),
+            "battery-level" => (165.0 - node.bounds.width, 27.0, node.bounds.width, 8.0),
+            "battery-terminal" => (142.0, 28.0, 2.0, 6.0),
+            "status-cluster" => (-16.0, 16.0, 152.0, 32.0),
+            _ => continue,
+        };
+        node.layout = Some(LayoutStyle {
+            position: Position::Absolute,
+            inset: Edges {
+                top: LayoutValue::Px(top),
+                right: LayoutValue::Px(right),
+                bottom: LayoutValue::Auto,
+                left: LayoutValue::Auto,
+            },
+            ..fixed_layout(width, height)
+        });
+    }
+    let mut cluster = node(
+        "system-status-layout-anchor",
+        Role::Group,
+        "",
+        0.0,
+        0.0,
+        surface_width,
+        STATUS_BAR_HEIGHT,
+        SCENE_TRANSPARENT_TOKEN,
+    );
+    cluster.layout = Some(fixed_layout(surface_width, STATUS_BAR_HEIGHT));
+    cluster.children = system_nodes;
+    nodes.insert(insertion, cluster);
+}
+
+fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> Node {
+    let mut nodes = nodes.into_iter();
+    let mut take = |expected: &str| {
+        let node = nodes.next().expect("complete Home rooms subtree");
+        assert_eq!(node.id.as_str(), expected);
+        node
+    };
+
+    let keycap = |mut border: Node, mut fill: Node, mut label: Node, left_margin: f32| {
+        border.layout = Some(LayoutStyle {
+            margin: px_edges(4.0, 0.0, 0.0, left_margin),
+            ..fixed_layout(40.0, 24.0)
+        });
+        fill.layout = Some(LayoutStyle {
+            position: Position::Absolute,
+            inset: px_edges(1.0, 1.0, 1.0, 1.0),
+            ..LayoutStyle::default()
+        });
+        label.layout = Some(LayoutStyle {
+            position: Position::Absolute,
+            inset: px_edges(1.0, 4.0, 1.0, 4.0),
+            ..LayoutStyle::default()
+        });
+        border.children = vec![fill, label];
+        border
+    };
+    let room = |mut label: Node, underline: Option<Node>, left_margin: f32, width: f32| {
+        label.layout = Some(LayoutStyle {
+            margin: px_edges(4.0, 0.0, 0.0, left_margin),
+            ..fixed_layout(width, 32.0)
+        });
+        if let Some(mut underline) = underline {
+            underline.layout = Some(LayoutStyle {
+                position: Position::Absolute,
+                inset: Edges {
+                    top: LayoutValue::Px(33.0),
+                    right: LayoutValue::Px(0.0),
+                    bottom: LayoutValue::Auto,
+                    left: LayoutValue::Px(0.0),
+                },
+                width: LayoutValue::Pct(1.0),
+                height: LayoutValue::Px(3.0),
+                ..LayoutStyle::default()
+            });
+            label.children.push(underline);
+        }
+        label
+    };
+
+    let left = keycap(
+        take("room-keycap-left-border"),
+        take("room-keycap-left-fill"),
+        take("room-keycap-left"),
+        4.0,
+    );
+    let home = take("room-home");
+    let home = room(home, Some(take("room-home-underline")), 12.0, 72.0);
+    let library = take("room-library");
+    let library = room(library, None, 24.0, 88.0);
+    let settings = take("room-settings");
+    let settings = room(settings, None, 24.0, 92.0);
+    let right = keycap(
+        take("room-keycap-right-border"),
+        take("room-keycap-right-fill"),
+        take("room-keycap-right"),
+        24.0,
+    );
+    assert!(nodes.next().is_none());
+
+    rooms.layout = Some(LayoutStyle {
+        position: Position::Absolute,
+        flex_direction: FlexDirection::Row,
+        align_items: Some(AlignItems::Start),
+        margin: px_edges(0.0, 0.0, 0.0, -220.0),
+        inset: Edges {
+            top: LayoutValue::Px(12.0),
+            left: LayoutValue::Pct(0.5),
+            ..Edges::default()
+        },
+        width: LayoutValue::Px(424.0),
+        height: LayoutValue::Px(40.0),
+        ..LayoutStyle::default()
+    });
+    rooms.children = vec![left, home, library, settings, right];
+    let mut anchor = node(
+        "rooms-layout-anchor",
+        Role::Group,
+        "",
+        0.0,
+        0.0,
+        surface_width,
+        STATUS_BAR_HEIGHT,
+        SCENE_TRANSPARENT_TOKEN,
+    );
+    anchor.layout = Some(fixed_layout(surface_width, STATUS_BAR_HEIGHT));
+    anchor.children.push(rooms);
+    anchor
 }
 
 fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
@@ -11030,8 +11288,43 @@ mod tests {
             node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
             Some("Controller battery low")
         );
+        for (id, expected) in [
+            (
+                "room-keycap-left-border",
+                Bounds::new(424.0, 16.0, 40.0, 24.0),
+            ),
+            (
+                "room-keycap-left-fill",
+                Bounds::new(425.0, 17.0, 38.0, 22.0),
+            ),
+            ("room-keycap-left", Bounds::new(428.0, 17.0, 32.0, 22.0)),
+            ("room-home", Bounds::new(476.0, 16.0, 72.0, 32.0)),
+            ("room-home-underline", Bounds::new(476.0, 49.0, 72.0, 3.0)),
+            ("room-library", Bounds::new(572.0, 16.0, 88.0, 32.0)),
+            ("room-settings", Bounds::new(684.0, 16.0, 92.0, 32.0)),
+            (
+                "room-keycap-right-border",
+                Bounds::new(800.0, 16.0, 40.0, 24.0),
+            ),
+        ] {
+            let actual = node_by_id(scene.root(), id).unwrap().bounds;
+            assert!((actual.x - expected.x).abs() <= 1.0, "{id}: {actual:?}");
+            assert!((actual.y - expected.y).abs() <= 1.0, "{id}: {actual:?}");
+            assert!(
+                (actual.width - expected.width).abs() <= 1.0,
+                "{id}: {actual:?}"
+            );
+            assert!(
+                (actual.height - expected.height).abs() <= 1.0,
+                "{id}: {actual:?}"
+            );
+        }
         let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
-        assert!((pill_border.bounds.x - 1043.0).abs() <= 2.0);
+        assert!(
+            (pill_border.bounds.x - 1043.0).abs() <= 2.0,
+            "resolved pill bounds: {:?}",
+            pill_border.bounds
+        );
         assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
         assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
         assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
@@ -11101,6 +11394,81 @@ mod tests {
                 "keycaps retain their designed raised fill"
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn attention_text_change_damages_union_of_old_and_new_painted_bounds() {
+        struct Status(&'static str);
+        impl DeviceStatusPort for Status {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 50,
+                    attention_message: Some(self.0.to_owned()),
+                })
+            }
+        }
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = core();
+        let mut rasterizer = Rasterizer::new();
+        core.load_device_status(&Status("Battery low"));
+        let old = core.scene(metrics, "").unwrap();
+        let old_bounds = node_by_id(old.root(), "attention-pill-border")
+            .unwrap()
+            .bounds;
+        rasterizer.render(&old, metrics).unwrap();
+
+        core.load_device_status(&Status("Controller battery critically low"));
+        let new = core.scene(metrics, "").unwrap();
+        let new_bounds = node_by_id(new.root(), "attention-pill-border")
+            .unwrap()
+            .bounds;
+        let damage = rasterizer
+            .render(&new, metrics)
+            .unwrap()
+            .damage
+            .expect("message change damages the pill");
+        let union_left = old_bounds.x.min(new_bounds.x).floor() as u32;
+        let union_right = (old_bounds.x + old_bounds.width)
+            .max(new_bounds.x + new_bounds.width)
+            .ceil() as u32;
+        let union_top = old_bounds.y.min(new_bounds.y).floor() as u32;
+        let union_bottom = (old_bounds.y + old_bounds.height)
+            .max(new_bounds.y + new_bounds.height)
+            .ceil() as u32;
+        assert!(damage.x <= union_left);
+        assert!(damage.x + damage.width >= union_right);
+        assert!(damage.y <= union_top);
+        assert!(damage.y + damage.height >= union_bottom);
+    }
+
+    #[test]
+    fn home_layout_pass_desktop_smoke_indicator() {
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let core = core();
+        let mut samples = (0..12)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let scene = core.scene(metrics, "").unwrap();
+                assert!(node_by_id(scene.root(), "rooms-layout-anchor").is_some());
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        samples.sort_unstable();
+        let p95 = samples[samples.len() * 95 / 100];
+        println!("home-layout desktop p95={p95:?}");
     }
 
     #[test]
@@ -11992,7 +12360,14 @@ mod tests {
                 "",
             )
             .unwrap();
-        let children = &scene.root().children;
+        fn paint_order<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(node);
+            for child in &node.children {
+                paint_order(child, out);
+            }
+        }
+        let mut children = Vec::new();
+        paint_order(scene.root(), &mut children);
 
         for id in ["room-keycap-left", "room-keycap-right"] {
             let border_id = format!("{id}-border");
@@ -12011,9 +12386,9 @@ mod tests {
                 .unwrap();
             assert!(border_index < fill_index && fill_index < label_index);
 
-            let border = &children[border_index];
-            let fill = &children[fill_index];
-            let label = &children[label_index];
+            let border = children[border_index];
+            let fill = children[fill_index];
+            let label = children[label_index];
             assert_eq!(border.style_token, COLOR_BORDER_STRONG_TOKEN);
             assert_eq!(fill.style_token, COLOR_SURFACE_RAISED_TOKEN);
             assert_eq!(label.style_token, COLOR_SURFACE_RAISED_TOKEN);

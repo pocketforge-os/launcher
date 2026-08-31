@@ -3150,16 +3150,6 @@ impl ShellCore {
             }
             let focused_row = self.focus.saturating_sub(5) / geometry.columns;
             let first_visible_row = focused_row.saturating_sub(visible_rows.saturating_sub(1));
-            out.push(node(
-                "library-grid-scroll",
-                Role::Group,
-                "Library covers",
-                48.0,
-                card_top,
-                w - 96.0,
-                h - card_top - PROMPTS_AREA_HEIGHT,
-                "--color-surface-canvas",
-            ));
             for (i, &item_index) in self.library_items.iter().enumerate() {
                 let column = i % geometry.columns;
                 let row = i / geometry.columns;
@@ -7292,6 +7282,38 @@ mod tests {
         assert!(
             has_fold(&scrolled_back),
             "fold reappears when scrolling above the final row"
+        );
+    }
+
+    #[test]
+    fn library_has_no_empty_painted_grid_container() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "app-0", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        assert!(
+            scene
+                .root()
+                .children
+                .iter()
+                .all(|node| node.id.as_str() != "library-grid-scroll"),
+            "the Library grid must not add an empty full-width painted strip"
         );
     }
 

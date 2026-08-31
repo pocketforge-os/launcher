@@ -243,12 +243,11 @@ fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bo
     })
 }
 
-enum ArtBase<'a> {
+enum ArtBase {
     DescriptorDirectory,
-    SnapshotDirectory(&'a Path),
 }
 
-fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase<'a>) -> Option<&'a Path> {
+fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase) -> Option<&'a Path> {
     match policy {
         ArtBase::DescriptorDirectory => item
             .variants
@@ -256,9 +255,6 @@ fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase<'a>) -> Option<&'a 
             .launch_target
             .descriptor_path
             .parent(),
-        // Snapshot paths can describe another machine, so their relative art references
-        // deliberately use the portable snapshot bundle's directory instead.
-        ArtBase::SnapshotDirectory(directory) => Some(directory),
     }
 }
 
@@ -281,7 +277,7 @@ fn manifest_art_core(
     snapshot: &CatalogSnapshot,
     theme: &pf_theme::Theme,
     reduced: bool,
-    policy: ArtBase<'_>,
+    policy: ArtBase,
 ) -> ShellCore {
     ShellCore::boot_with_art(snapshot, theme, reduced, move |item, reference| {
         read_catalog_art(art_base_path(item, &policy)?, reference)
@@ -299,12 +295,9 @@ fn snapshot_core(
     reduced: bool,
 ) -> ShellCore {
     let directory = snapshot_path.parent().unwrap_or_else(|| Path::new(""));
-    manifest_art_core(
-        snapshot,
-        theme,
-        reduced,
-        ArtBase::SnapshotDirectory(directory),
-    )
+    ShellCore::boot_with_art(snapshot, theme, reduced, move |_, reference| {
+        vendored_art(reference).or_else(|| read_catalog_art(directory, reference))
+    })
 }
 struct SnapshotCatalog(CatalogSnapshot);
 
@@ -3710,6 +3703,29 @@ exec="./launch"
     }
 
     #[test]
+    fn snapshot_vendored_art_is_presented_instead_of_the_plate() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("catalog.json");
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("fixture-art:ridgeline.png".into());
+
+        let actual = rendered_home(snapshot_core(
+            &snapshot,
+            &snapshot_path,
+            &pf_theme::flagship(),
+            false,
+        ));
+        let expected = rendered_home(fixture_core(&snapshot, &pf_theme::flagship(), false));
+
+        assert_eq!(
+            actual, expected,
+            "snapshot mode must present the decoded vendored cover, not its fallback plate"
+        );
+    }
+
+    #[test]
     fn installed_relative_art_cannot_be_shadowed_by_vendored_fixture_name() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("apps");
@@ -3771,17 +3787,24 @@ exec="./launch"
         snapshot.items.truncate(1);
         snapshot.items[0].presentation.icon_reference = Some("art/missing.png".into());
 
-        let core = snapshot_core(
+        let actual = rendered_home(snapshot_core(
             &snapshot,
             &dir.path().join("catalog.json"),
             &pf_theme::flagship(),
             false,
-        );
-
-        assert!(matches!(
-            core.art_treatment("ridgeline"),
-            Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
         ));
+        let expected_plate = rendered_home(fixture_core(&snapshot, &pf_theme::flagship(), false));
+        snapshot.items[0].presentation.icon_reference = Some("fixture-art:ridgeline.png".into());
+        let decoded_art = rendered_home(fixture_core(&snapshot, &pf_theme::flagship(), false));
+
+        assert_eq!(
+            actual, expected_plate,
+            "missing snapshot art keeps its plate"
+        );
+        assert_ne!(
+            actual, decoded_art,
+            "missing snapshot art must not present a decoded cover"
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 mod design_generated;
@@ -2929,7 +2929,7 @@ impl ShellCore {
         if self.route == Route::Library {
             let fade_top = h - 96.0;
             let mut lifted = Vec::new();
-            for child in &children {
+            for child in &mut children {
                 lift_library_fade_text(child, fade_top, &mut lifted);
             }
             children.extend(lifted);
@@ -3532,7 +3532,7 @@ impl ShellCore {
                     96.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(library_footer_fade_source(), ImageFit::Cover),
+                .with_image(library_footer_fade_source(w), ImageFit::Cover),
             );
         } else if self.route == Route::Search {
             out.push(node(
@@ -5994,26 +5994,39 @@ fn wifi_glyph_source() -> ImageSource {
     ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
 }
 
-fn library_footer_fade_source() -> ImageSource {
-    static FADE: OnceLock<Arc<[u8]>> = OnceLock::new();
-    let bytes = FADE.get_or_init(|| {
-        const WIDTH: usize = 1280;
-        const HEIGHT: usize = 96;
-        let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
-        for y in 0..HEIGHT {
-            let alpha = u8::try_from((y + 1) * 255 / HEIGHT).unwrap();
-            for x in 0..WIDTH {
-                let offset = (y * WIDTH + x) * 4;
-                rgba[offset..offset + 4].copy_from_slice(&[0x17, 0x15, 0x12, alpha]);
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn library_footer_fade_source(surface_width: f32) -> ImageSource {
+    static FADES: OnceLock<Mutex<HashMap<u32, Arc<[u8]>>>> = OnceLock::new();
+    let width = surface_width.round().max(1.0) as u32;
+    let bytes = FADES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("library fade cache")
+        .entry(width)
+        .or_insert_with(|| {
+            let width = usize::try_from(width).unwrap();
+            const HEIGHT: usize = 96;
+            let mut rgba = vec![0_u8; width * HEIGHT * 4];
+            for y in 0..HEIGHT {
+                let alpha = u8::try_from((y + 1) * 255 / HEIGHT).unwrap();
+                for x in 0..width {
+                    let offset = (y * width + x) * 4;
+                    rgba[offset..offset + 4].copy_from_slice(&[0x17, 0x15, 0x12, alpha]);
+                }
             }
-        }
-        encoded_png(
-            u32::try_from(WIDTH).unwrap(),
-            u32::try_from(HEIGHT).unwrap(),
-            &rgba,
-        )
-    });
-    ImageSource::new("quiet-console:library-footer-fade", bytes.clone())
+            encoded_png(
+                u32::try_from(width).unwrap(),
+                u32::try_from(HEIGHT).unwrap(),
+                &rgba,
+            )
+        })
+        .clone();
+    let id = if width == 1280 {
+        "quiet-console:library-footer-fade".to_owned()
+    } else {
+        format!("quiet-console:library-footer-fade-{width}")
+    };
+    ImageSource::new(id, bytes)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -6126,7 +6139,7 @@ fn add_explicit_action_name(action_node: &mut Node) {
     }
 }
 
-fn lift_library_fade_text(node: &Node, fade_top: f32, lifted: &mut Vec<Node>) {
+fn lift_library_fade_text(node: &mut Node, fade_top: f32, lifted: &mut Vec<Node>) {
     if node.role == Role::Text
         && node.bounds.y + node.bounds.height > fade_top
         && !node.accessible_label.is_empty()
@@ -6135,9 +6148,10 @@ fn lift_library_fade_text(node: &Node, fade_top: f32, lifted: &mut Vec<Node>) {
         copy.id = NodeId::new(format!("library-fade-lift-{}", node.id.as_str())).unwrap();
         copy.action = None;
         copy.children.clear();
+        node.accessible_label.clear();
         lifted.push(copy);
     }
-    for child in &node.children {
+    for child in &mut node.children {
         lift_library_fade_text(child, fade_top, lifted);
     }
 }
@@ -10026,6 +10040,100 @@ mod tests {
     }
 
     #[test]
+    fn library_footer_fade_spans_the_full_band_on_wide_surfaces() {
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1920.0,
+                    logical_height: 1080.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let fade = node_by_id(scene.root(), "library-grid-footer-fade").unwrap();
+        let pf_scene::NodeContent::Image { source, .. } = &fade.content else {
+            panic!("library footer fade must be an image");
+        };
+        let decoder = png::Decoder::new(Cursor::new(source.bytes.as_ref()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+
+        assert_eq!((info.width, info.height), (1920, 96));
+        assert!(pixels[3] <= 3, "top row must be effectively transparent");
+        let bottom_alpha = pixels[(usize::try_from(info.height).unwrap() - 1)
+            * usize::try_from(info.width).unwrap()
+            * 4
+            + 3];
+        assert_eq!(bottom_alpha, 255, "bottom row must be fully opaque");
+    }
+
+    #[test]
+    fn library_fade_lift_keeps_one_accessible_label_per_second_row_title() {
+        fn label_count(node: &Node, label: &str) -> usize {
+            usize::from(node.accessible_label == label)
+                + node
+                    .children
+                    .iter()
+                    .map(|child| label_count(child, label))
+                    .sum::<usize>()
+        }
+        let mut row = node(
+            "library-row-2",
+            Role::Group,
+            "",
+            0.0,
+            600.0,
+            200.0,
+            100.0,
+            SCENE_TRANSPARENT_TOKEN,
+        );
+        row.children.push(node(
+            "library-title-row-2",
+            Role::Text,
+            "Row 2 title",
+            0.0,
+            650.0,
+            200.0,
+            34.0,
+            COLOR_SURFACE_CANVAS_TOKEN,
+        ));
+        let mut lifted = Vec::new();
+        lift_library_fade_text(&mut row, 624.0, &mut lifted);
+        let root = Node::new(
+            NodeId::new("library-test-root").unwrap(),
+            Role::Group,
+            "",
+            Bounds::new(0.0, 0.0, 1280.0, 720.0),
+            SCENE_TRANSPARENT_TOKEN,
+        )
+        .with_children(vec![row, lifted.pop().unwrap()]);
+
+        assert_eq!(label_count(&root, "Row 2 title"), 1);
+        assert_eq!(
+            node_by_id(&root, "library-title-row-2")
+                .unwrap()
+                .accessible_label,
+            ""
+        );
+        assert_eq!(
+            node_by_id(&root, "library-fade-lift-library-title-row-2")
+                .unwrap()
+                .accessible_label,
+            "Row 2 title"
+        );
+    }
+
+    #[test]
     fn desktop_library_toolbar_uses_mockup_flex_geometry() {
         let mut items = (0..24)
             .map(|index| {
@@ -10457,6 +10565,14 @@ mod tests {
 
     #[test]
     fn max_text_scale_routes_keep_full_truthful_labels() {
+        fn contains_label(node: &Node, text: &str) -> bool {
+            node.accessible_label.contains(text)
+                || node
+                    .children
+                    .iter()
+                    .any(|child| contains_label(child, text))
+        }
+
         let mut core = fixture_core(vec![item(
             "long",
             "The Unabridged Cartographer of Hollow Tides",
@@ -10487,10 +10603,10 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "library-item-long")
             .unwrap();
-        assert!(card.children.iter().any(|node| {
-            node.accessible_label
-                .contains("connect to Wi-Fi to use this edition")
-        }));
+        assert!(contains_label(
+            scene.root(),
+            "connect to Wi-Fi to use this edition"
+        ));
         assert!(!card.accessible_label.contains("EDITION PLATE"));
         assert!(
             card.children

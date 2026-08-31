@@ -694,7 +694,9 @@ fn main() -> Result<(), String> {
         emit(&mut host, &mut core, &footer, out, "first-run")?;
         return Ok(());
     }
+    core.set_chrome_status(82, Some("Controller battery low".into()));
     emit(&mut host, &mut core, &footer, out, "boot-home")?;
+    core.set_chrome_status(82, None);
     core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     emit(&mut host, &mut core, &footer, out, "focus-moved")?;
     let effect = core

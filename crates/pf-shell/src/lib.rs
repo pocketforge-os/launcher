@@ -656,9 +656,8 @@ fn display_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        custom @ ("SafeReturn" | "Quick" | "Start" | "Room.next" | "Room.previous") => {
-            ShellAction::Custom(custom.into())
-        }
+        custom @ ("SafeReturn" | "Quick" | "Search.open" | "Start" | "Room.next"
+        | "Room.previous") => ShellAction::Custom(custom.into()),
         _ => return None,
     })
 }
@@ -671,7 +670,9 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        "SafeReturn" | "Start" | "Room.next" | "Room.previous" => ShellAction::Custom(name.into()),
+        "SafeReturn" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
+            ShellAction::Custom(name.into())
+        }
         "Quick" => ShellAction::Custom("Favorite".into()),
         _ => return None,
     })

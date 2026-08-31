@@ -16,6 +16,7 @@
   "effective_map": [
     {"context":"global","action":"Activate","binding":{"shape":"single_press","controls":["east"]}},
     {"context":"global","action":"Back","binding":{"shape":"single_press","controls":["south"]}},
+    {"context":"global","action":"Search.open","binding":{"shape":"single_press","controls":["select"]}},
     {"context":"shell","action":"Quick","binding":{"shape":"single_press","controls":["west"]}},
     {"context":"global","action":"SafeReturn","binding":{"shape":"single_press","controls":["guide"]}},
     {"context":"shell","action":"Move.up","binding":{"shape":"single_press","controls":["l2"]}},

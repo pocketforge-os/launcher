@@ -640,6 +640,8 @@ pub struct ShellCore {
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
+    battery_percent: u8,
+    attention_message: Option<String>,
     playtime: HashMap<String, Playtime>,
     recent_use: HashMap<String, SystemTime>,
 }
@@ -787,8 +789,19 @@ impl ShellCore {
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
+            battery_percent: 82,
+            attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
+        }
+    }
+
+    pub fn set_chrome_status(&mut self, battery_percent: u8, attention: Option<String>) {
+        let battery_percent = battery_percent.min(100);
+        if self.battery_percent != battery_percent || self.attention_message != attention {
+            self.battery_percent = battery_percent;
+            self.attention_message = attention;
+            self.bump_revision();
         }
     }
 
@@ -1717,7 +1730,7 @@ impl ShellCore {
                     });
                 }
             }
-            ShellAction::Custom(name) if name == "Search" => {
+            ShellAction::Custom(name) if matches!(name.as_str(), "Search" | "Search.open") => {
                 self.remember_caller();
                 self.go(Route::Search);
             }
@@ -2527,22 +2540,67 @@ impl ShellCore {
                 STATUS_BAR_HEIGHT,
                 "--color-surface-raised",
             ),
+        ];
+        let battery_x = w - 200.0;
+        children.extend([
+            node(
+                "battery-outline",
+                Role::Group,
+                "Battery",
+                battery_x,
+                24.0,
+                24.0,
+                14.0,
+                "--color-border-strong",
+            ),
+            node(
+                "battery-cavity",
+                Role::Group,
+                "",
+                battery_x + 2.0,
+                26.0,
+                18.0,
+                10.0,
+                "--color-surface-raised",
+            ),
+            node(
+                "battery-level",
+                Role::Group,
+                "",
+                battery_x + 3.0,
+                27.0,
+                16.0 * f32::from(self.battery_percent) / 100.0,
+                8.0,
+                "--color-text-secondary",
+            ),
+            node(
+                "battery-terminal",
+                Role::Group,
+                "",
+                battery_x + 24.0,
+                28.0,
+                2.0,
+                6.0,
+                "--color-border-strong",
+            ),
+        ]);
+        children.push(
             node(
                 "status-cluster",
                 Role::Text,
-                if self.authority_unavailable() {
-                    "Wi-Fi   82%   !   9:41"
+                &if self.authority_unavailable() {
+                    format!("{}     !     9:41", self.battery_percent)
                 } else {
-                    "Wi-Fi   82%   9:41"
+                    format!("{}     9:41", self.battery_percent)
                 },
-                w - 248.0,
+                battery_x + 32.0,
                 16.0,
-                200.0,
+                152.0,
                 32.0,
                 "--color-surface-raised",
             )
             .with_type_role(TypeRole::Caption),
-        ];
+        );
         let room_left = w / 2.0 - 220.0;
         children.push(
             node(
@@ -2672,16 +2730,22 @@ impl ShellCore {
         let footer = match self.route {
             Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
                 let mut prompts = self
-                    .binding_prompt(
-                        "Activate",
-                        if self.ready_variants(item).is_empty() {
-                            "Details"
-                        } else {
-                            "Open"
-                        },
-                    )
+                    .binding_prompt("Search.open", "Search")
                     .into_iter()
                     .collect::<Vec<_>>();
+                if let Some(prompt) = self.binding_prompt("Quick", "Quick") {
+                    prompts.push(prompt);
+                }
+                if let Some(prompt) = self.binding_prompt(
+                    "Activate",
+                    if self.ready_variants(item).is_empty() {
+                        "Details"
+                    } else {
+                        "Open"
+                    },
+                ) {
+                    prompts.push(prompt);
+                }
                 let global_prompts = supplied_footer
                     .split_once("     ")
                     .map_or(supplied_footer.as_str(), |(_, global)| global);
@@ -2844,7 +2908,11 @@ impl ShellCore {
             );
         }
         if self.route == Route::Home {
-            let heading = out.pop().expect("Home route heading was just added");
+            let mut heading = out
+                .pop()
+                .expect("Home route heading was just added")
+                .with_ink_token("--color-text-muted");
+            heading.style_token = "--color-transparent".into();
             let focused = self
                 .focused_item_index()
                 .and_then(|index| self.items.get(index));
@@ -2889,6 +2957,16 @@ impl ShellCore {
                 },
             );
             let mut content = vec![
+                node(
+                    "hero-wash",
+                    Role::Group,
+                    "",
+                    0.0,
+                    STATUS_BAR_HEIGHT,
+                    w,
+                    280.0,
+                    "--color-surface-raised",
+                ),
                 heading,
                 node(
                     "hero-title",
@@ -2898,10 +2976,11 @@ impl ShellCore {
                     144.0,
                     w - 96.0,
                     72.0,
-                    "--color-surface-canvas",
+                    "--color-transparent",
                 )
                 .with_type_role(TypeRole::Hero)
-                .with_line_height(1.04),
+                .with_line_height(1.04)
+                .with_ink_token("--color-text-primary"),
                 node(
                     "hero-status",
                     Role::Text,
@@ -2916,21 +2995,49 @@ impl ShellCore {
                     224.0,
                     480.0,
                     32.0,
-                    "--color-surface-canvas",
+                    "--color-transparent",
                 )
-                .with_type_role(TypeRole::Label),
+                .with_type_role(TypeRole::Label)
+                .with_ink_token("--color-status-ready"),
             ];
-            if self.presentation == Presentation::ForcedClose {
+            let attention = self.attention_message.as_deref().or_else(|| {
+                (self.presentation == Presentation::ForcedClose)
+                    .then_some("The previous game didn't close cleanly")
+            });
+            if let Some(message) = attention {
                 content.push(node(
-                    "attention",
-                    Role::Text,
-                    &format!("● Attention · {} didn't close cleanly", self.active_title),
-                    w - 480.0,
-                    96.0,
-                    432.0,
+                    "attention-pill",
+                    Role::Group,
+                    "",
+                    w - 328.0,
+                    76.0,
+                    280.0,
                     36.0,
+                    "--color-surface-raised",
+                ));
+                content.push(node(
+                    "attention-dot",
+                    Role::Group,
+                    "",
+                    w - 312.0,
+                    91.0,
+                    6.0,
+                    6.0,
                     "--color-status-attention",
                 ));
+                content.push(
+                    node(
+                        "attention",
+                        Role::Text,
+                        message,
+                        w - 296.0,
+                        78.0,
+                        240.0,
+                        36.0,
+                        "--color-surface-raised",
+                    )
+                    .with_type_role(TypeRole::Caption),
+                );
             }
             let ready_items = self
                 .items
@@ -5697,6 +5804,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     {
         Some(RADIUS_S)
     } else if id == "attention"
+        || id == "attention-pill"
         || id.contains("status-dot")
         || id.contains("-pip")
         || id.starts_with("favorite-pin-")
@@ -9479,6 +9587,50 @@ mod tests {
         assert_eq!(
             find(scene.root(), "home-shelf-label").map(|node| node.accessible_label.as_str()),
             Some("READY NOW · 2")
+        );
+    }
+
+    #[test]
+    fn chrome_status_uses_observed_battery_and_optional_attention() {
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.set_chrome_status(25, None);
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(
+            (node_by_id(scene.root(), "battery-level")
+                .unwrap()
+                .bounds
+                .width
+                - 4.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(node_by_id(scene.root(), "attention-pill").is_none());
+
+        core.set_chrome_status(100, Some("Controller battery low".into()));
+        let scene = core.scene(metrics, "").unwrap();
+        assert!(
+            (node_by_id(scene.root(), "battery-level")
+                .unwrap()
+                .bounds
+                .width
+                - 16.0)
+                .abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
+            Some("Controller battery low")
         );
     }
 

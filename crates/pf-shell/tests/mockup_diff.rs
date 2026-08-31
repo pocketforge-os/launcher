@@ -7,7 +7,7 @@ const HEIGHT: u32 = 720;
 // explicitly forbids lowering these values; improvements should raise them.
 const SCREENS: [(&str, &str, f64); 5] = [
     ("home", "boot-home.png", 0.938_694),
-    ("library", "library.png", 0.944_097),
+    ("library", "library.png", 0.976_248_729_121_278),
     ("detail", "details.png", 0.940_459),
     ("settings", "settings.png", 0.959_066),
     ("high-contrast", "high-contrast.png", 0.911_423),
@@ -35,7 +35,8 @@ fn offscreen_routes_match_approved_design_renders() {
         let diff_path = diff_dir.join(format!("{screen}-diff.png"));
         write_rgba(&diff_path, &diff);
         println!(
-            "mockup-diff screen={screen} score={score:.6} threshold={threshold:.6} diff={}",
+            "mockup-diff screen={screen} score={score:.15} score_bits={:#018x} threshold={threshold:.15} diff={}",
+            score.to_bits(),
             diff_path.display()
         );
         if score + f64::EPSILON < threshold {

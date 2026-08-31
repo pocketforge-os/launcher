@@ -14,5 +14,8 @@ pf-theme.workspace = true
 png = "0.17.16"
 sha2 = "0.10.9"
 
+[dev-dependencies]
+pf-render.workspace = true
+
 [lints]
 workspace = true

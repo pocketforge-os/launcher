@@ -12,7 +12,7 @@
      Cite a bead or follow-up PR for anything deliberately deferred. -->
 
 - [ ] 
-- [ ] Any mockup-diff thresholds changed by this PR were only raised, never lowered.
+- [x] Any mockup-diff thresholds changed by this PR were only raised, never lowered.
 
 ## Related PRs
 

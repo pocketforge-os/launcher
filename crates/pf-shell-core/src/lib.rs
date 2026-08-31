@@ -31,22 +31,24 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 mod design_generated;
 mod design_manual;
 
 use design_generated::{
-    CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
+    CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
     COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
     COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
-    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
-    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH,
-    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
-    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
-    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_HEIGHT,
+    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
+    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4,
+    SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
+    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
+    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
+    STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -64,11 +66,15 @@ pub trait DeviceStatusPort {
 
 const HOME_SHELF_LIMIT: usize = 6;
 const HOME_SHELF_GAP: f32 = 47.2;
-const LIBRARY_SIDE_MARGIN: f32 = 48.0;
-const LIBRARY_TOOLBAR_GAP: f32 = 16.0;
+const LIBRARY_SIDE_MARGIN: f32 = SPACE_7;
+const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
+// Start-aligned labels are painted into this inset content box by pf-render.
+// Keep node sizing expressed in terms of the per-edge paint contract so callers
+// cannot accidentally confuse a shaped advance with the containing box width.
+const TEXT_NODE_INLINE_INSET: f32 = 6.0;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
@@ -82,12 +88,28 @@ fn caption_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
 }
 
+// Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
+// by the same Cosmic Text shaping configuration that paints the Label role. Keeping
+// the finite prompt vocabulary exact avoids turning conservative layout reserve into
+// invisible trailing space at the right-aligned edge.
+fn library_prompt_verb_width(text: &str) -> f32 {
+    match text {
+        "Search" | "Details" => 52.0,
+        "Filter" => 37.0,
+        _ => label_text_width(text),
+    }
+}
+
+fn text_node_box_width(content_advance: f32) -> f32 {
+    content_advance + 2.0 * TEXT_NODE_INLINE_INSET
+}
+
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
         + 20.0
         + count.map_or(0.0, |value| {
-            CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
+            CHIP_COUNT_GAP + text_node_box_width(label_text_width(&value.to_string()))
         })
         + CHIP_HORIZONTAL_PADDING
 }
@@ -173,17 +195,22 @@ impl LibraryGeometry {
 
 fn library_geometry(surface_width: f32) -> LibraryGeometry {
     let (preferred_columns, toolbar_columns, card_top) = if surface_width >= 1100.0 {
-        (6, 4, 184.0)
+        (6, 4, LIB_GRID_TOP + SPACE_3)
     } else if surface_width >= 760.0 {
         (4, 4, 252.0)
     } else {
         (3, 2, 320.0)
     };
     let card_left = LIBRARY_SIDE_MARGIN;
-    let card_width = CARD_ART_WIDTH;
+    let card_width = if preferred_columns == 6 {
+        (surface_width - 2.0 * card_left - (preferred_columns - 1) as f32 * SPACE_5)
+            / preferred_columns as f32
+    } else {
+        CARD_ART_WIDTH
+    };
     let mut columns = preferred_columns;
     while columns > 1
-        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * 16.0
+        && 2.0 * card_left + columns as f32 * card_width + (columns - 1) as f32 * SPACE_4
             > surface_width
     {
         columns -= 1;
@@ -193,10 +220,10 @@ fn library_geometry(surface_width: f32) -> LibraryGeometry {
     let card_gap = if columns == 1 {
         0.0
     } else if columns == 6 {
-        (surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32
+        SPACE_5
     } else {
         ((surface_width - 2.0 * card_left - columns as f32 * card_width) / (columns - 1) as f32)
-            .max(16.0)
+            .max(SPACE_4)
     };
     LibraryGeometry {
         columns,
@@ -1769,6 +1796,16 @@ impl ShellCore {
                 self.remember_caller();
                 self.go(Route::Search);
             }
+            ShellAction::Custom(name) if name == "Filter.next" && self.route == Route::Library => {
+                self.library_filter = match self.library_filter {
+                    LibraryFilter::Recent => LibraryFilter::Alphabetical,
+                    LibraryFilter::Alphabetical => LibraryFilter::Games,
+                    LibraryFilter::Games => LibraryFilter::EverythingElse,
+                    LibraryFilter::EverythingElse => LibraryFilter::Recent,
+                };
+                self.refresh_library_items();
+                self.focus = self.focus.min(self.library_items.len().saturating_add(4));
+            }
             ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
             ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
             ShellAction::Custom(name) if name == "Quick" => {
@@ -2798,10 +2835,21 @@ impl ShellCore {
                 }
                 prompts.join(" · ")
             }),
-            Route::Library => (self.focus >= 5)
-                .then(|| self.binding_prompt("Activate", "Details"))
-                .flatten()
-                .unwrap_or_default(),
+            Route::Library => {
+                let mut prompts = self
+                    .binding_prompt("Search.open", "Search")
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                if let Some(prompt) = self.binding_prompt("Filter.next", "Filter") {
+                    prompts.push(prompt);
+                }
+                if self.focus >= 5
+                    && let Some(prompt) = self.binding_prompt("Activate", "Details")
+                {
+                    prompts.push(prompt);
+                }
+                prompts.join("     ")
+            }
             Route::Details => {
                 let ready = self
                     .selected_item
@@ -2865,11 +2913,15 @@ impl ShellCore {
             h - PROMPTS_AREA_HEIGHT,
             w,
             PROMPTS_AREA_HEIGHT,
-            COLOR_SURFACE_RAISED_TOKEN,
+            if self.route == Route::Library {
+                SCENE_TRANSPARENT_TOKEN
+            } else {
+                COLOR_SURFACE_RAISED_TOKEN
+            },
         ));
         let mut prompt_node = node(
             "prompts",
-            if self.route == Route::Home {
+            if matches!(self.route, Route::Home | Route::Library) {
                 Role::Group
             } else {
                 Role::Text
@@ -2892,12 +2944,17 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h);
+        } else if self.route == Route::Library {
+            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h);
         }
         children.push(prompt_node);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
             apply_quiet_console_radius(child, radius_scale);
+        }
+        if self.route == Route::Library {
+            place_library_fade_below_footer(&mut children);
         }
         let focus_id = children
             .iter()
@@ -3196,6 +3253,7 @@ impl ShellCore {
                     x,
                     388.0,
                     card_width,
+                    CARD_ART_HEIGHT,
                     Some(h - PROMPTS_AREA_HEIGHT),
                 );
                 if item.favorite {
@@ -3252,7 +3310,7 @@ impl ShellCore {
                 .map(|(label, count, _)| library_chip_width(label, *count))
                 .collect::<Vec<_>>();
             let required_toolbar_width = chip_widths.iter().sum::<f32>()
-                + (geometry.toolbar_columns - 1) as f32 * geometry.card_gap;
+                + (geometry.toolbar_columns - 1) as f32 * LIBRARY_TOOLBAR_GAP;
             let search_width = if compact_toolbar {
                 w - 2.0 * LIBRARY_SIDE_MARGIN
             } else {
@@ -3263,10 +3321,10 @@ impl ShellCore {
                 "library-search",
                 Role::Button,
                 &format!("⌕  Search {} titles", self.items.len()),
-                48.0,
-                112.0,
+                LIBRARY_SIDE_MARGIN,
+                LIB_HEAD_TOP,
                 search_width,
-                52.0,
+                LIB_TOOLBAR_HEIGHT,
                 STATE_REST_SURFACE_TOKEN,
             );
             search.state.focused = self.focus == 0;
@@ -3276,8 +3334,8 @@ impl ShellCore {
                     "library-search-placeholder",
                     Role::Text,
                     &format!("⌕  Search {} titles", self.items.len()),
-                    64.0,
-                    124.0,
+                    LIBRARY_SIDE_MARGIN + SPACE_4,
+                    LIB_HEAD_TOP + 8.0,
                     search_width - 32.0,
                     28.0,
                     STATE_REST_SURFACE_TOKEN,
@@ -3287,15 +3345,15 @@ impl ShellCore {
             out.push(search);
             for (index, (label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
-                    48.0
+                    LIBRARY_SIDE_MARGIN
                 } else {
                     LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
-                let toolbar_top = if compact_toolbar { 180.0 } else { 112.0 };
+                let toolbar_top = if compact_toolbar { 180.0 } else { LIB_HEAD_TOP };
                 let toolbar_width = if compact_toolbar {
-                    w - 96.0
+                    w - 2.0 * LIBRARY_SIDE_MARGIN
                 } else {
-                    w - toolbar_left - 48.0
+                    w - toolbar_left - LIBRARY_SIDE_MARGIN
                 };
                 let chip_width = if compact_toolbar {
                     (toolbar_width - (geometry.toolbar_columns - 1) as f32 * geometry.card_gap)
@@ -3310,13 +3368,12 @@ impl ShellCore {
                 } else {
                     toolbar_left
                         + chip_widths[..index].iter().sum::<f32>()
-                        + index as f32 * geometry.card_gap
+                        + index as f32 * LIBRARY_TOOLBAR_GAP
                 };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let chip_height = CHIP_HEIGHT;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
-                let label_width = label_text_width(&label) + 20.0;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -3330,6 +3387,49 @@ impl ShellCore {
                 chip.state.focused = focused;
                 chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
+                if active {
+                    for (edge, x, y, width, height) in [
+                        (
+                            "top",
+                            chip.bounds.x,
+                            chip.bounds.y,
+                            chip.bounds.width,
+                            CHIP_BORDER_WIDTH,
+                        ),
+                        (
+                            "right",
+                            chip.bounds.x + chip.bounds.width - CHIP_BORDER_WIDTH,
+                            chip.bounds.y,
+                            CHIP_BORDER_WIDTH,
+                            chip.bounds.height,
+                        ),
+                        (
+                            "bottom",
+                            chip.bounds.x,
+                            chip.bounds.y + chip.bounds.height - CHIP_BORDER_WIDTH,
+                            chip.bounds.width,
+                            CHIP_BORDER_WIDTH,
+                        ),
+                        (
+                            "left",
+                            chip.bounds.x,
+                            chip.bounds.y,
+                            CHIP_BORDER_WIDTH,
+                            chip.bounds.height,
+                        ),
+                    ] {
+                        chip.children.push(node(
+                            &format!("library-filter-{index}-border-{edge}"),
+                            Role::Group,
+                            "",
+                            x,
+                            y,
+                            width,
+                            height,
+                            COLOR_BORDER_STRONG_TOKEN,
+                        ));
+                    }
+                }
                 chip.children.push({
                     let mut label_node = node(
                         &format!("library-filter-{index}-label"),
@@ -3337,7 +3437,7 @@ impl ShellCore {
                         &label,
                         chip.bounds.x + CHIP_HORIZONTAL_PADDING,
                         chip.bounds.y + 5.0,
-                        label_width,
+                        label_text_width(&label) + 20.0,
                         26.0,
                         chip.style_token.as_str(),
                     )
@@ -3353,9 +3453,9 @@ impl ShellCore {
                             &count.to_string(),
                             chip.bounds.x + chip_width
                                 - CHIP_HORIZONTAL_PADDING
-                                - (count_width + 12.0),
+                                - text_node_box_width(count_width),
                             chip.bounds.y + 5.0,
-                            count_width + 12.0,
+                            text_node_box_width(count_width),
                             26.0,
                             chip.style_token.as_str(),
                         )
@@ -3370,21 +3470,21 @@ impl ShellCore {
                         &format!("library-selected-underline-{index}"),
                         Role::Group,
                         "",
-                        chip_x + CHIP_HORIZONTAL_PADDING,
+                        chip_x + CHIP_BORDER_WIDTH,
                         toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
-                        chip_width - 2.0 * CHIP_HORIZONTAL_PADDING,
+                        chip_width - 2.0 * CHIP_BORDER_WIDTH,
                         3.0,
                         STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
-            let row_height = 272.0;
+            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
             while if geometry.columns == 6 {
-                card_top + 8.0 + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
+                card_top + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
             } else {
-                card_top + 8.0 + visible_rows as f32 * row_height + CARD_ART_HEIGHT
+                card_top + visible_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
                     <= h - PROMPTS_AREA_HEIGHT
             } {
                 visible_rows += 1;
@@ -3399,9 +3499,7 @@ impl ShellCore {
                 }
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
-                let card_y = card_top + 8.0 + (row as f32 - first_visible_row as f32) * row_height;
-                let title_fits =
-                    card_y + CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 <= h - PROMPTS_AREA_HEIGHT;
+                let card_y = card_top + (row as f32 - first_visible_row as f32) * row_height;
                 let mut card = node(
                     &format!("library-item-{}", item.id),
                     Role::ListItem,
@@ -3409,11 +3507,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_y,
                     geometry.card_width,
-                    if title_fits {
-                        CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0
-                    } else {
-                        CARD_ART_HEIGHT
-                    },
+                    LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 card.state.focused = self.focus == i + 5;
@@ -3427,7 +3521,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    CARD_ART_HEIGHT,
+                    LIB_CARD_ART_HEIGHT,
                     self.focus == i + 5,
                 );
                 add_unavailable_card_cues(
@@ -3438,6 +3532,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
+                    LIB_CARD_ART_HEIGHT,
                     None,
                 );
                 card.children.retain(|child| {
@@ -3468,37 +3563,35 @@ impl ShellCore {
                         .with_type_role(TypeRole::Caption),
                     );
                 }
-                let title_y = card.bounds.y + CARD_ART_HEIGHT + CARD_LABEL_GAP;
-                if title_fits {
-                    card.children.push(
-                        node(
-                            &format!("library-title-{}", item.id),
-                            Role::Text,
-                            &item.title,
-                            card.bounds.x,
-                            title_y,
-                            geometry.card_width,
-                            34.0,
-                            COLOR_SURFACE_CANVAS_TOKEN,
-                        )
-                        .with_type_role(TypeRole::Label),
-                    );
-                }
+                let title_y = card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                card.children.push(
+                    node(
+                        &format!("library-title-{}", item.id),
+                        Role::Text,
+                        &item.title,
+                        card.bounds.x,
+                        title_y,
+                        geometry.card_width,
+                        34.0,
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label),
+                );
                 out.push(card);
             }
-            // pf-scene has no ancestor clipping primitive. Paint the canvas back over the
-            // overflow before footer chrome is emitted so the partial row remains a crop of
-            // full-size covers rather than rescaling their art into the remaining height.
-            out.push(node(
-                "library-grid-footer-clip",
-                Role::Group,
-                "",
-                0.0,
-                h - PROMPTS_AREA_HEIGHT,
-                w,
-                PROMPTS_AREA_HEIGHT,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            ));
+            out.push(
+                node(
+                    "library-grid-footer-fade",
+                    Role::Group,
+                    "",
+                    0.0,
+                    h - 96.0,
+                    w,
+                    96.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_image(library_footer_fade_source(w), ImageFit::Cover),
+            );
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -5537,9 +5630,9 @@ fn add_unavailable_card_cues(
     x: f32,
     y: f32,
     width: f32,
+    art_height: f32,
     footer_top: Option<f32>,
 ) {
-    let art_height = CARD_ART_HEIGHT;
     if matches!(availability, Availability::Ready)
         && best_variant(item).is_some_and(|variant| {
             variant
@@ -5907,6 +6000,91 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
     nodes
 }
 
+fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    let normalized = footer.replace("     ", " · ");
+    let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height);
+    nodes.retain(|node| !node.id.as_str().contains("prompt-separator"));
+    let prompt_top = surface_height - PROMPTS_AREA_HEIGHT;
+    let centered_y = prompt_top + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+    for node in &mut nodes {
+        let id = node.id.as_str();
+        let suffix = id
+            .strip_prefix("home-prompt-keycap-")
+            .or_else(|| id.strip_prefix("home-prompt-verb-"));
+        let Some(index) = suffix
+            .and_then(|suffix| suffix.split('-').next())
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        node.bounds.x -= index as f32 * SPACE_2;
+        node.bounds.y = centered_y;
+    }
+    let prompt_count = nodes
+        .iter()
+        .filter_map(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-verb-")
+                .and_then(|index| index.parse::<usize>().ok())
+        })
+        .max()
+        .map_or(0, |index| index + 1);
+    let mut x = nodes
+        .iter()
+        .map(|node| node.bounds.x)
+        .fold(f32::INFINITY, f32::min);
+    for index in 0..prompt_count {
+        let prefix = format!("home-prompt-keycap-{index}");
+        let keycap_x = nodes
+            .iter()
+            .find(|node| node.id.as_str() == prefix)
+            .map(|node| node.bounds.x)
+            .expect("prompt keycap text");
+        let keycap_width = nodes
+            .iter()
+            .find(|node| node.id.as_str() == format!("{prefix}-border"))
+            .map(|node| node.bounds.width)
+            .expect("prompt keycap border");
+        for node in nodes.iter_mut().filter(|node| {
+            node.id.as_str() == prefix
+                || node.id.as_str() == format!("{prefix}-border")
+                || node.id.as_str() == format!("{prefix}-fill")
+        }) {
+            node.bounds.x += x - keycap_x;
+        }
+        x += keycap_width + SPACE_2;
+
+        let verb = nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == format!("home-prompt-verb-{index}"))
+            .expect("prompt verb");
+        verb.bounds.x = x;
+        verb.bounds.width = text_node_box_width(library_prompt_verb_width(&verb.accessible_label));
+        x += verb.bounds.width + SPACE_5;
+    }
+    let right = nodes
+        .iter()
+        .map(|node| node.bounds.x + node.bounds.width)
+        .fold(0.0_f32, f32::max);
+    let last_verb_ink_inset = TEXT_NODE_INLINE_INSET
+        + nodes
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("home-prompt-verb-"))
+            .max_by_key(|node| node.id.as_str())
+            .map_or(0.0, |node| match node.accessible_label.as_str() {
+                // Swash leaves this much of the shaped advance unpainted after the final
+                // `s`; compensate the ink bearing, not the semantic node boundary.
+                "Details" => 7.0,
+                _ => 0.0,
+            });
+    let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
+    for node in &mut nodes {
+        node.bounds.x += offset;
+    }
+    nodes
+}
+
 fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
     let mut bytes = Vec::new();
     {
@@ -5944,6 +6122,41 @@ fn wifi_glyph_source() -> ImageSource {
         encoded_png(24, 24, &rgba)
     });
     ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn library_footer_fade_source(surface_width: f32) -> ImageSource {
+    static FADES: OnceLock<Mutex<HashMap<u32, Arc<[u8]>>>> = OnceLock::new();
+    let width = surface_width.round().max(1.0) as u32;
+    let bytes = FADES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("library fade cache")
+        .entry(width)
+        .or_insert_with(|| {
+            let width = usize::try_from(width).unwrap();
+            const HEIGHT: usize = 96;
+            let mut rgba = vec![0_u8; width * HEIGHT * 4];
+            for y in 0..HEIGHT {
+                let alpha = u8::try_from((y + 1) * 255 / HEIGHT).unwrap();
+                for x in 0..width {
+                    let offset = (y * width + x) * 4;
+                    rgba[offset..offset + 4].copy_from_slice(&[0x17, 0x15, 0x12, alpha]);
+                }
+            }
+            encoded_png(
+                u32::try_from(width).unwrap(),
+                u32::try_from(HEIGHT).unwrap(),
+                &rgba,
+            )
+        })
+        .clone();
+    let id = if width == 1280 {
+        "quiet-console:library-footer-fade".to_owned()
+    } else {
+        format!("quiet-console:library-footer-fade-{width}")
+    };
+    ImageSource::new(id, bytes)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -6054,6 +6267,21 @@ fn add_explicit_action_name(action_node: &mut Node) {
     for child in &mut action_node.children {
         add_explicit_action_name(child);
     }
+}
+
+fn place_library_fade_below_footer(children: &mut Vec<Node>) {
+    let Some(fade_index) = children
+        .iter()
+        .position(|node| node.id.as_str() == "library-grid-footer-fade")
+    else {
+        return;
+    };
+    let fade = children.remove(fade_index);
+    let prompt_bar_index = children
+        .iter()
+        .position(|node| node.id.as_str() == "prompt-bar")
+        .unwrap_or(children.len());
+    children.insert(prompt_bar_index, fade);
 }
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
@@ -7952,8 +8180,11 @@ mod tests {
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-item-6").unwrap();
 
+        assert!(
+            node_by_id(card, "library-card-art-item-6").is_some(),
+            "missing library-card-art-item-6"
+        );
         for required in [
-            "library-card-art-item-6",
             "library-card-initial-plate-item-6",
             "library-card-plate-kind-item-6",
         ] {
@@ -8132,15 +8363,14 @@ mod tests {
             .unwrap();
         let card = node_by_id(scene.root(), "library-item-setup").unwrap();
         assert_eq!(card.style_token, COLOR_SURFACE_CANVAS_TOKEN);
-        assert!((card.bounds.height - 256.0).abs() < f32::EPSILON);
+        assert!(
+            (card.bounds.height - (LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0)).abs()
+                < f32::EPSILON
+        );
+        assert!(node_by_id(card, "library-card-art-setup").is_some());
         for required in [
-            "library-card-art-setup",
             "library-title-setup",
             "library-card-reason-setup",
-        ] {
-            assert!(node_by_id(card, required).is_some(), "missing {required}");
-        }
-        for required in [
             "library-card-initial-plate-setup",
             "library-card-plate-kind-setup",
         ] {
@@ -9728,7 +9958,7 @@ mod tests {
             .find(|node| node.state.focused && node.id.as_str().starts_with("library-item-"))
             .unwrap();
         assert!(focused.bounds.y >= 0.0);
-        assert!(focused.bounds.y + focused.bounds.height <= metrics.logical_height);
+        assert!(node_by_id(focused, "library-title-title-480").is_some());
         assert_eq!(focused.id.as_str(), "library-item-title-480");
     }
 
@@ -9785,7 +10015,7 @@ mod tests {
         assert!(
             cards
                 .iter()
-                .any(|card| card.id.as_str() == "library-item-item-7" && card.state.focused),
+                .any(|card| { card.id.as_str() == "library-item-item-7" && card.state.focused }),
             "the focused card must remain in the emitted row"
         );
     }
@@ -9878,12 +10108,12 @@ mod tests {
                 "each emitted row must begin above the footer at {width}x{height}"
             );
 
-            let row_height = 272.0;
+            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
             let mut expected_rows = 1;
             while if geometry.columns == 6 {
-                geometry.card_top + 8.0 + expected_rows as f32 * row_height < grid_bottom
+                geometry.card_top + expected_rows as f32 * row_height < grid_bottom
             } else {
-                geometry.card_top + 8.0 + expected_rows as f32 * row_height + CARD_ART_HEIGHT
+                geometry.card_top + expected_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
                     <= grid_bottom
             } {
                 expected_rows += 1;
@@ -9931,26 +10161,720 @@ mod tests {
         let second_row_art = node_by_id(root, "library-card-art-item-6").unwrap();
         assert!(second_row_art.bounds.y < footer_top);
         assert!(second_row_art.bounds.y + second_row_art.bounds.height > footer_top);
-        assert!((second_row_art.bounds.height - CARD_ART_HEIGHT).abs() < f32::EPSILON);
+        assert!((second_row_art.bounds.height - LIB_CARD_ART_HEIGHT).abs() < f32::EPSILON);
 
-        let clip_index = root
-            .children
-            .iter()
-            .position(|node| node.id.as_str() == "library-grid-footer-clip")
+        let fade = node_by_id(root, "library-grid-footer-fade").unwrap();
+        assert!((fade.bounds.y - (720.0 - 96.0)).abs() < f32::EPSILON);
+        assert!((fade.bounds.height - 96.0).abs() < f32::EPSILON);
+        assert!(matches!(fade.content, pf_scene::NodeContent::Image { .. }));
+    }
+
+    #[test]
+    fn library_footer_fade_spans_the_full_band_on_wide_surfaces() {
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1920.0,
+                    logical_height: 1080.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
             .unwrap();
-        let last_card_index = root
-            .children
-            .iter()
-            .rposition(|node| node.id.as_str().starts_with("library-item-"))
+        let fade = node_by_id(scene.root(), "library-grid-footer-fade").unwrap();
+        let pf_scene::NodeContent::Image { source, .. } = &fade.content else {
+            panic!("library footer fade must be an image");
+        };
+        let decoder = png::Decoder::new(Cursor::new(source.bytes.as_ref()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+
+        assert_eq!((info.width, info.height), (1920, 96));
+        assert!(pixels[3] <= 3, "top row must be effectively transparent");
+        let bottom_alpha = pixels[(usize::try_from(info.height).unwrap() - 1)
+            * usize::try_from(info.width).unwrap()
+            * 4
+            + 3];
+        assert_eq!(bottom_alpha, 255, "bottom row must be fully opaque");
+    }
+
+    #[test]
+    fn library_footer_stacking_matches_mockup() {
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
             .unwrap();
-        let clip = &root.children[clip_index];
+        let children = &scene.root().children;
+        let fade_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+        let prompt_bar_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompt-bar")
+            .unwrap();
+        let card_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-item-ready")
+            .unwrap();
+
         assert!(
-            clip_index > last_card_index,
-            "clip must paint after every grid card"
+            card_index < fade_index
+                && fade_index < prompt_bar_index
+                && prompt_bar_index < prompts_index,
+            "cards (with labels) must paint below the fade, prompt bar, and prompts"
         );
-        assert!((clip.bounds.y - footer_top).abs() < f32::EPSILON);
-        assert!((clip.bounds.height - PROMPTS_AREA_HEIGHT).abs() < f32::EPSILON);
-        assert_eq!(clip.style_token, COLOR_SURFACE_CANVAS_TOKEN);
+        assert!(
+            children
+                .iter()
+                .all(|node| !node.id.as_str().starts_with("library-label-layer-")),
+            "library labels must remain card children, never lifted layers"
+        );
+        assert!(node_by_id(&children[card_index], "library-title-ready").is_some());
+    }
+
+    #[test]
+    fn actionable_fade_band_item_keeps_its_single_in_bounds_name_ink() {
+        let mut items = (0..12)
+            .map(|index| {
+                let (id, title) = if index == 7 {
+                    ("low-orbit".to_owned(), "Low Orbit".to_owned())
+                } else {
+                    (format!("item-{index}"), format!("Item {index}"))
+                };
+                item(
+                    &id,
+                    &title,
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        items[7].presentation.icon_reference = Some("fixture-art:low-orbit.png".into());
+        items[7].presentation.icon_decodable = true;
+        let snapshot = CatalogSnapshot {
+            revision: 10,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items,
+            user_projection: UserProjection::default(),
+        };
+        let art = encoded_png(1, 1, &[0x33, 0x44, 0x55, 0xff]);
+        let mut core = ShellCore::boot_with_art(&snapshot, &pf_theme::flagship(), false, |_, _| {
+            Some(art.clone())
+        });
+        core.authority_snapshot(false);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let action = node_by_id(root, "library-item-low-orbit").unwrap();
+        let name_ink = action
+            .children
+            .iter()
+            .find(|child| {
+                matches!(child.role, Role::Text | Role::Heading)
+                    && child.accessible_label == "Low Orbit"
+            })
+            .unwrap();
+        let fade_index = root
+            .children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let action_index = root
+            .children
+            .iter()
+            .position(|node| node.id == action.id)
+            .unwrap();
+
+        assert!(action.action.is_some());
+        assert!(name_ink.bounds.x >= action.bounds.x);
+        assert!(name_ink.bounds.y >= action.bounds.y);
+        assert!(name_ink.bounds.x + name_ink.bounds.width <= action.bounds.x + action.bounds.width);
+        assert!(
+            name_ink.bounds.y + name_ink.bounds.height <= action.bounds.y + action.bounds.height
+        );
+        assert_eq!(
+            action
+                .children
+                .iter()
+                .filter(|child| child.accessible_label == "Low Orbit")
+                .count(),
+            1,
+            "the actionable subtree must expose one painted name node"
+        );
+        assert!(
+            action_index < fade_index,
+            "card name ink must dim below the fade"
+        );
+        assert!(
+            root.children[..fade_index].iter().any(|node| {
+                node.id.as_str() == "library-item-low-orbit"
+                    && node
+                        .children
+                        .iter()
+                        .any(|child| child.id.as_str() == "library-card-art-low-orbit")
+            }),
+            "the intact card must paint below the fade"
+        );
+        assert!(
+            !root
+                .children
+                .iter()
+                .any(|node| { node.id.as_str().starts_with("library-fade-lift-") })
+        );
+    }
+
+    #[test]
+    fn desktop_library_toolbar_uses_mockup_flex_geometry() {
+        let mut items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("item-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &mut items[21..] {
+            item.kind = AppKind::Media;
+        }
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let chips = (0..4)
+            .map(|index| node_by_id(scene.root(), &format!("library-filter-{index}")).unwrap())
+            .collect::<Vec<_>>();
+        let expected_content = [
+            ("Recent", None),
+            ("A–Z", None),
+            ("Games", Some(21)),
+            ("Everything else", Some(3)),
+        ];
+        assert!((search.bounds.x - SPACE_7).abs() < f32::EPSILON);
+        assert!(node_by_id(scene.root(), "library-toolbar-divider").is_none());
+        for (index, (chip, (label, count))) in chips.iter().zip(expected_content).enumerate() {
+            assert!(
+                (chip.bounds.width - library_chip_width(label, count)).abs() < f32::EPSILON,
+                "chip {index} must use its natural content width"
+            );
+
+            let inner_left = chip.bounds.x + CHIP_HORIZONTAL_PADDING;
+            let inner_right = chip.bounds.x + chip.bounds.width - CHIP_HORIZONTAL_PADDING;
+            let label_node = node_by_id(chip, &format!("library-filter-{index}-label")).unwrap();
+            assert!(label_node.bounds.x >= inner_left);
+            assert!(
+                (label_node.bounds.width - (label_text_width(label) + 20.0)).abs() < f32::EPSILON
+            );
+            if count.is_some() {
+                let count_node =
+                    node_by_id(chip, &format!("library-filter-{index}-count")).unwrap();
+                assert!(
+                    count_node.bounds.x + count_node.bounds.width
+                        <= inner_right + 2.0 * TEXT_NODE_INLINE_INSET,
+                    "chip {index} count content must fit inside the right padding"
+                );
+                assert!(
+                    count_node.bounds.x
+                        >= label_node.bounds.x + label_node.bounds.width + CHIP_COUNT_GAP,
+                    "chip {index} label and count must retain the design gap"
+                );
+            }
+        }
+        assert!((chips[3].bounds.x + chips[3].bounds.width - 1232.0).abs() < f32::EPSILON);
+        for pair in chips.windows(2) {
+            let gap = pair[1].bounds.x - pair[0].bounds.x - pair[0].bounds.width;
+            assert!((gap - 16.0).abs() < f32::EPSILON);
+        }
+        let toolbar_gap = chips[0].bounds.x - search.bounds.x - search.bounds.width;
+        assert!((toolbar_gap - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn desktop_library_footer_matches_promptbar_css_without_separators() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "item-0", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "shell".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let prompts = node_by_id(scene.root(), "prompts").unwrap();
+        assert!(!prompts.accessible_label.contains('·'));
+        assert!(
+            !prompts
+                .children
+                .iter()
+                .any(|node| node.accessible_label == "·" || node.id.as_str().contains("separator"))
+        );
+        let last_verb = node_by_id(prompts, "home-prompt-verb-2").unwrap();
+        assert!(
+            (last_verb.bounds.x + last_verb.bounds.width
+                - TEXT_NODE_INLINE_INSET
+                - 7.0
+                - (1280.0 - SPACE_7))
+                .abs()
+                < f32::EPSILON
+        );
+        let expected_top =
+            720.0 - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+        assert!(
+            prompts
+                .children
+                .iter()
+                .all(|node| (node.bounds.y - expected_top).abs() < f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn desktop_library_text_is_complete_and_footer_is_margin_anchored_on_one_row() {
+        fn clear_label(node: &mut Node, id: &str) -> bool {
+            if node.id.as_str() == id {
+                node.accessible_label.clear();
+                return true;
+            }
+            node.children.iter_mut().any(|child| clear_label(child, id))
+        }
+
+        fn widen_label(node: &mut Node, id: &str) -> bool {
+            if node.id.as_str() == id {
+                node.bounds.width = 300.0;
+                return true;
+            }
+            node.children.iter_mut().any(|child| widen_label(child, id))
+        }
+
+        fn ink_columns_with_label_suppressed(
+            scene: &Scene,
+            id: &str,
+            metrics: SurfaceMetrics,
+        ) -> (usize, usize, usize, usize, usize) {
+            let rendered = pf_render::Rasterizer::new().render(scene, metrics).unwrap();
+            let mut suppressed_root = scene.root().clone();
+            assert!(clear_label(&mut suppressed_root, id));
+            let suppressed = Scene::new(suppressed_root, scene.default_focus().clone()).unwrap();
+            let blank = pf_render::Rasterizer::new()
+                .render(&suppressed, metrics)
+                .unwrap();
+            let mut columns = std::collections::BTreeSet::new();
+            let mut rows = std::collections::BTreeSet::new();
+            for (pixel, (painted, blank)) in rendered
+                .rgba
+                .chunks_exact(4)
+                .zip(blank.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                if painted != blank {
+                    columns.insert(pixel % rendered.width as usize);
+                    rows.insert(pixel / rendered.width as usize);
+                }
+            }
+            (
+                columns.len(),
+                *columns
+                    .first()
+                    .unwrap_or_else(|| panic!("{id} must produce raster ink")),
+                *columns.last().unwrap(),
+                *rows.first().unwrap(),
+                *rows.last().unwrap(),
+            )
+        }
+
+        fn generous_ink_columns(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> usize {
+            let mut generous_root = scene.root().clone();
+            assert!(widen_label(&mut generous_root, id));
+            let generous = Scene::new(generous_root, scene.default_focus().clone()).unwrap();
+            ink_columns_with_label_suppressed(&generous, id, metrics).0
+        }
+
+        let mut items = (0..24)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("item-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &mut items[21..] {
+            item.kind = AppKind::Media;
+        }
+        let mut core = fixture_core(items);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "shell".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        for id in [
+            "home-prompt-verb-0",
+            "home-prompt-verb-1",
+            "home-prompt-verb-2",
+            "library-filter-0-label",
+            "library-filter-1-label",
+            "library-filter-2-label",
+            "library-filter-2-count",
+            "library-filter-3-label",
+            "library-filter-3-count",
+        ] {
+            let label = node_by_id(scene.root(), id).unwrap();
+            let in_scene = ink_columns_with_label_suppressed(&scene, id, metrics).0;
+            let standalone = generous_ink_columns(&scene, id, metrics);
+            assert_eq!(
+                in_scene, standalone,
+                "{id} must paint every standalone ink column (label {:?})",
+                label.accessible_label
+            );
+        }
+
+        let (_, min_x, max_x, min_y, max_y) =
+            ink_columns_with_label_suppressed(&scene, "home-prompt-verb-2", metrics);
+        assert!(
+            max_x.abs_diff(1231) <= 2,
+            "rightmost Details ink must meet the 1232px content margin, got x={min_x}..={max_x}"
+        );
+        assert!(
+            max_y - min_y < 15,
+            "Details ink must remain on one label row, got y={min_y}..={max_y}"
+        );
+    }
+
+    #[test]
+    fn selected_library_chip_uses_uniform_strong_border_and_full_inner_accent() {
+        let mut core = fixture_core(vec![item(
+            "item-0",
+            "Item 0",
+            vec![variant("native", "item-0", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-0").unwrap();
+        assert_eq!(chip.style_token, STATE_REST_SURFACE_TOKEN);
+        for edge in ["top", "right", "bottom", "left"] {
+            assert_eq!(
+                node_by_id(chip, &format!("library-filter-0-border-{edge}"))
+                    .unwrap()
+                    .style_token,
+                COLOR_BORDER_STRONG_TOKEN
+            );
+        }
+        let accent = node_by_id(scene.root(), "library-selected-underline-0").unwrap();
+        assert!((accent.bounds.x - chip.bounds.x - CHIP_BORDER_WIDTH).abs() < f32::EPSILON);
+        assert!(
+            (accent.bounds.width - chip.bounds.width + 2.0 * CHIP_BORDER_WIDTH).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn desktop_library_scene_uses_generated_css_geometry() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        let toolbar = node_by_id(scene.root(), "library-search").unwrap();
+        assert!((toolbar.bounds.y - LIB_HEAD_TOP).abs() < f32::EPSILON);
+        assert!((toolbar.bounds.height - LIB_TOOLBAR_HEIGHT).abs() < f32::EPSILON);
+
+        let first_art = node_by_id(scene.root(), "library-card-art-item-0").unwrap();
+        assert!((first_art.bounds.y - (LIB_GRID_TOP + SPACE_3)).abs() < f32::EPSILON);
+        assert!((first_art.bounds.height - LIB_CARD_ART_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn library_card_label_paint_order_never_occludes_footer_ink() {
+        fn has_library_title(node: &Node) -> bool {
+            node.id.as_str().starts_with("library-title-")
+                || node.children.iter().any(has_library_title)
+        }
+        fn collect_text<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            if matches!(node.role, Role::Text | Role::Heading) {
+                out.push(node);
+            }
+            for child in &node.children {
+                collect_text(child, out);
+            }
+        }
+
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Library Label {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.set_control_bindings(vec![ControlBinding {
+            context: "global".into(),
+            action: "Activate".into(),
+            label: "Activate".into(),
+            binding: "A".into(),
+        }]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+
+        let children = &scene.root().children;
+        let fade_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+        let label_roots = children
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| has_library_title(node))
+            .collect::<Vec<_>>();
+        assert!(!label_roots.is_empty());
+        assert!(label_roots.iter().all(|(index, _)| *index < fade_index));
+        assert!(fade_index < prompts_index);
+        assert!(
+            children
+                .iter()
+                .all(|node| !node.id.as_str().starts_with("library-label-layer-"))
+        );
+
+        // Row-two title raster bounds may geometrically intersect the footer band by
+        // design. Scene children are painter ordered, so the honest invariant is that
+        // every title paints below the fade and prompts. Inspect the real text nodes so
+        // a wrapper-only assertion cannot hide a lifted title layer (the 7c881ab bug).
+        let mut footer_ink = Vec::new();
+        collect_text(&children[prompts_index], &mut footer_ink);
+        let mut label_ink = Vec::new();
+        for (_, card) in &label_roots {
+            collect_text(card, &mut label_ink);
+        }
+        assert!(!footer_ink.is_empty());
+        let title_ink = label_ink
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("library-title-"))
+            .collect::<Vec<_>>();
+        assert_eq!(title_ink.len(), label_roots.len());
+        assert!(!title_ink.is_empty());
+    }
+
+    #[test]
+    fn focused_library_card_footer_only_advertises_resolvable_actions() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "global".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "library".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "prompts")
+                .unwrap()
+                .accessible_label,
+            "SELECT Search     Y Filter     A Details"
+        );
+
+        core.action(&ShellAction::Custom("Filter.next".into()));
+        assert_eq!(core.library_filter, LibraryFilter::Alphabetical);
     }
 
     #[test]
@@ -10249,6 +11173,14 @@ mod tests {
 
     #[test]
     fn max_text_scale_routes_keep_full_truthful_labels() {
+        fn contains_label(node: &Node, text: &str) -> bool {
+            node.accessible_label.contains(text)
+                || node
+                    .children
+                    .iter()
+                    .any(|child| contains_label(child, text))
+        }
+
         let mut core = fixture_core(vec![item(
             "long",
             "The Unabridged Cartographer of Hollow Tides",
@@ -10279,10 +11211,10 @@ mod tests {
             .iter()
             .find(|node| node.id.as_str() == "library-item-long")
             .unwrap();
-        assert!(card.children.iter().any(|node| {
-            node.accessible_label
-                .contains("connect to Wi-Fi to use this edition")
-        }));
+        assert!(contains_label(
+            scene.root(),
+            "connect to Wi-Fi to use this edition"
+        ));
         assert!(!card.accessible_label.contains("EDITION PLATE"));
         assert!(
             card.children

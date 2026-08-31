@@ -2280,6 +2280,29 @@ fn assert_raster_text_legible(
             suppress_text(child, target);
         }
     }
+    fn intentionally_dimmed_by_library_fade(scene: &pf_scene::Scene, node: &Node) -> bool {
+        fn contains(root: &Node, target: &pf_scene::NodeId) -> bool {
+            &root.id == target || root.children.iter().any(|child| contains(child, target))
+        }
+        fn intersects(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let children = &scene.root().children;
+        let Some(fade_index) = children
+            .iter()
+            .position(|child| child.id.as_str() == "library-grid-footer-fade")
+        else {
+            return false;
+        };
+        intersects(node.bounds, children[fade_index].bounds)
+            && children[..fade_index].iter().any(|child| {
+                child.id.as_str().starts_with("library-item-") && contains(child, &node.id)
+            })
+    }
     fn luminance(color: [u8; 3]) -> f64 {
         let channel = |value: u8| {
             let value = f64::from(value) / 255.0;
@@ -2327,6 +2350,7 @@ fn assert_raster_text_legible(
     ) -> Result<(), String> {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
+            && !intentionally_dimmed_by_library_fade(scene, node)
         {
             let mut root = scene.root().clone();
             suppress_text(&mut root, &node.id);
@@ -2744,6 +2768,16 @@ mod durable_tests {
         );
     }
 
+    fn remap_test_contract() -> DeviceContract {
+        let mut contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        contract["effective_map"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|mapping| mapping["action"] != "Search.submit");
+        DeviceContract::parse_json(&contract.to_string()).unwrap()
+    }
+
     fn contrast_probe(state: fn(&mut Node)) -> Node {
         let mut label = Node::new(
             pf_scene::NodeId::new("contrast-probe-label").unwrap(),
@@ -3098,6 +3132,9 @@ mod durable_tests {
                 core.action(&ShellAction::Custom("Room.next".into()));
             }
             let scene = core.scene(metrics, "").unwrap();
+            ensure_action_labels(&scene).unwrap_or_else(|error| {
+                panic!("{route} fixture action-name guard refused the scene: {error}")
+            });
             let mut host = OffscreenHost::new(metrics);
             host.present(&scene).unwrap();
             assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");
@@ -3768,7 +3805,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     fn effective_map() -> EffectiveMap {
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
         EffectiveMap::load(contract, &MemoryStore::default()).unwrap()
     }
 
@@ -5233,7 +5270,7 @@ exec="./launch"
     fn remap_commit_survives_rebuilding_from_the_same_state_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remaps.json");
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
@@ -5255,7 +5292,7 @@ exec="./launch"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remaps.json");
         fs::write(&path, b"not json").unwrap();
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
 
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
 

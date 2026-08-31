@@ -175,11 +175,15 @@ fn vertical_slice_frame_hashes_are_stable() {
         "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
         "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
-        // Library chips reserve the generated 16px horizontal padding on both sides.
-        "263c9b3ef7d3f8d361b04f813317430f8a3feb821d8513b0acb33d216c560d17  ",
-        "263c9b3ef7d3f8d361b04f813317430f8a3feb821d8513b0acb33d216c560d17  ",
+        // Library hashes intentionally rebaseline for the CSS flex row's natural-width
+        // chips, divider-free 16px gaps, uniform selected border, and separator-free,
+        // right-aligned prompt groups. These hashes include the unclipped chip and
+        // prompt text; the approved design golden remains unchanged.
+        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
+        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
         "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
         "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
+        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
         "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
@@ -224,7 +228,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("e8a86aa8e934d6b4fd6f1c10e774ccdc8d57aae0ff385c7ceab64a70d1a94c1c  ")
     );
     assert!(
-        transcript.contains("0b1ab03bd728fa5d17f3270bc5aaf7c010e7a9c525acbf658121682a3b11f669  ")
+        transcript.contains("6280b745d96067738e519a2d25c4a517b0a02ab25aa0655719fd562dde0ebd5d  ")
     );
     assert!(
         transcript.contains("708578c894f705162d60c72056a32e8b5add474bd799754c531b4aa718051a3a  ")

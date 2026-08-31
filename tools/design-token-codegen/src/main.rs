@@ -375,6 +375,22 @@ fn generate(design: &Path) -> Result<String, String> {
         "height",
         "PROMPTS_AREA_HEIGHT",
     )?;
+    component(&mut output, &shell, ".lib-head", "top", "LIB_HEAD_TOP")?;
+    component(
+        &mut output,
+        &shell,
+        ".searchbox",
+        "height",
+        "LIB_TOOLBAR_HEIGHT",
+    )?;
+    component(&mut output, &shell, ".lib-grid", "top", "LIB_GRID_TOP")?;
+    component(
+        &mut output,
+        &shell,
+        ".lib-grid .card .art",
+        "height",
+        "LIB_CARD_ART_HEIGHT",
+    )?;
     component(&mut output, &shell, ".card", "width", "CARD_ART_WIDTH")?;
     component(
         &mut output,
@@ -384,6 +400,7 @@ fn generate(design: &Path) -> Result<String, String> {
         "CARD_ART_HEIGHT",
     )?;
     component(&mut output, &shell, ".chip", "height", "CHIP_HEIGHT")?;
+    component_border_width(&mut output, &shell, ".chip", "border", "CHIP_BORDER_WIDTH")?;
     component_padding(
         &mut output,
         &shell,
@@ -398,6 +415,7 @@ fn generate(design: &Path) -> Result<String, String> {
         "border-left",
         "SEGMENT_DIVIDER_WIDTH",
     )?;
+    component(&mut output, &shell, "\n.keycap", "height", "KEYCAP_HEIGHT")?;
     output.push_str("pub const CARD_ART_ASPECT: f32 = CARD_ART_WIDTH / CARD_ART_HEIGHT;\n");
     Ok(output)
 }
@@ -627,6 +645,10 @@ mod tests {
         for forbidden in [
             "const STATUS_BAR_HEIGHT:",
             "const PROMPTS_AREA_HEIGHT:",
+            "const LIB_HEAD_TOP:",
+            "const LIB_TOOLBAR_HEIGHT:",
+            "const LIB_GRID_TOP:",
+            "const LIB_CARD_ART_HEIGHT:",
             "const CARD_ART_WIDTH:",
             "const CARD_ART_HEIGHT:",
             "const CHIP_HORIZONTAL_PADDING:",

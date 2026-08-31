@@ -593,6 +593,7 @@ version = "0.1.0"
 dependencies = [
  "pf-catalog",
  "pf-ports",
+ "pf-render",
  "pf-scene",
  "pf-session-authority",
  "pf-theme",

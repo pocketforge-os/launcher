@@ -83,13 +83,8 @@ fn generate_inventory(design: &Path) -> Result<String, String> {
                     } else if !header.starts_with("@font-face") {
                         for selector in header.split(',').map(str::trim).filter(|v| !v.is_empty()) {
                             selectors.insert(selector.to_owned());
-                            for pseudo in selector.split_whitespace().flat_map(|part| {
-                                part.match_indices(':').map(move |(at, _)| &part[at..])
-                            }) {
-                                let end = pseudo
-                                    .find(['[', '.', '#', ' ', '>'])
-                                    .unwrap_or(pseudo.len());
-                                pseudos.insert(pseudo[..end].to_owned());
+                            for pseudo in extract_pseudos(selector) {
+                                pseudos.insert(pseudo.to_owned());
                             }
                         }
                     }
@@ -140,6 +135,86 @@ fn generate_inventory(design: &Path) -> Result<String, String> {
         property_disposition,
     )?;
     Ok(out)
+}
+
+fn extract_pseudos(selector: &str) -> Vec<&str> {
+    let bytes = selector.as_bytes();
+    let mut result = Vec::new();
+    let mut index = 0;
+    let mut attribute_depth: usize = 0;
+    let mut quote = None;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'[' => attribute_depth += 1,
+            b']' => attribute_depth = attribute_depth.saturating_sub(1),
+            b':' if attribute_depth == 0 => {
+                let start = index;
+                index += 1;
+                if bytes.get(index) == Some(&b':') {
+                    index += 1;
+                }
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    index += 1;
+                }
+                if bytes.get(index) == Some(&b'(') {
+                    index = balanced_parenthesized_end(bytes, index);
+                }
+                result.push(&selector[start..index]);
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    result
+}
+
+fn balanced_parenthesized_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    index
 }
 
 fn inventory_table<F>(
@@ -481,6 +556,27 @@ fn component_border_width(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_pseudo_element_once() {
+        assert_eq!(extract_pseudos(".focusable::after"), ["::after"]);
+    }
+
+    #[test]
+    fn parses_vendor_prefixed_pseudo_element_once() {
+        assert_eq!(
+            extract_pseudos(".lib-grid::-webkit-scrollbar"),
+            ["::-webkit-scrollbar"]
+        );
+    }
+
+    #[test]
+    fn parses_functional_pseudo_class_as_one_complete_construct() {
+        assert_eq!(
+            extract_pseudos(".card:has(.art[data-focused=\"true\"]) .label"),
+            [":has(.art[data-focused=\"true\"])"],
+        );
+    }
 
     #[test]
     fn parses_all_required_token_families() {

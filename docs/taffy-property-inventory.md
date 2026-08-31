@@ -186,13 +186,10 @@ Frozen source: `pocketforge-os/design@999b5c991ee407b491bd279e1d3f68a8001c7f41`.
 
 | Construct | Disposition |
 |---|---|
-| `:-webkit-scrollbar` | adapter |
 | `::-webkit-scrollbar` | prohibited |
 | `::after` | adapter |
 | `::before` | adapter |
-| `:after` | adapter |
-| `:before` | adapter |
-| `:has(` | prohibited |
+| `:has(.art[data-focused="true"])` | prohibited |
 | `:root` | adapter |
 
 ## Media queries

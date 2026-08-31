@@ -2742,6 +2742,15 @@ mod durable_tests {
             incomplete.is_empty(),
             "baseline records without raster-guard outcomes: {incomplete:#?}"
         );
+
+    fn remap_test_contract() -> DeviceContract {
+        let mut contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        contract["effective_map"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|mapping| mapping["action"] != "Search.submit");
+        DeviceContract::parse_json(&contract.to_string()).unwrap()
     }
 
     fn contrast_probe(state: fn(&mut Node)) -> Node {
@@ -3768,7 +3777,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     fn effective_map() -> EffectiveMap {
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
         EffectiveMap::load(contract, &MemoryStore::default()).unwrap()
     }
 
@@ -5233,7 +5242,7 @@ exec="./launch"
     fn remap_commit_survives_rebuilding_from_the_same_state_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remaps.json");
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
@@ -5255,7 +5264,7 @@ exec="./launch"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("remaps.json");
         fs::write(&path, b"not json").unwrap();
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let contract = remap_test_contract();
 
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
 

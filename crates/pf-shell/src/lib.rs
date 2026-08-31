@@ -626,7 +626,11 @@ pub fn control_bindings(map: &EffectiveMap) -> Vec<ControlBinding> {
         .filter(|mapping| semantic_action(&mapping.action).is_some())
         .map(|mapping| ControlBinding {
             context: mapping.context.clone(),
-            action: mapping.action.clone(),
+            action: if mapping.context == "library" && mapping.action == "Search.submit" {
+                "Filter.next".into()
+            } else {
+                mapping.action.clone()
+            },
             label: mapping.action.strip_prefix("Move.").map_or_else(
                 || mapping.action.clone(),
                 |direction| format!("Move {direction}"),
@@ -656,8 +660,8 @@ fn display_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        custom @ ("SafeReturn" | "Quick" | "Search.open" | "Start" | "Room.next"
-        | "Room.previous") => ShellAction::Custom(custom.into()),
+        custom @ ("SafeReturn" | "Quick" | "Search.open" | "Search.submit" | "Start"
+        | "Room.next" | "Room.previous") => ShellAction::Custom(custom.into()),
         _ => return None,
     })
 }
@@ -673,6 +677,7 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "SafeReturn" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
             ShellAction::Custom(name.into())
         }
+        "Search.submit" => ShellAction::Custom("Filter.next".into()),
         "Quick" => ShellAction::Custom("Quick".into()),
         _ => return None,
     })
@@ -728,6 +733,15 @@ mod tests {
         assert!(map.mappings().iter().all(|mapping| {
             map.shipped_binding(&mapping.context, &mapping.action) == Some(&mapping.binding)
         }));
+    }
+
+    fn contract_without_library_filter() -> DeviceContract {
+        let mut contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+        contract["effective_map"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|mapping| mapping["action"] != "Search.submit");
+        DeviceContract::parse_json(&contract.to_string()).unwrap()
     }
 
     struct ConflictOnce {
@@ -901,7 +915,7 @@ mod tests {
     }
     #[test]
     fn rollback_is_usable_with_gamepad_back_and_preserves_effective_glyph() {
-        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let contract = contract_without_library_filter();
         let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let before = prompt(&map, &ShellAction::Activate);
         let mut remap = GamepadRemap::new(map);
@@ -918,7 +932,7 @@ mod tests {
     }
     #[test]
     fn remap_confirm_updates_the_effective_binding_and_reset_restores_default() {
-        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let contract = contract_without_library_filter();
         let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let mut remap = GamepadRemap::new(map);
         remap

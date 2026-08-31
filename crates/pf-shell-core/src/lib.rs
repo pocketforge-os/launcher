@@ -85,7 +85,6 @@ fn caption_text_width(text: &str) -> f32 {
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
-        + 20.0
         + count.map_or(0.0, |value| {
             CHIP_COUNT_GAP + label_text_width(&value.to_string()) + 12.0
         })
@@ -1769,6 +1768,16 @@ impl ShellCore {
                 self.remember_caller();
                 self.go(Route::Search);
             }
+            ShellAction::Custom(name) if name == "Filter.next" && self.route == Route::Library => {
+                self.library_filter = match self.library_filter {
+                    LibraryFilter::Recent => LibraryFilter::Alphabetical,
+                    LibraryFilter::Alphabetical => LibraryFilter::Games,
+                    LibraryFilter::Games => LibraryFilter::EverythingElse,
+                    LibraryFilter::EverythingElse => LibraryFilter::Recent,
+                };
+                self.refresh_library_items();
+                self.focus = self.focus.min(self.library_items.len().saturating_add(4));
+            }
             ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
             ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
             ShellAction::Custom(name) if name == "Quick" => {
@@ -2798,10 +2807,21 @@ impl ShellCore {
                 }
                 prompts.join(" · ")
             }),
-            Route::Library => (self.focus >= 5)
-                .then(|| self.binding_prompt("Activate", "Details"))
-                .flatten()
-                .unwrap_or_default(),
+            Route::Library => {
+                let mut prompts = self
+                    .binding_prompt("Search.open", "Search")
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                if let Some(prompt) = self.binding_prompt("Filter.next", "Filter") {
+                    prompts.push(prompt);
+                }
+                if self.focus >= 5
+                    && let Some(prompt) = self.binding_prompt("Activate", "Details")
+                {
+                    prompts.push(prompt);
+                }
+                prompts.join(" · ")
+            }
             Route::Details => {
                 let ready = self
                     .selected_item
@@ -2865,11 +2885,15 @@ impl ShellCore {
             h - PROMPTS_AREA_HEIGHT,
             w,
             PROMPTS_AREA_HEIGHT,
-            COLOR_SURFACE_RAISED_TOKEN,
+            if self.route == Route::Library {
+                SCENE_TRANSPARENT_TOKEN
+            } else {
+                COLOR_SURFACE_RAISED_TOKEN
+            },
         ));
         let mut prompt_node = node(
             "prompts",
-            if self.route == Route::Home {
+            if matches!(self.route, Route::Home | Route::Library) {
                 Role::Group
             } else {
                 Role::Text
@@ -2892,12 +2916,22 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h);
+        } else if self.route == Route::Library {
+            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h);
         }
         children.push(prompt_node);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
             apply_quiet_console_radius(child, radius_scale);
+        }
+        if self.route == Route::Library {
+            let fade_top = h - 96.0;
+            let mut lifted = Vec::new();
+            for child in &children {
+                lift_library_fade_text(child, fade_top, &mut lifted);
+            }
+            children.extend(lifted);
         }
         let focus_id = children
             .iter()
@@ -3252,7 +3286,7 @@ impl ShellCore {
                 .map(|(label, count, _)| library_chip_width(label, *count))
                 .collect::<Vec<_>>();
             let required_toolbar_width = chip_widths.iter().sum::<f32>()
-                + (geometry.toolbar_columns - 1) as f32 * geometry.card_gap;
+                + (geometry.toolbar_columns - 1) as f32 * LIBRARY_TOOLBAR_GAP;
             let search_width = if compact_toolbar {
                 w - 2.0 * LIBRARY_SIDE_MARGIN
             } else {
@@ -3310,13 +3344,13 @@ impl ShellCore {
                 } else {
                     toolbar_left
                         + chip_widths[..index].iter().sum::<f32>()
-                        + index as f32 * geometry.card_gap
+                        + index as f32 * LIBRARY_TOOLBAR_GAP
                 };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let chip_height = CHIP_HEIGHT;
                 let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
-                let label_width = label_text_width(&label) + 20.0;
+                let label_width = label_text_width(&label);
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -3486,19 +3520,19 @@ impl ShellCore {
                 }
                 out.push(card);
             }
-            // pf-scene has no ancestor clipping primitive. Paint the canvas back over the
-            // overflow before footer chrome is emitted so the partial row remains a crop of
-            // full-size covers rather than rescaling their art into the remaining height.
-            out.push(node(
-                "library-grid-footer-clip",
-                Role::Group,
-                "",
-                0.0,
-                h - PROMPTS_AREA_HEIGHT,
-                w,
-                PROMPTS_AREA_HEIGHT,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            ));
+            out.push(
+                node(
+                    "library-grid-footer-fade",
+                    Role::Group,
+                    "",
+                    0.0,
+                    h - 96.0,
+                    w,
+                    96.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_image(library_footer_fade_source(), ImageFit::Cover),
+            );
         } else if self.route == Route::Search {
             out.push(node(
                 "search-query",
@@ -5907,6 +5941,19 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
     nodes
 }
 
+fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    let mut nodes = home_prompt_nodes(footer, surface_width, surface_height);
+    let right = nodes
+        .iter()
+        .map(|node| node.bounds.x + node.bounds.width)
+        .fold(0.0_f32, f32::max);
+    let offset = surface_width - LIBRARY_SIDE_MARGIN - right;
+    for node in &mut nodes {
+        node.bounds.x += offset;
+    }
+    nodes
+}
+
 fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
     let mut bytes = Vec::new();
     {
@@ -5944,6 +5991,28 @@ fn wifi_glyph_source() -> ImageSource {
         encoded_png(24, 24, &rgba)
     });
     ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+}
+
+fn library_footer_fade_source() -> ImageSource {
+    static FADE: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = FADE.get_or_init(|| {
+        const WIDTH: usize = 1280;
+        const HEIGHT: usize = 96;
+        let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
+        for y in 0..HEIGHT {
+            let alpha = u8::try_from((y + 1) * 255 / HEIGHT).unwrap();
+            for x in 0..WIDTH {
+                let offset = (y * WIDTH + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[0x17, 0x15, 0x12, alpha]);
+            }
+        }
+        encoded_png(
+            u32::try_from(WIDTH).unwrap(),
+            u32::try_from(HEIGHT).unwrap(),
+            &rgba,
+        )
+    });
+    ImageSource::new("quiet-console:library-footer-fade", bytes.clone())
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -6053,6 +6122,22 @@ fn add_explicit_action_name(action_node: &mut Node) {
     }
     for child in &mut action_node.children {
         add_explicit_action_name(child);
+    }
+}
+
+fn lift_library_fade_text(node: &Node, fade_top: f32, lifted: &mut Vec<Node>) {
+    if node.role == Role::Text
+        && node.bounds.y + node.bounds.height > fade_top
+        && !node.accessible_label.is_empty()
+    {
+        let mut copy = node.clone();
+        copy.id = NodeId::new(format!("library-fade-lift-{}", node.id.as_str())).unwrap();
+        copy.action = None;
+        copy.children.clear();
+        lifted.push(copy);
+    }
+    for child in &node.children {
+        lift_library_fade_text(child, fade_top, lifted);
     }
 }
 
@@ -9933,24 +10018,95 @@ mod tests {
         assert!(second_row_art.bounds.y + second_row_art.bounds.height > footer_top);
         assert!((second_row_art.bounds.height - CARD_ART_HEIGHT).abs() < f32::EPSILON);
 
-        let clip_index = root
-            .children
-            .iter()
-            .position(|node| node.id.as_str() == "library-grid-footer-clip")
+        let fade = node_by_id(root, "library-grid-footer-fade").unwrap();
+        assert!((fade.bounds.y - (720.0 - 96.0)).abs() < f32::EPSILON);
+        assert!((fade.bounds.height - 96.0).abs() < f32::EPSILON);
+        assert!(matches!(fade.content, pf_scene::NodeContent::Image { .. }));
+    }
+
+    #[test]
+    fn desktop_library_toolbar_uses_mockup_flex_geometry() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
             .unwrap();
-        let last_card_index = root
-            .children
-            .iter()
-            .rposition(|node| node.id.as_str().starts_with("library-item-"))
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let chips = (0..4)
+            .map(|index| node_by_id(scene.root(), &format!("library-filter-{index}")).unwrap())
+            .collect::<Vec<_>>();
+        assert!((chips[3].bounds.x + chips[3].bounds.width - 1232.0).abs() < f32::EPSILON);
+        for pair in chips.windows(2) {
+            let gap = pair[1].bounds.x - pair[0].bounds.x - pair[0].bounds.width;
+            assert!((gap - 16.0).abs() < f32::EPSILON);
+        }
+        let toolbar_gap = chips[0].bounds.x - search.bounds.x - search.bounds.width;
+        assert!((toolbar_gap - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn focused_library_card_footer_only_advertises_resolvable_actions() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "global".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "library".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        core.go(Route::Library);
+        core.focus = 5;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
             .unwrap();
-        let clip = &root.children[clip_index];
-        assert!(
-            clip_index > last_card_index,
-            "clip must paint after every grid card"
+        assert_eq!(
+            node_by_id(scene.root(), "prompts")
+                .unwrap()
+                .accessible_label,
+            "SELECT Search · Y Filter · A Details"
         );
-        assert!((clip.bounds.y - footer_top).abs() < f32::EPSILON);
-        assert!((clip.bounds.height - PROMPTS_AREA_HEIGHT).abs() < f32::EPSILON);
-        assert_eq!(clip.style_token, COLOR_SURFACE_CANVAS_TOKEN);
+
+        core.action(&ShellAction::Custom("Filter.next".into()));
+        assert_eq!(core.library_filter, LibraryFilter::Alphabetical);
     }
 
     #[test]

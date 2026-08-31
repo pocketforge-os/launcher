@@ -18,6 +18,7 @@
     {"context":"global","action":"Back","binding":{"shape":"single_press","controls":["south"]}},
     {"context":"global","action":"Search.open","binding":{"shape":"single_press","controls":["select"]}},
     {"context":"shell","action":"Quick","binding":{"shape":"single_press","controls":["west"]}},
+    {"context":"library","action":"Search.submit","binding":{"shape":"single_press","controls":["north"]}},
     {"context":"global","action":"SafeReturn","binding":{"shape":"single_press","controls":["guide"]}},
     {"context":"shell","action":"Move.up","binding":{"shape":"single_press","controls":["l2"]}},
     {"context":"shell","action":"Move.down","binding":{"shape":"single_press","controls":["r2"]}},

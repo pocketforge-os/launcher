@@ -35,8 +35,12 @@ plate_svg() {
   local source="$work_dir/$name.svg"
   {
     printf '<svg xmlns="http://www.w3.org/2000/svg" width="316" height="420" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice">\n'
+    # The scene's centered type stack is max(72, 88)=88 px wide and 56+8+24=88 px
+    # tall; 16 px padding per side derives a 120x120 scene-pixel safe zone. Plates
+    # render at 2x scene size, so a centered 230x230 viewBox zone clears >120x120.
+    printf '  <defs><mask id="motif-safe-zone"><rect width="300" height="400" fill="white"/><rect x="35" y="85" width="230" height="230" fill="black"/></mask></defs>\n'
     printf '  <rect width="300" height="400" fill="%s"/>\n' "$background"
-    printf '  <g color="%s" opacity="0.5">%s</g>\n' "$foreground" "$motif"
+    printf '  <g color="%s" opacity="0.5" mask="url(#motif-safe-zone)">%s</g>\n' "$foreground" "$motif"
     printf '  <rect x="8" y="8" width="284" height="384" rx="6" fill="none" stroke="%s" stroke-width="1" opacity="0.5"/>\n' "$foreground"
     printf '</svg>\n'
   } >"$source"

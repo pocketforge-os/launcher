@@ -4,6 +4,7 @@ members = [
   "crates/pf-shell-core",
   "crates/pf-shell",
   "tools/design-token-codegen",
+  "tools/taffy-spike",
 ]
 resolver = "2"
 
@@ -32,3 +33,4 @@ pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "
 pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "33e019e41f60b4806eca6c3fc8b516950a10a605" }
 pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "33e019e41f60b4806eca6c3fc8b516950a10a605" }
 pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "33e019e41f60b4806eca6c3fc8b516950a10a605" }
+taffy = { version = "=0.7.7", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid"] }

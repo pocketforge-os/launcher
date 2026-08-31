@@ -6182,7 +6182,11 @@ fn layer_library_fade(children: &mut Vec<Node>) {
         clear_focus_state(node);
         labels.push(label_layer);
     }
-    children.push(fade);
+    let prompts_index = children
+        .iter()
+        .position(|node| node.id.as_str() == "prompts")
+        .unwrap_or(children.len());
+    children.insert(prompts_index, fade);
     children.extend(labels);
 }
 
@@ -10129,6 +10133,48 @@ mod tests {
             * 4
             + 3];
         assert_eq!(bottom_alpha, 255, "bottom row must be fully opaque");
+    }
+
+    #[test]
+    fn library_footer_fade_paints_below_prompts_and_card_labels() {
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.go(Route::Library);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let children = &scene.root().children;
+        let fade_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "library-grid-footer-fade")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+
+        assert!(
+            fade_index < prompts_index,
+            "the footer fade must paint below the prompts"
+        );
+        assert!(
+            children.iter().enumerate().all(|(index, node)| {
+                !node.id.as_str().starts_with("library-label-layer-") || index > fade_index
+            }),
+            "every card label layer must paint above the footer fade"
+        );
     }
 
     #[test]

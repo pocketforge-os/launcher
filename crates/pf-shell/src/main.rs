@@ -2142,14 +2142,20 @@ fn emit(
     present_scene(host, core, prompt, &scene)?;
     let frame_time_us = started.elapsed().as_micros();
     let frame = host.frame().ok_or("frame missing")?.clone();
+    let baseline_record_only = env::var_os("PF_BASELINE_RECORD_ONLY").is_some();
     let raster_guard = if env::var_os("PF_RASTER_INK_GUARD").is_some() {
-        assert_raster_text_legible(&scene, host.metrics(), core.theme_base(), core.text_scale())
-            .map_or_else(|error| format!("FAIL: {error}"), |()| "PASS".to_owned())
+        raster_guard_record(
+            &scene,
+            host.metrics(),
+            core.theme_base(),
+            core.text_scale(),
+            baseline_record_only,
+        )?
     } else {
         "NOT_RUN (set PF_RASTER_INK_GUARD=1)".to_owned()
     };
     let path = out.join(format!("{name}.png"));
-    if env::var_os("PF_BASELINE_RECORD_ONLY").is_none() {
+    if !baseline_record_only {
         let file = fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut encoder = png::Encoder::new(BufWriter::new(file), frame.width, frame.height);
         encoder.set_color(png::ColorType::Rgba);
@@ -2186,6 +2192,20 @@ fn emit(
     .map_err(|e| e.to_string())?;
     println!("{hash}  {}", path.display());
     Ok(())
+}
+
+fn raster_guard_record(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale_percent: u16,
+    baseline_record_only: bool,
+) -> Result<String, String> {
+    match assert_raster_text_legible(scene, metrics, base, text_scale_percent) {
+        Ok(()) => Ok("PASS".to_owned()),
+        Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
+        Err(error) => Err(error),
+    }
 }
 
 fn semantic_snapshot(scene: &pf_scene::Scene) -> String {
@@ -2761,6 +2781,35 @@ mod durable_tests {
                 && failure.contains("raster_contrast=1."),
             "the transparent-surface label must fail against its rendered backdrop: {failure}"
         );
+    }
+
+    #[test]
+    fn raster_guard_failure_is_captured_only_for_baseline_recording() {
+        let root_id = pf_scene::NodeId::new("illegible-evidence-label").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Text,
+            "Illegible evidence",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0),
+            "--color-surface-canvas",
+        )
+        .with_ink_token("--color-surface-canvas");
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let normal_error =
+            raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, false).unwrap_err();
+        assert!(normal_error.contains("illegible-evidence-label"));
+
+        let baseline_record =
+            raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, true).unwrap();
+        assert_eq!(baseline_record, format!("FAIL: {normal_error}"));
     }
 
     #[test]

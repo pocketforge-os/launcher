@@ -2370,6 +2370,14 @@ fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
+    if let Some(index) = args.iter().position(|arg| arg == "--catalog-snapshot") {
+        if args
+            .get(index + 1)
+            .is_none_or(|value| value.starts_with("--"))
+        {
+            return Err("usage error: --catalog-snapshot requires a path".into());
+        }
+    }
     #[cfg(not(feature = "wayland"))]
     if args.iter().any(|arg| arg == "--wayland") {
         return Err(
@@ -4193,6 +4201,8 @@ exec="./launch"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
         fs::write(&path, include_bytes!("../fixtures/catalog.json")).unwrap();
+        let valid_args = vec!["--catalog-snapshot".into(), path.display().to_string()];
+        assert!(validate_args(&valid_args).is_ok());
         let snapshot = load_catalog_snapshot(&path).unwrap();
         assert_eq!(
             snapshot
@@ -4226,6 +4236,19 @@ exec="./launch"
         ];
         let error = validate_args(&args).unwrap_err();
         assert!(error.contains("cannot be used together"));
+    }
+
+    #[test]
+    fn catalog_snapshot_requires_a_path() {
+        for args in [
+            vec!["--catalog-snapshot".into()],
+            vec!["--catalog-snapshot".into(), "--wayland".into()],
+        ] {
+            let error = validate_args(&args).unwrap_err();
+
+            assert!(error.contains("usage error"));
+            assert!(error.contains("--catalog-snapshot"));
+        }
     }
 
     #[cfg(not(feature = "wayland"))]

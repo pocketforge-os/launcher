@@ -4529,6 +4529,13 @@ impl ShellCore {
                 if !interactive && lines.len() == 1 && self.text_scale > 100 {
                     label.bounds.height = row_height - 2.0 * row_line_top;
                     label = declared_multiline(label);
+                } else if line_index > 0 && self.text_scale > 100 {
+                    // Settings descriptions are prose and may wrap as their effective
+                    // font grows. Give the declared multiline node the remainder of
+                    // its scaled row instead of clipping it to one nominal line box.
+                    label.bounds.height =
+                        row_height - row_line_top - line_index as f32 * row_line_step;
+                    label = declared_multiline(label);
                 }
                 label.state.focused = focused;
                 text.push(label);
@@ -4609,58 +4616,114 @@ impl ShellCore {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
                 let state = if on { "ON" } else { "OFF" };
                 let state_width = settings_scaled_box_width(44.0, state, self.text_scale);
+                let toggle_gap = 8.0 * scale;
+                let track_width = 58.0 * scale;
+                let track_height = 28.0 * scale;
+                let knob_size = 20.0 * scale;
+                let knob_inset = 4.0 * scale;
                 let control_right = content_left + content_width - 26.0;
-                let control_left = control_right - state_width - 8.0 - 58.0;
+                let control_left = control_right - state_width - toggle_gap - track_width;
+                let group_center_y = scene_row.bounds.y + scene_row.bounds.height / 2.0;
+                let state_height = if self.text_scale == 100 {
+                    // Extending the transparent bottom of the text box preserves
+                    // the approved raster while bringing its scene centerline
+                    // within 1 px of the established track and knob offsets.
+                    28.0
+                } else {
+                    scaled_text_box_height(26.0, self.text_scale)
+                };
+                let state_top = if self.text_scale == 100 {
+                    scene_row.bounds.y + 24.0
+                } else {
+                    group_center_y - state_height / 2.0
+                };
+                let track_top = if self.text_scale == 100 {
+                    scene_row.bounds.y + 25.0
+                } else {
+                    group_center_y - track_height / 2.0
+                };
+                let knob_top = if self.text_scale == 100 {
+                    scene_row.bounds.y + 29.0
+                } else {
+                    group_center_y - knob_size / 2.0
+                };
                 let mut state_node = node(
                     &format!("settings-toggle-{}-state", row.id),
                     Role::Text,
                     state,
                     control_left,
-                    scene_row.bounds.y + 24.0 * scale,
+                    state_top,
                     state_width,
-                    scaled_text_box_height(26.0, self.text_scale),
+                    state_height,
                     row_surface,
                 );
                 state_node.state.focused = focused;
                 text.push(state_node);
+                let track_left = control_left + state_width + toggle_gap;
+                let track_token = if on {
+                    STATE_SELECTED_ACCENT_TOKEN
+                } else {
+                    COLOR_SURFACE_SUNKEN_TOKEN
+                };
                 fills.push(node(
                     &format!("settings-toggle-{}-track", row.id),
                     Role::Group,
                     "",
-                    control_left + state_width + 8.0,
-                    scene_row.bounds.y + 25.0,
-                    58.0,
-                    28.0,
-                    if on {
-                        STATE_SELECTED_ACCENT_TOKEN
-                    } else {
-                        COLOR_SURFACE_SUNKEN_TOKEN
-                    },
+                    track_left,
+                    track_top,
+                    track_width,
+                    track_height,
+                    track_token,
                 ));
+                let knob_left = control_left
+                    + state_width
+                    + toggle_gap
+                    + if on {
+                        track_width - knob_inset - knob_size
+                    } else {
+                        knob_inset
+                    };
+                let knob_token = if on {
+                    COLOR_TEXT_INVERSE_TOKEN
+                } else {
+                    COLOR_TEXT_PRIMARY_TOKEN
+                };
                 fills.push(node(
                     &format!("settings-toggle-{}-knob", row.id),
                     Role::Group,
                     "",
-                    control_left + state_width + if on { 42.0 } else { 12.0 },
-                    scene_row.bounds.y + 29.0,
-                    20.0,
-                    20.0,
-                    if on {
-                        COLOR_TEXT_INVERSE_TOKEN
-                    } else {
-                        COLOR_TEXT_PRIMARY_TOKEN
-                    },
+                    knob_left,
+                    knob_top,
+                    knob_size,
+                    knob_size,
+                    knob_token,
                 ));
             } else if let Some(control) = lines.get(2) {
-                let control_width = 104.0 * scale;
+                let appearance = row.id == "display-appearance";
+                let control_width = if appearance {
+                    text_node_box_width(settings_value_advance(control, self.text_scale))
+                        .max(104.0 * scale)
+                } else {
+                    104.0 * scale
+                };
+                let control_height = if appearance {
+                    scaled_text_box_height(34.0, self.text_scale)
+                } else {
+                    scaled_text_box_height(26.0, self.text_scale) + 8.0 * (scale - 1.0)
+                };
+                let control_top = if appearance {
+                    scene_row.bounds.y + (scene_row.bounds.height - control_height) / 2.0
+                } else {
+                    scene_row.bounds.y + 24.0 * scale
+                };
                 let mut control_node = node(
                     &format!("settings-row-{}-control", row.id),
                     Role::Text,
                     control,
                     content_left + content_width - 16.0 - control_width,
-                    scene_row.bounds.y + 24.0 * scale,
+                    control_top,
                     control_width,
-                    scaled_text_box_height(26.0, self.text_scale) + 8.0 * (scale - 1.0),
+                    control_height,
                     row_surface,
                 );
                 control_node.state.focused = focused;

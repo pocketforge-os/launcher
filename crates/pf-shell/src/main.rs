@@ -3478,8 +3478,62 @@ mod durable_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn complete_settings_evidence_scenes_keep_all_text_contained_complete_and_legible_at_every_scale()
      {
+        fn collect_settings_nav_count(node: &Node) -> usize {
+            usize::from(
+                node.id.as_str().starts_with("settings-nav-")
+                    && !node.id.as_str().ends_with("-label"),
+            ) + node
+                .children
+                .iter()
+                .map(collect_settings_nav_count)
+                .sum::<usize>()
+        }
+
+        fn find_node<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find_node(child, id)))
+        }
+
+        fn assert_toggle_geometry(node: &Node, text_scale: u16) {
+            fn collect<'a>(node: &'a Node, states: &mut Vec<&'a Node>) {
+                if node.id.as_str().starts_with("settings-toggle-")
+                    && node.id.as_str().ends_with("-state")
+                {
+                    states.push(node);
+                }
+                for child in &node.children {
+                    collect(child, states);
+                }
+            }
+            let mut toggle_states = Vec::new();
+            collect(node, &mut toggle_states);
+            for state in toggle_states {
+                let prefix = state.id.as_str().strip_suffix("-state").unwrap();
+                let track = find_node(node, &format!("{prefix}-track")).unwrap();
+                let knob = find_node(node, &format!("{prefix}-knob")).unwrap();
+                let center = |part: &Node| part.bounds.y + part.bounds.height / 2.0;
+                assert!(
+                    (center(state) - center(track)).abs() <= 1.0
+                        && (center(track) - center(knob)).abs() <= 1.0,
+                    "{} at {text_scale}% must share a vertical centerline with its track and knob",
+                    state.id.as_str()
+                );
+                let scale = f32::from(text_scale) / 100.0;
+                assert_eq!(
+                    (track.bounds.width, track.bounds.height),
+                    (58.0 * scale, 28.0 * scale)
+                );
+                assert_eq!(
+                    (knob.bounds.width, knob.bounds.height),
+                    (20.0 * scale, 20.0 * scale)
+                );
+            }
+        }
+
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let metrics = SurfaceMetrics {
@@ -3507,16 +3561,19 @@ mod durable_tests {
             core.action(&ShellAction::Custom("Room.next".into()));
             core.action(&ShellAction::Custom("Room.next".into()));
 
-            for (room, moves) in [
-                ("accessibility", 0),
-                ("controls", 1),
-                ("network", 2),
-                ("system", 1),
-            ] {
-                for _ in 0..moves {
-                    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-                }
+            let initial_scene = core.scene(metrics, "").unwrap();
+            let settings_room_count = collect_settings_nav_count(initial_scene.root());
+            let mut visited_rooms = std::collections::BTreeSet::new();
+            for room_index in 0..settings_room_count {
                 let scene = core.scene(metrics, "").unwrap();
+                let room = find_node(scene.root(), "settings-section-title")
+                    .expect("every Settings room has a section title")
+                    .accessible_label
+                    .clone();
+                assert!(
+                    visited_rooms.insert(room.clone()),
+                    "visited Settings room {room} twice"
+                );
                 assert_raster_text_paint_contained_and_complete(
                     &scene,
                     metrics,
@@ -3530,7 +3587,16 @@ mod durable_tests {
                     .unwrap_or_else(|error| {
                         panic!("{room} at {text_scale}% failed rendered legibility: {error}")
                     });
+                assert_toggle_geometry(scene.root(), text_scale);
+                if room_index + 1 < settings_room_count {
+                    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+                }
             }
+            assert_eq!(
+                visited_rooms.len(),
+                settings_room_count,
+                "the enforcing guard must visit every room exposed by the Settings nav model"
+            );
 
             core.reset_first_run();
             let scene = core.scene(metrics, "").unwrap();

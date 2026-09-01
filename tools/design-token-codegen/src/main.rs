@@ -361,13 +361,7 @@ fn generate(design: &Path) -> Result<String, String> {
     }
 
     output.push_str("\n// Mechanically extracted component values from shell.css.\n");
-    component(
-        &mut output,
-        &shell,
-        ".statusbar",
-        "height",
-        "STATUS_BAR_HEIGHT",
-    )?;
+    chrome_components(&mut output, &shell, &declarations)?;
     component(
         &mut output,
         &shell,
@@ -415,9 +409,48 @@ fn generate(design: &Path) -> Result<String, String> {
         "border-left",
         "SEGMENT_DIVIDER_WIDTH",
     )?;
-    component(&mut output, &shell, "\n.keycap", "height", "KEYCAP_HEIGHT")?;
     output.push_str("pub const CARD_ART_ASPECT: f32 = CARD_ART_WIDTH / CARD_ART_HEIGHT;\n");
     Ok(output)
+}
+
+fn chrome_components(
+    output: &mut String,
+    shell: &str,
+    declarations: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    component(output, shell, ".statusbar", "height", "STATUS_BAR_HEIGHT")?;
+    component_padding(
+        output,
+        shell,
+        declarations,
+        ".statusbar",
+        "STATUS_BAR_HORIZONTAL_PADDING",
+    )?;
+    component(
+        output,
+        shell,
+        ".statusbar-side",
+        "width",
+        "STATUS_BAR_SIDE_WIDTH",
+    )?;
+    component_resolved(
+        output,
+        shell,
+        declarations,
+        ".rooms",
+        "gap",
+        "ROOM_STRIP_GAP",
+    )?;
+    component_padding(
+        output,
+        shell,
+        declarations,
+        ".room",
+        "ROOM_HORIZONTAL_PADDING",
+    )?;
+    component(output, shell, "\n.keycap", "height", "KEYCAP_HEIGHT")?;
+    component(output, shell, "\n.keycap", "min-width", "KEYCAP_MIN_WIDTH")?;
+    component_border_width(output, shell, "\n.keycap", "border", "KEYCAP_BORDER_WIDTH")
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -521,6 +554,28 @@ fn component(
 ) -> Result<(), String> {
     let value = property(css, selector, property_name)?;
     let number = css_number(&value).ok_or_else(|| {
+        format!("{selector} {property_name} value {value:?} is not a simple CSS dimension")
+    })?;
+    writeln!(output, "pub const {ident}: f32 = {number};")
+        .expect("writing to a String cannot fail");
+    Ok(())
+}
+
+fn component_resolved(
+    output: &mut String,
+    css: &str,
+    tokens: &BTreeMap<String, String>,
+    selector: &str,
+    property_name: &str,
+    ident: &str,
+) -> Result<(), String> {
+    let value = property(css, selector, property_name)?;
+    let variable = value
+        .strip_prefix("var(")
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(&value);
+    let resolved = tokens.get(variable).map_or(value.as_str(), String::as_str);
+    let number = css_number(resolved).ok_or_else(|| {
         format!("{selector} {property_name} value {value:?} is not a simple CSS dimension")
     })?;
     writeln!(output, "pub const {ident}: f32 = {number};")

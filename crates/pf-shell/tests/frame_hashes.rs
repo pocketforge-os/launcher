@@ -190,10 +190,10 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        "bd46c60817ed6916d21f0819c7badd79932493f03ac7b186c40b05ce94f934b7  ",
-        "0b0463b554d9086123b2641d0421aa4c0165e20565f3875b15c550007a3b9cca  ",
-        "5372c377e3b212ef91acb10ae0b64457523364227ee4ff17dda8ec3b62dcc9b2  ",
-        "d3bca435d50d779204cb227b2484171098a03e5919215e51a3a3d5b20329f032  ",
+        "904ceda1a8056be6a6ed854f778d1752fcef6e11cb11d82cd29939c426b8c44f  ",
+        "f4dba3ca7fdc65e48ef3b1cf25932b000ced6e4ad5a2d0ffd4848a9c5e6dbf41  ",
+        "eaa23861271950e47aae1ad0d93a6c8aee643c5adcaf5159203456c07aab1729  ",
+        "02e04a6a158d4b65a8d0a73e14a6fcfd49e794ccbd3d2d137d4f420f8d8ef356  ",
         "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
         // Library hashes intentionally rebaseline for the CSS flex row's natural-width
         // chips, divider-free 16px gaps, uniform selected border, and separator-free,
@@ -208,9 +208,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("0b0463b"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("f4dba3c"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("d3bca43"),
+        lines.lines().nth(3).unwrap().starts_with("02e04a6"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -285,6 +285,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("30e2194cfc6af8252a42940ba7f37020e3c77bcf207a3cf9e8d9bb00f29c6e92  ")
+        transcript.contains("64bcbace82172473fb85d408e7a15373938dd41b0679a5826410bc6e748f0099  ")
     );
 }

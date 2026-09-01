@@ -44,13 +44,13 @@ use design_generated::{
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
     COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
     COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
-    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_HEIGHT,
-    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4,
-    SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
+    KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
+    LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
+    RADIUS_S, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7,
+    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
+    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
+    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -82,6 +82,21 @@ const TEXT_NODE_INLINE_INSET: f32 = 6.0;
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
 fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * LABEL_GLYPH_ADVANCE
+}
+
+fn caption_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
+}
+
+// Natural Manrope 14/600 advances for the finite room-strip vocabulary, measured
+// with the same Cosmic Text configuration that paints the Label role.
+fn room_label_advance(text: &str) -> f32 {
+    match text {
+        "Home" => 43.0,
+        "Library" => 50.0,
+        "Settings" => 59.0,
+        _ => label_text_width(text),
+    }
 }
 
 // Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
@@ -2678,14 +2693,15 @@ impl ShellCore {
             status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
         }
         if !status_parts.is_empty() {
+            let status_text = status_parts.join("     ");
             children.push(
                 node(
                     "status-cluster",
                     Role::Text,
-                    &status_parts.join("     "),
+                    &status_text,
                     battery_x + 32.0,
                     16.0,
-                    152.0,
+                    text_node_box_width(caption_text_width(&status_text)),
                     32.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -6087,27 +6103,38 @@ fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> N
         node
     };
 
-    let keycap = |mut border: Node, mut fill: Node, mut label: Node, left_margin: f32| {
+    let keycap = |mut border: Node, mut fill: Node, mut label: Node| {
         border.layout = Some(LayoutStyle {
-            margin: px_edges(4.0, 0.0, 0.0, left_margin),
-            ..fixed_layout(40.0, 24.0)
+            ..fixed_layout(KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
         });
         fill.layout = Some(LayoutStyle {
             position: Position::Absolute,
-            inset: px_edges(1.0, 1.0, 1.0, 1.0),
+            inset: px_edges(
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+            ),
             ..LayoutStyle::default()
         });
         label.layout = Some(LayoutStyle {
             position: Position::Absolute,
-            inset: px_edges(1.0, 4.0, 1.0, 4.0),
+            inset: px_edges(
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+                KEYCAP_BORDER_WIDTH,
+            ),
             ..LayoutStyle::default()
         });
+        label.text_align = TextAlign::Center;
         border.children = vec![fill, label];
         border
     };
-    let room = |mut label: Node, underline: Option<Node>, left_margin: f32, width: f32| {
+    let room = |mut label: Node, underline: Option<Node>| {
+        let advance = room_label_advance(&label.accessible_label);
+        let width = text_node_box_width(advance);
         label.layout = Some(LayoutStyle {
-            margin: px_edges(4.0, 0.0, 0.0, left_margin),
             ..fixed_layout(width, 32.0)
         });
         if let Some(mut underline) = underline {
@@ -6115,11 +6142,11 @@ fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> N
                 position: Position::Absolute,
                 inset: Edges {
                     top: LayoutValue::Px(33.0),
-                    right: LayoutValue::Px(0.0),
                     bottom: LayoutValue::Auto,
-                    left: LayoutValue::Px(0.0),
+                    left: LayoutValue::Px(TEXT_NODE_INLINE_INSET),
+                    right: LayoutValue::Auto,
                 },
-                width: LayoutValue::Pct(1.0),
+                width: LayoutValue::Px(advance),
                 height: LayoutValue::Px(3.0),
                 ..LayoutStyle::default()
             });
@@ -6132,34 +6159,41 @@ fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> N
         take("room-keycap-left-border"),
         take("room-keycap-left-fill"),
         take("room-keycap-left"),
-        4.0,
     );
     let home = take("room-home");
-    let home = room(home, Some(take("room-home-underline")), 12.0, 72.0);
+    let home = room(home, Some(take("room-home-underline")));
     let library = take("room-library");
-    let library = room(library, None, 24.0, 88.0);
+    let library = room(library, None);
     let settings = take("room-settings");
-    let settings = room(settings, None, 24.0, 92.0);
+    let settings = room(settings, None);
     let right = keycap(
         take("room-keycap-right-border"),
         take("room-keycap-right-fill"),
         take("room-keycap-right"),
-        24.0,
     );
     assert!(nodes.next().is_none());
 
+    let rooms_width = KEYCAP_MIN_WIDTH * 2.0
+        + text_node_box_width(room_label_advance("Home"))
+        + text_node_box_width(room_label_advance("Library"))
+        + text_node_box_width(room_label_advance("Settings"))
+        + ROOM_STRIP_GAP * 4.0;
     rooms.layout = Some(LayoutStyle {
         position: Position::Absolute,
         flex_direction: FlexDirection::Row,
-        align_items: Some(AlignItems::Start),
-        margin: px_edges(0.0, 0.0, 0.0, -220.0),
+        align_items: Some(AlignItems::Center),
+        gap: (
+            LayoutValue::Px(ROOM_STRIP_GAP),
+            LayoutValue::Px(ROOM_STRIP_GAP),
+        ),
         inset: Edges {
-            top: LayoutValue::Px(12.0),
+            top: LayoutValue::Px(0.0),
             left: LayoutValue::Pct(0.5),
             ..Edges::default()
         },
-        width: LayoutValue::Px(424.0),
-        height: LayoutValue::Px(40.0),
+        margin: px_edges(0.0, 0.0, 0.0, -rooms_width / 2.0),
+        width: LayoutValue::Px(rooms_width),
+        height: LayoutValue::Px(STATUS_BAR_HEIGHT),
         ..LayoutStyle::default()
     });
     rooms.children = vec![left, home, library, settings, right];
@@ -10915,6 +10949,105 @@ mod tests {
     }
 
     #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route() {
+        fn mutate_label(
+            node: &mut Node,
+            id: &str,
+            label: Option<&str>,
+            width: Option<f32>,
+        ) -> bool {
+            if node.id.as_str() == id {
+                if let Some(label) = label {
+                    node.accessible_label = label.into();
+                }
+                if let Some(width) = width {
+                    node.bounds.width = width;
+                }
+                return true;
+            }
+            node.children
+                .iter_mut()
+                .any(|child| mutate_label(child, id, label, width))
+        }
+
+        fn label_ink(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> (usize, usize) {
+            let rendered = Rasterizer::new().render(scene, metrics).unwrap();
+            let mut blank_root = scene.root().clone();
+            assert!(mutate_label(&mut blank_root, id, Some(""), None));
+            let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
+            let blank = Rasterizer::new().render(&blank_scene, metrics).unwrap();
+            let mut columns = std::collections::BTreeSet::new();
+            let mut rows = std::collections::BTreeSet::new();
+            for (pixel, (painted, blank)) in rendered
+                .rgba
+                .chunks_exact(4)
+                .zip(blank.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                if painted != blank {
+                    columns.insert(pixel % rendered.width as usize);
+                    rows.insert(pixel / rendered.width as usize);
+                }
+            }
+            let first_row = *rows
+                .first()
+                .unwrap_or_else(|| panic!("{id} must paint ink"));
+            (columns.len(), rows.last().unwrap() - first_row)
+        }
+
+        fn generous_ink_columns(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> usize {
+            let mut root = scene.root().clone();
+            assert!(mutate_label(&mut root, id, None, Some(300.0)));
+            let generous = Scene::new(root, scene.default_focus().clone()).unwrap();
+            label_ink(&generous, id, metrics).0
+        }
+
+        let mut core = fixture_core(vec![item(
+            "many",
+            "Many Moons",
+            vec![variant("native", "many-native", Availability::Ready)],
+        )]);
+        core.time_state = Ok(pf_ports::TimeState {
+            wall_clock: SystemTime::UNIX_EPOCH + Duration::from_secs(9 * 3_600 + 41 * 60),
+            timezone: "UTC".into(),
+            ntp_state: NtpState::Active,
+        });
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [
+            Route::Home,
+            Route::Library,
+            Route::Search,
+            Route::Details,
+            Route::VariantChooser,
+            Route::Settings,
+            Route::Quick,
+        ] {
+            core.go(route);
+            let scene = core.scene(metrics, "").unwrap();
+            for id in [
+                "room-home",
+                "room-library",
+                "room-settings",
+                "status-cluster",
+            ] {
+                let (columns, row_span) = label_ink(&scene, id, metrics);
+                assert_eq!(
+                    columns,
+                    generous_ink_columns(&scene, id, metrics),
+                    "{id} must paint every unclipped ink column on {route:?}"
+                );
+                assert!(row_span < 16, "{id} must stay on one text row on {route:?}");
+            }
+        }
+    }
+
+    #[test]
     fn selected_library_chip_uses_uniform_strong_border_and_full_inner_accent() {
         let mut core = fixture_core(vec![item(
             "item-0",
@@ -11291,20 +11424,20 @@ mod tests {
         for (id, expected) in [
             (
                 "room-keycap-left-border",
-                Bounds::new(424.0, 16.0, 40.0, 24.0),
+                Bounds::new(474.0, 20.0, 24.0, 24.0),
             ),
             (
                 "room-keycap-left-fill",
-                Bounds::new(425.0, 17.0, 38.0, 22.0),
+                Bounds::new(475.0, 21.0, 22.0, 22.0),
             ),
-            ("room-keycap-left", Bounds::new(428.0, 17.0, 32.0, 22.0)),
-            ("room-home", Bounds::new(476.0, 16.0, 72.0, 32.0)),
-            ("room-home-underline", Bounds::new(476.0, 49.0, 72.0, 3.0)),
-            ("room-library", Bounds::new(572.0, 16.0, 88.0, 32.0)),
-            ("room-settings", Bounds::new(684.0, 16.0, 92.0, 32.0)),
+            ("room-keycap-left", Bounds::new(475.0, 21.0, 22.0, 22.0)),
+            ("room-home", Bounds::new(522.0, 16.0, 55.0, 32.0)),
+            ("room-home-underline", Bounds::new(528.0, 49.0, 43.0, 3.0)),
+            ("room-library", Bounds::new(601.0, 16.0, 62.0, 32.0)),
+            ("room-settings", Bounds::new(687.0, 16.0, 71.0, 32.0)),
             (
                 "room-keycap-right-border",
-                Bounds::new(800.0, 16.0, 40.0, 24.0),
+                Bounds::new(782.0, 20.0, 24.0, 24.0),
             ),
         ] {
             let actual = node_by_id(scene.root(), id).unwrap().bounds;
@@ -12401,6 +12534,85 @@ mod tests {
                 label.bounds.x + label.bounds.width <= fill.bounds.x + fill.bounds.width
                     && label.bounds.y + label.bounds.height <= fill.bounds.y + fill.bounds.height
             );
+        }
+    }
+
+    #[test]
+    fn chrome_room_strip_follows_css_geometry() {
+        let scene = core()
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let root = scene.root();
+        let rooms = node_by_id(root, "rooms").unwrap();
+        assert!((rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON);
+        assert!((rooms.bounds.y + rooms.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON);
+
+        let item_ids = [
+            "room-keycap-left-border",
+            "room-home",
+            "room-library",
+            "room-settings",
+            "room-keycap-right-border",
+        ];
+        for pair in item_ids.windows(2) {
+            let left = node_by_id(root, pair[0]).unwrap();
+            let right = node_by_id(root, pair[1]).unwrap();
+            let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+            assert!(
+                (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
+                "{pair:?} gap={gap}"
+            );
+        }
+
+        for (id, label) in [
+            ("room-home", "Home"),
+            ("room-library", "Library"),
+            ("room-settings", "Settings"),
+        ] {
+            let label_node = node_by_id(root, id).unwrap();
+            assert!(
+                (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON
+            );
+            if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                assert!((underline.bounds.width - room_label_advance(label)).abs() < f32::EPSILON);
+                assert!(
+                    (underline.bounds.x + underline.bounds.width / 2.0
+                        - (label_node.bounds.x + label_node.bounds.width / 2.0))
+                        .abs()
+                        < f32::EPSILON
+                );
+            }
+        }
+
+        for id in ["room-keycap-left", "room-keycap-right"] {
+            let border = node_by_id(root, &format!("{id}-border")).unwrap();
+            let glyph = node_by_id(root, id).unwrap();
+            assert_eq!(
+                (border.bounds.width, border.bounds.height),
+                (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+            );
+            assert!(
+                (glyph.bounds.x + glyph.bounds.width / 2.0
+                    - (border.bounds.x + border.bounds.width / 2.0))
+                    .abs()
+                    <= 1.0
+            );
+            assert!(
+                (glyph.bounds.y + glyph.bounds.height / 2.0
+                    - (border.bounds.y + border.bounds.height / 2.0))
+                    .abs()
+                    <= 1.0
+            );
+            assert_eq!(glyph.text_align, TextAlign::Center);
         }
     }
 

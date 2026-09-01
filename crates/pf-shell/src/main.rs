@@ -2206,12 +2206,162 @@ fn raster_guard_record(
     text_scale_percent: u16,
     baseline_record_only: bool,
 ) -> Result<String, String> {
-    match assert_raster_text_paint_contained_and_complete(scene, metrics, base, text_scale_percent)
+    match assert_scene_occlusion_safe(scene, base)
+        .and_then(|()| {
+            assert_raster_text_paint_contained_and_complete(
+                scene,
+                metrics,
+                base,
+                text_scale_percent,
+            )
+        })
         .and_then(|()| assert_raster_text_legible(scene, metrics, base, text_scale_percent))
     {
         Ok(()) => Ok("PASS".to_owned()),
         Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
         Err(error) => Err(error),
+    }
+}
+
+const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
+
+#[allow(clippy::too_many_lines)]
+fn assert_scene_occlusion_safe(
+    scene: &pf_scene::Scene,
+    base: pf_theme::Base,
+) -> Result<(), String> {
+    struct PaintedNode<'a> {
+        node: &'a Node,
+        ancestors: Vec<&'a str>,
+    }
+
+    fn walk<'a>(node: &'a Node, ancestors: &mut Vec<&'a str>, out: &mut Vec<PaintedNode<'a>>) {
+        out.push(PaintedNode {
+            node,
+            ancestors: ancestors.clone(),
+        });
+        ancestors.push(node.id.as_str());
+        for child in &node.children {
+            walk(child, ancestors, out);
+        }
+        ancestors.pop();
+    }
+
+    fn intersects(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
+        a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+    }
+
+    fn related(a: &PaintedNode<'_>, b: &PaintedNode<'_>) -> bool {
+        a.ancestors.contains(&b.node.id.as_str())
+            || b.ancestors.contains(&a.node.id.as_str())
+            // A shared component owns the geometry of all its descendants. The
+            // scene root is only a paint-order container, not shared ownership.
+            || a.ancestors
+                .iter()
+                .skip(1)
+                .any(|ancestor| b.ancestors.contains(ancestor))
+    }
+
+    fn is_text(node: &Node) -> bool {
+        matches!(node.role, Role::Text | Role::Heading) && !node.accessible_label.trim().is_empty()
+    }
+
+    fn is_content(node: &Node) -> bool {
+        is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. })
+    }
+
+    fn declares_overlay(node: &Node) -> bool {
+        node.ink_token.as_deref() == Some(OVERLAY_ROLE_MARKER)
+    }
+
+    fn opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
+        if is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. }) {
+            return false;
+        }
+        let theme = pf_theme::flagship();
+        let Ok(value) = theme.resolve(base, &node.style_token) else {
+            return false;
+        };
+        let value = value.trim();
+        if value == "transparent" {
+            return false;
+        }
+        if let Some(hex) = value.strip_prefix('#') {
+            return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
+        }
+        !value.starts_with("rgba(") && !value.contains("gradient")
+    }
+
+    fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
+        if node.ink_token.as_deref() != Some(OVERLAY_ROLE_MARKER) {
+            return Err("library-grid-footer-fade: missing explicit overlay marker".into());
+        }
+        let pf_scene::NodeContent::Image { source, .. } = &node.content else {
+            return Err("library-grid-footer-fade: overlay must remain an image gradient".into());
+        };
+        let decoder = png::Decoder::new(std::io::Cursor::new(source.bytes.as_ref()));
+        let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut pixels)
+            .map_err(|error| error.to_string())?;
+        let bytes = &pixels[..info.buffer_size()];
+        let alphas = bytes.chunks_exact(4).map(|pixel| pixel[3]);
+        let min = alphas.clone().min().unwrap_or(255);
+        let max = alphas.max().unwrap_or(255);
+        if min == 255 || min == max {
+            return Err(format!(
+                "library-grid-footer-fade: overlay must be non-opaque and gradient; alpha={min}..{max}"
+            ));
+        }
+        Ok(())
+    }
+
+    let mut nodes = Vec::new();
+    walk(scene.root(), &mut Vec::new(), &mut nodes);
+    if let Some(fade) = nodes
+        .iter()
+        .find(|entry| entry.node.id.as_str() == "library-grid-footer-fade")
+    {
+        assert_fade_is_declared_gradient(fade.node)?;
+    }
+
+    let mut failures = Vec::new();
+    for (later_index, later) in nodes.iter().enumerate() {
+        for earlier in &nodes[..later_index] {
+            if related(earlier, later) || !intersects(earlier.node.bounds, later.node.bounds) {
+                continue;
+            }
+            if is_content(earlier.node)
+                && opaque_fill(later.node, base)
+                && !declares_overlay(later.node)
+            {
+                failures.push(format!(
+                    "opaque fill {} paints over foreign content {}",
+                    later.node.id.as_str(),
+                    earlier.node.id.as_str()
+                ));
+            }
+            if is_text(earlier.node)
+                && is_text(later.node)
+                && !declares_overlay(earlier.node)
+                && !declares_overlay(later.node)
+            {
+                failures.push(format!(
+                    "text {} intersects foreign text {}",
+                    earlier.node.id.as_str(),
+                    later.node.id.as_str()
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "scene occlusion guard failed:\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -3636,6 +3786,81 @@ mod durable_tests {
             assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
         assert!(
             failure.contains("occluded-label") && failure.contains("occluded-by-later-paint"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_prompt_bar_panel_shape() {
+        let root_id = pf_scene::NodeId::new("panel-occlusion-probe").unwrap();
+        let overlap = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("foreign-card-title").unwrap(),
+                Role::Text,
+                "Foreign card title",
+                overlap,
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("invented-prompt-panel").unwrap(),
+                Role::Group,
+                "",
+                overlap,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+
+        let failure = assert_scene_occlusion_safe(&scene, pf_theme::Base::Dusk).unwrap_err();
+        assert!(
+            failure.contains("invented-prompt-panel")
+                && failure.contains("foreign-card-title")
+                && failure.contains("opaque fill"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_foreign_text_intersection() {
+        let root_id = pf_scene::NodeId::new("text-occlusion-probe").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("grown-hero-title").unwrap(),
+                Role::Heading,
+                "A hero title grown by text scale",
+                pf_scene::Bounds::new(20.0, 20.0, 260.0, 64.0),
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("fixed-hero-status").unwrap(),
+                Role::Text,
+                "Ready",
+                pf_scene::Bounds::new(20.0, 70.0, 100.0, 30.0),
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+
+        let failure = assert_scene_occlusion_safe(&scene, pf_theme::Base::Dusk).unwrap_err();
+        assert!(
+            failure.contains("grown-hero-title")
+                && failure.contains("fixed-hero-status")
+                && failure.contains("foreign text"),
             "unexpected guard verdict: {failure}"
         );
     }

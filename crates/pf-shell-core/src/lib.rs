@@ -3814,7 +3814,10 @@ impl ShellCore {
                     96.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(library_footer_fade_source(w), ImageFit::Cover),
+                .with_image(library_footer_fade_source(w), ImageFit::Cover)
+                // Explicit scene-level declaration: this gradient intentionally
+                // overlays the final row of library art and labels.
+                .with_ink_token("--scene-overlay-role"),
             );
         } else if self.route == Route::Search {
             out.push(node(

@@ -2206,10 +2206,161 @@ fn raster_guard_record(
     text_scale_percent: u16,
     baseline_record_only: bool,
 ) -> Result<String, String> {
-    match assert_raster_text_legible(scene, metrics, base, text_scale_percent) {
+    match assert_raster_text_paint_contained_and_complete(scene, metrics, base, text_scale_percent)
+        .and_then(|()| assert_raster_text_legible(scene, metrics, base, text_scale_percent))
+    {
         Ok(()) => Ok("PASS".to_owned()),
         Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
         Err(error) => Err(error),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines
+)]
+fn assert_raster_text_paint_contained_and_complete(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale: u16,
+) -> Result<(), String> {
+    let guard_metrics = SurfaceMetrics {
+        logical_width: metrics.logical_width + 512.0,
+        logical_height: metrics.logical_height + 256.0,
+        ..metrics
+    };
+    fn text_nodes<'a>(node: &'a Node, nodes: &mut Vec<&'a Node>) {
+        if matches!(node.role, Role::Text | Role::Heading)
+            && !node.accessible_label.trim().is_empty()
+        {
+            nodes.push(node);
+        }
+        for child in &node.children {
+            text_nodes(child, nodes);
+        }
+    }
+
+    fn isolated_root(scene: &pf_scene::Scene, node: Node) -> Node {
+        let mut root = scene.root().clone();
+        root.role = Role::Group;
+        root.accessible_label.clear();
+        root.bounds.width += 512.0;
+        root.bounds.height += 256.0;
+        root.children = vec![node];
+        root
+    }
+
+    fn deliberate_vertical_overflow(node: &Node) -> Option<&'static str> {
+        match node.id.as_str() {
+            // The unavailable Steam Link card's 20px caption line box intentionally
+            // clips one anti-aliased fringe row to stay inside the fixed card footer.
+            // Its full glyph body remains present; the route-level visual is frozen.
+            "home-card-reason-steam-link" | "library-card-reason-steam-link" => {
+                Some("fixed card-footer AA fringe clip")
+            }
+            _ => None,
+        }
+    }
+
+    let render = |root: Node| -> Result<RasterFrame, String> {
+        let root_id = root.id.clone();
+        let isolated = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
+        let mut host = OffscreenHost::new(guard_metrics);
+        host.set_theme_base(base);
+        host.set_text_scale(f32::from(text_scale) / 100.0)
+            .map_err(|error| format!("render: {error:?}"))?;
+        host.present(&isolated).map_err(|error| error.to_string())?;
+        host.frame()
+            .cloned()
+            .ok_or("raster guard frame missing".into())
+    };
+
+    let ink_extent = |node: Node| -> Result<(usize, usize), String> {
+        let mut blank = node.clone();
+        blank.role = Role::Group;
+        let painted = render(isolated_root(scene, node))?;
+        let blank = render(isolated_root(scene, blank))?;
+        let frame_width = painted.width as usize;
+        let mut columns = std::collections::BTreeSet::new();
+        let mut rows = std::collections::BTreeSet::new();
+        for (pixel, (ink, blank)) in painted
+            .rgba
+            .chunks_exact(4)
+            .zip(blank.rgba.chunks_exact(4))
+            .enumerate()
+        {
+            if ink != blank {
+                columns.insert(pixel % frame_width);
+                rows.insert(pixel / frame_width);
+            }
+        }
+        Ok((columns.len(), rows.len()))
+    };
+
+    let mut nodes = Vec::new();
+    text_nodes(scene.root(), &mut nodes);
+    let mut failures = Vec::new();
+    // Evidence frames repeat the same shared chrome on every route. Guard each
+    // exact node/render configuration once per process; route-specific nodes still
+    // receive their own pass because bounds, content, or state change the key.
+    static PASSED_NODES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let passed_nodes = PASSED_NODES.get_or_init(Default::default);
+    for node in nodes {
+        let cache_key = format!("{node:?}|{metrics:?}|{base:?}|{text_scale}");
+        if passed_nodes.lock().unwrap().contains(&cache_key) {
+            continue;
+        }
+        let failure_count = failures.len();
+        // Give both renders ample room without changing either fractional origin.
+        // Integer translation preserves the production raster phase.
+        let mut positioned = node.clone();
+        positioned.bounds.x += 256.0 - node.bounds.x.floor();
+        positioned.bounds.y += 128.0 - node.bounds.y.floor();
+        let (actual_columns, actual_rows) = ink_extent(positioned.clone())?;
+        let mut generous = positioned.clone();
+        // Centered text uses (width - advance) / 2. Widening by an even delta
+        // shifts it by an integer 128 px and preserves cosmic-text's raster phase.
+        generous.bounds.x -= 128.0;
+        generous.bounds.width = node.bounds.width + 256.0;
+        let (generous_columns, generous_width_rows) = ink_extent(generous)?;
+        // A deliberately multiline node changes column occupancy when widened;
+        // its completeness is governed by the height comparison below instead.
+        if actual_rows <= generous_width_rows && actual_columns != generous_columns {
+            failures.push(format!(
+                "{}: incomplete painted ink columns; actual={actual_columns}, generous={generous_columns}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        }
+
+        // Removing the bottom clip is represented by a generous-height paired
+        // render. The even delta keeps centered text on an integral raster phase;
+        // row-count parity is translation-invariant and exposes hidden wraps.
+        let mut generous_height = positioned;
+        generous_height.bounds.y -= 128.0;
+        generous_height.bounds.height = node.bounds.height + 256.0;
+        let generous_rows = ink_extent(generous_height)?.1;
+        if actual_rows != generous_rows && deliberate_vertical_overflow(node).is_none() {
+            failures.push(format!(
+                "{}: painted ink escaped the bottom clip; actual_rows={actual_rows}, generous_rows={generous_rows}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        }
+        if failures.len() == failure_count {
+            passed_nodes.lock().unwrap().insert(cache_key);
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "raster text paint containment guard failed:\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -2918,6 +3069,67 @@ mod durable_tests {
         let baseline_record =
             raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, true).unwrap();
         assert_eq!(baseline_record, format!("FAIL: {normal_error}"));
+    }
+
+    fn paint_containment_failure(id: &str, label: &str, bounds: pf_scene::Bounds) -> String {
+        let root_id = pf_scene::NodeId::new("paint-containment-fixture").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 400.0, 160.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new(id).unwrap(),
+                Role::Text,
+                label,
+                bounds,
+                "--color-transparent",
+            )
+            .with_ink_token("--state-rest-text"),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 400.0,
+            logical_height: 160.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        assert_raster_text_paint_contained_and_complete(&scene, metrics, pf_theme::Base::Dusk, 100)
+            .unwrap_err()
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_too_narrow_text_node() {
+        let failure = paint_containment_failure(
+            "r10-too-narrow-label",
+            "Recently played expedition",
+            pf_scene::Bounds::new(20.0, 20.0, 56.0, 48.0),
+        );
+        assert!(failure.contains("r10-too-narrow-label"), "{failure}");
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_wrap_into_bottom_clip() {
+        let failure = paint_containment_failure(
+            "chrome-r1-wrapped-label",
+            "Accessibility and controller settings",
+            pf_scene::Bounds::new(20.0, 20.0, 120.0, 18.0),
+        );
+        assert!(failure.contains("chrome-r1-wrapped-label"), "{failure}");
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_inset_less_width() {
+        let failure = paint_containment_failure(
+            "runtime-r4-inset-less-label",
+            "Battery unavailable",
+            pf_scene::Bounds::new(20.0, 20.0, 72.0, 32.0),
+        );
+        assert!(failure.contains("runtime-r4-inset-less-label"), "{failure}");
     }
 
     #[test]

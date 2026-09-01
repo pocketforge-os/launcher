@@ -190,13 +190,13 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        // Prompt rows intentionally rebaseline without the invented raised-surface
-        // panel. Compact keycap/label chips remain painted over each route's content;
-        // Library card art and titles now show through the specified footer fade.
-        "4fe77171a7a9ee66bcd6d060c1e962e0f3def5b392a2f5c0f8f13a41498c49ec  ",
-        "3b4524b019324290ae545515269dd2492b9f89ed1743cb4017f005de92bef1d9  ",
-        "45e07518f297cd53ef289a0bbf479b854fed7cbb69d36b987be54b3ea46fc909  ",
-        "0f4a554dd08c755d6907baf95b09a31d938208d1e3db73d85d130eb82fad5275  ",
+        // Home prompt rows intentionally rebaseline from the scanline approximation
+        // to the runtime's smooth inside-aligned border. Routes without a shared Home
+        // prompt row remain byte-identical.
+        "5a5ec4670bb0b45791947a666546ae675866d3f84217e96c3aa16202c08aad1d  ",
+        "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
+        "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
+        "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
         "95bdb92d1d35a55f305f24ba0262ba6d9e246023fe905bccedbcf9b1e958ed71  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
@@ -207,9 +207,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("3b4524b"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("320d9f8"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("0f4a554"),
+        lines.lines().nth(3).unwrap().starts_with("5fff0df"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -284,6 +284,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("fb1ad0c91dd8154c2be7e52bb5a7af502fc4077ae010acd8600ccf1083b16357  ")
+        transcript.contains("0cf66cd3409966436e39374838b07b8b4286bdea40359165e668bba9ae91ce7b  ")
     );
 }

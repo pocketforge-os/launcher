@@ -116,7 +116,9 @@ fn library_prompt_verb_width(text: &str) -> f32 {
     match text {
         "Search" | "Details" => 52.0,
         "Filter" => 37.0,
-        _ => label_text_width(text),
+        // Home's binding-derived vocabulary is open-ended. Keep its node sized from
+        // measured advance plus the renderer's conservative bearing reserve.
+        _ => label_text_width(text) + 8.0,
     }
 }
 
@@ -6261,67 +6263,77 @@ fn rooms_layout(
 }
 
 fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
-    let y = surface_height - PROMPTS_AREA_HEIGHT + 4.0;
-    let mut x = surface_width - 656.0;
-    let mut nodes = Vec::new();
-    for (index, prompt) in footer.split(" · ").enumerate() {
-        let Some((binding, verb)) = prompt.split_once(' ') else {
-            continue;
+    fn binding_width(binding: &str) -> f32 {
+        let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 9.6;
+        let delta = (measured - KEYCAP_MIN_WIDTH).max(0.0).ceil();
+        KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0
+    }
+
+    fn outline(prefix: &str, x: f32, y: f32, width: f32, wide: bool) -> Node {
+        let radius = if wide {
+            RADIUS_S.min(KEYCAP_HEIGHT / 2.0)
+        } else {
+            KEYCAP_HEIGHT / 2.0
         };
-        if index > 0 {
-            nodes.push(
-                node(
-                    &format!("home-prompt-separator-{index}"),
-                    Role::Text,
-                    "·",
-                    x,
-                    y,
-                    16.0,
-                    24.0,
-                    COLOR_SURFACE_RAISED_TOKEN,
-                )
-                .with_type_role(TypeRole::Label),
-            );
-            x += 20.0;
-        }
-        let binding_width = if binding == "SELECT" { 56.0 } else { 28.0 };
-        let prefix = format!("home-prompt-keycap-{index}");
-        nodes.push(node(
+        node(
             &format!("{prefix}-border"),
             Role::Group,
             "",
             x,
             y,
+            width,
+            KEYCAP_HEIGHT,
+            SCENE_TRANSPARENT_TOKEN,
+        )
+        .with_corner_radius(radius)
+        .with_border(COLOR_BORDER_STRONG_TOKEN, KEYCAP_BORDER_WIDTH)
+    }
+
+    fn translate(node: &mut Node, dx: f32, dy: f32) {
+        node.bounds.x += dx;
+        node.bounds.y += dy;
+        for child in &mut node.children {
+            translate(child, dx, dy);
+        }
+    }
+
+    let y = surface_height - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+    let mut x = 0.0;
+    let mut nodes = Vec::new();
+    for (index, prompt) in footer.split(" · ").enumerate() {
+        let Some((binding, verb)) = prompt.split_once(' ') else {
+            continue;
+        };
+        let verb = verb.trim_start();
+        if index > 0 {
+            x += SPACE_5;
+        }
+        let binding_width = binding_width(binding);
+        let prefix = format!("home-prompt-keycap-{index}");
+        nodes.push(outline(
+            &prefix,
+            x,
+            y,
             binding_width,
-            24.0,
-            COLOR_BORDER_STRONG_TOKEN,
-        ));
-        nodes.push(node(
-            &format!("{prefix}-fill"),
-            Role::Group,
-            "",
-            x + 1.0,
-            y + 1.0,
-            binding_width - 2.0,
-            22.0,
-            COLOR_SURFACE_RAISED_TOKEN,
+            binding.chars().count() > 1,
         ));
         nodes.push(
             node(
                 &prefix,
                 Role::Text,
                 binding,
-                x + 2.0,
-                y + 1.0,
-                binding_width - 4.0,
-                22.0,
-                COLOR_SURFACE_RAISED_TOKEN,
+                x,
+                y,
+                binding_width,
+                KEYCAP_HEIGHT,
+                SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Caption)
-            .with_text_align(TextAlign::Center),
+            .with_text_align(TextAlign::Center)
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         );
-        x += binding_width + 8.0;
-        let verb_width = verb.len() as f32 * 10.0 + 8.0;
+        x += binding_width + SPACE_2;
+        let verb_width = text_node_box_width(library_prompt_verb_width(verb));
         nodes.push(
             node(
                 &format!("home-prompt-verb-{index}"),
@@ -6330,20 +6342,31 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                 x,
                 y,
                 verb_width,
-                24.0,
-                COLOR_SURFACE_RAISED_TOKEN,
+                KEYCAP_HEIGHT,
+                SCENE_TRANSPARENT_TOKEN,
             )
-            .with_type_role(TypeRole::Label),
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         );
-        x += verb_width + 12.0;
+        x += verb_width;
+    }
+    let offset = surface_width - SPACE_7 - x;
+    for node in &mut nodes {
+        translate(node, offset, 0.0);
     }
     nodes
 }
 
 fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    fn translate(node: &mut Node, dx: f32, dy: f32) {
+        node.bounds.x += dx;
+        node.bounds.y += dy;
+        for child in &mut node.children {
+            translate(child, dx, dy);
+        }
+    }
     let normalized = footer.replace("     ", " · ");
     let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height);
-    nodes.retain(|node| !node.id.as_str().contains("prompt-separator"));
     let prompt_top = surface_height - PROMPTS_AREA_HEIGHT;
     let centered_y = prompt_top + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
     for node in &mut nodes {
@@ -6357,8 +6380,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         else {
             continue;
         };
-        node.bounds.x -= index as f32 * SPACE_2;
-        node.bounds.y = centered_y;
+        translate(node, -(index as f32 * SPACE_2), centered_y - node.bounds.y);
     }
     let prompt_count = nodes
         .iter()
@@ -6387,11 +6409,9 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
             .map(|node| node.bounds.width)
             .expect("prompt keycap border");
         for node in nodes.iter_mut().filter(|node| {
-            node.id.as_str() == prefix
-                || node.id.as_str() == format!("{prefix}-border")
-                || node.id.as_str() == format!("{prefix}-fill")
+            node.id.as_str() == prefix || node.id.as_str() == format!("{prefix}-border")
         }) {
-            node.bounds.x += x - keycap_x;
+            translate(node, x - keycap_x, 0.0);
         }
         x += keycap_width + SPACE_2;
 
@@ -6420,7 +6440,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
             });
     let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
     for node in &mut nodes {
-        node.bounds.x += offset;
+        translate(node, offset, 0.0);
     }
     nodes
 }
@@ -6626,20 +6646,30 @@ fn place_library_fade_below_footer(children: &mut Vec<Node>) {
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     let id = node.id.as_str();
+    let prompt_keycap = id
+        .strip_prefix("home-prompt-keycap-")
+        .and_then(|suffix| suffix.strip_suffix("-border").or(Some(suffix)))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        });
     let numeric_suffix = |prefix: &str| {
         id.strip_prefix(prefix).is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.starts_with("home-prompt-keycap-0")
-        || id.starts_with("room-keycap-")
+    let radius = if prompt_keycap {
+        Some(if node.bounds.width > KEYCAP_MIN_WIDTH {
+            RADIUS_S
+        } else {
+            RADIUS_PILL
+        })
+    } else if id.starts_with("room-keycap-")
         || id.contains("keycap")
             && (id.to_ascii_lowercase().contains("select")
                 || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id.starts_with("home-prompt-keycap-")
-        || id == "attention"
+    } else if id == "attention"
         || id == "attention-pill"
         || id == "attention-pill-border"
         || id == "attention-dot"
@@ -10926,6 +10956,154 @@ mod tests {
                 .iter()
                 .all(|node| (node.bounds.y - expected_top).abs() < f32::EPSILON)
         );
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::float_cmp
+    )]
+    fn shared_prompt_rows_are_outline_only_plain_text_with_token_spacing() {
+        fn assert_prompt_paint(scene: &Scene, prompt_count: usize) {
+            fn clear_label(node: &mut Node, id: &str) -> bool {
+                if node.id.as_str() == id {
+                    node.accessible_label.clear();
+                    return true;
+                }
+                node.children.iter_mut().any(|child| clear_label(child, id))
+            }
+
+            let prompts = node_by_id(scene.root(), "prompts").unwrap();
+            assert!(
+                !prompts
+                    .children
+                    .iter()
+                    .any(|node| node.id.as_str().contains("-fill")),
+                "prompt rows must not emit filled chip surfaces"
+            );
+            for index in 0..prompt_count {
+                let prefix = format!("home-prompt-keycap-{index}");
+                let keycap = node_by_id(prompts, &prefix).unwrap();
+                let border = node_by_id(prompts, &format!("{prefix}-border")).unwrap();
+                let verb = node_by_id(prompts, &format!("home-prompt-verb-{index}")).unwrap();
+                assert_eq!(keycap.style_token, SCENE_TRANSPARENT_TOKEN);
+                assert_eq!(verb.style_token, SCENE_TRANSPARENT_TOKEN);
+                assert_eq!(
+                    keycap.ink_token.as_deref(),
+                    Some(COLOR_TEXT_SECONDARY_TOKEN)
+                );
+                assert_eq!(verb.ink_token.as_deref(), Some(COLOR_TEXT_SECONDARY_TOKEN));
+                assert_eq!(border.style_token, SCENE_TRANSPARENT_TOKEN);
+                let expected_radius = if border.bounds.width > KEYCAP_MIN_WIDTH {
+                    RADIUS_S
+                } else {
+                    border.bounds.height / 2.0
+                };
+                assert_eq!(border.corner_radius, expected_radius);
+                assert_eq!(
+                    border.border_token.as_deref(),
+                    Some(COLOR_BORDER_STRONG_TOKEN)
+                );
+                assert_eq!(border.border_width, KEYCAP_BORDER_WIDTH);
+                assert!(
+                    border.children.is_empty(),
+                    "runtime border node must replace scanline outline children"
+                );
+
+                let metrics = SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                };
+                let painted = Rasterizer::new().render(scene, metrics).unwrap();
+                let mut blank_root = scene.root().clone();
+                assert!(clear_label(&mut blank_root, &prefix));
+                let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
+                let blank = Rasterizer::new().render(&blank_scene, metrics).unwrap();
+                let ink_columns = painted
+                    .rgba
+                    .chunks_exact(4)
+                    .zip(blank.rgba.chunks_exact(4))
+                    .enumerate()
+                    .filter_map(|(pixel, (ink_pixel, blank_pixel))| {
+                        (ink_pixel != blank_pixel).then_some(pixel % painted.width as usize)
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert!(
+                    *ink_columns.first().unwrap() > border.bounds.x as usize
+                        && *ink_columns.last().unwrap()
+                            < (border.bounds.x + border.bounds.width) as usize,
+                    "keycap label ink must lie strictly inside its border"
+                );
+                assert!(
+                    (verb.bounds.x - (border.bounds.x + border.bounds.width) - SPACE_2).abs()
+                        < f32::EPSILON,
+                    "keycap-to-label gap must be space-2"
+                );
+                if index + 1 < prompt_count {
+                    let next =
+                        node_by_id(prompts, &format!("home-prompt-keycap-{}-border", index + 1))
+                            .unwrap();
+                    assert!(
+                        (next.bounds.x - (verb.bounds.x + verb.bounds.width) - SPACE_5).abs()
+                            < f32::EPSILON,
+                        "prompt-group gap must be space-5"
+                    );
+                }
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.set_control_bindings(vec![
+            ControlBinding {
+                context: "shell".into(),
+                action: "Search.open".into(),
+                label: "Search".into(),
+                binding: "SELECT".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Filter.next".into(),
+                label: "Filter".into(),
+                binding: "Y".into(),
+            },
+            ControlBinding {
+                context: "shell".into(),
+                action: "Quick".into(),
+                label: "Quick".into(),
+                binding: "X".into(),
+            },
+            ControlBinding {
+                context: "global".into(),
+                action: "Activate".into(),
+                label: "Activate".into(),
+                binding: "A".into(),
+            },
+        ]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let home = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        assert_prompt_paint(&home, 4);
+
+        core.go(Route::Library);
+        let library_compact = core.scene(metrics, "").unwrap();
+        assert_prompt_paint(&library_compact, 2);
+        core.focus = 5;
+        let library_details = core.scene(metrics, "").unwrap();
+        assert_prompt_paint(&library_details, 3);
     }
 
     #[test]

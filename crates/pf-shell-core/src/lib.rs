@@ -2939,11 +2939,7 @@ impl ShellCore {
             h - PROMPTS_AREA_HEIGHT,
             w,
             PROMPTS_AREA_HEIGHT,
-            if self.route == Route::Library {
-                SCENE_TRANSPARENT_TOKEN
-            } else {
-                COLOR_SURFACE_RAISED_TOKEN
-            },
+            SCENE_TRANSPARENT_TOKEN,
         ));
         let mut prompt_node = node(
             "prompts",
@@ -2965,7 +2961,7 @@ impl ShellCore {
                 552.0
             },
             32.0,
-            COLOR_SURFACE_RAISED_TOKEN,
+            SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
@@ -10592,6 +10588,79 @@ mod tests {
             "library labels must remain card children, never lifted layers"
         );
         assert!(node_by_id(&children[card_index], "library-title-ready").is_some());
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn library_prompt_row_is_transparent_over_derived_grid_gutters() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let geometry = library_geometry(metrics.logical_width);
+
+        for focus in [0, 5] {
+            core.focus = focus;
+            let scene = core.scene(metrics, "").unwrap();
+            assert_eq!(
+                node_by_id(scene.root(), "prompt-bar").unwrap().style_token,
+                SCENE_TRANSPARENT_TOKEN
+            );
+            assert_eq!(
+                node_by_id(scene.root(), "prompts").unwrap().style_token,
+                SCENE_TRANSPARENT_TOKEN
+            );
+
+            // Prompt chips legitimately paint over the fade. Remove only those compact
+            // children so this raster assertion isolates the row container surface.
+            let mut root = scene.root().clone();
+            root.children
+                .iter_mut()
+                .find(|node| node.id.as_str() == "prompts")
+                .unwrap()
+                .children
+                .clear();
+            let scene_without_chips = Scene::new(root, scene.default_focus().clone()).unwrap();
+            let rendered = pf_render::Rasterizer::new()
+                .render(&scene_without_chips, metrics)
+                .unwrap();
+            let stride = rendered.width as usize * 4;
+            for column in 0..geometry.columns - 1 {
+                let gutter_left = geometry.card_left
+                    + (column + 1) as f32 * geometry.card_width
+                    + column as f32 * geometry.card_gap;
+                let gutter_right = gutter_left + geometry.card_gap;
+                for y in 665..690 {
+                    let reference = y * stride;
+                    for x in gutter_left.ceil() as usize..gutter_right.floor() as usize {
+                        let offset = y * stride + x * 4;
+                        assert_eq!(
+                            &rendered.rgba[offset..offset + 4],
+                            &rendered.rgba[reference..reference + 4],
+                            "focus {focus}: prompt-row surface painted derived gutter {column} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -2998,7 +2998,7 @@ impl ShellCore {
         wrap_system_layout(&mut children, w);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
-            add_explicit_action_name(child);
+            add_explicit_action_name(child, self.text_scale);
         }
         if self.route == Route::Library {
             place_library_fade_below_footer(&mut children);
@@ -5033,16 +5033,16 @@ impl ShellCore {
             56.0,
             COLOR_SURFACE_SCRIM_TOKEN,
         ));
-        out.push(node(
+        out.push(declared_multiline(node(
             "first-run-copy",
             Role::Text,
             "All of this lives in Settings → Accessibility and can change any time.",
             w / 2.0 - 340.0,
             112.0,
             680.0,
-            48.0,
+            scaled_text_box_height(48.0, self.text_scale),
             COLOR_SURFACE_SCRIM_TOKEN,
-        ));
+        )));
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
             let mut n = node(
@@ -5063,16 +5063,16 @@ impl ShellCore {
             n.action = Some(NodeAction::Activate);
             out.push(n);
         }
-        out.push(node(
+        out.push(declared_multiline(node(
             "safe-return-teach",
             Role::Text,
             &format!("{} returns you here.", self.safe_return_binding),
             w / 2.0 - 340.0,
             470.0,
             680.0,
-            48.0,
+            scaled_text_box_height(48.0, self.text_scale),
             COLOR_SURFACE_CANVAS_TOKEN,
-        ));
+        )));
         let mut continue_node = node(
             "continue",
             Role::Button,
@@ -6646,7 +6646,7 @@ fn hero_wash_source() -> ImageSource {
     )
 }
 
-fn add_explicit_action_name(action_node: &mut Node) {
+fn add_explicit_action_name(action_node: &mut Node, text_scale: u16) {
     fn contains(outer: Bounds, inner: Bounds) -> bool {
         inner.x >= outer.x
             && inner.y >= outer.y
@@ -6666,14 +6666,19 @@ fn add_explicit_action_name(action_node: &mut Node) {
         && !action_node.accessible_label.trim().is_empty()
         && !has_name(action_node, action_node.bounds)
     {
+        let label_height = scaled_text_box_height(28.0, text_scale)
+            .min(action_node.bounds.height)
+            .max(1.0);
+        let bottom_inset = scaled_text_box_height(6.0, text_scale);
         let mut label = node(
             &format!("action-name-{}", action_node.id.as_str()),
             Role::Text,
             &action_node.accessible_label,
             action_node.bounds.x,
-            action_node.bounds.y + (action_node.bounds.height - 34.0).max(0.0),
+            action_node.bounds.y
+                + (action_node.bounds.height - label_height - bottom_inset).max(0.0),
             action_node.bounds.width.max(1.0),
-            28.0_f32.min(action_node.bounds.height),
+            label_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Label);
@@ -6681,7 +6686,7 @@ fn add_explicit_action_name(action_node: &mut Node) {
         action_node.children.push(label);
     }
     for child in &mut action_node.children {
-        add_explicit_action_name(child);
+        add_explicit_action_name(child, text_scale);
     }
 }
 
@@ -13038,7 +13043,10 @@ mod tests {
                     );
                     assert_eq!(label_node.text_align, TextAlign::Center);
                     let scale_delta = f32::from(text_scale) / 100.0 - 1.0;
-                    assert_eq!(label_node.bounds.height, 32.0 + 12.0 * scale_delta);
+                    assert!(
+                        (label_node.bounds.height - (32.0 + 12.0 * scale_delta)).abs()
+                            < f32::EPSILON
+                    );
                     assert!(
                         (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs()
                             < f32::EPSILON

@@ -3531,6 +3531,22 @@ mod durable_tests {
                         panic!("{room} at {text_scale}% failed rendered legibility: {error}")
                     });
             }
+
+            core.reset_first_run();
+            let scene = core.scene(metrics, "").unwrap();
+            assert_raster_text_paint_contained_and_complete(
+                &scene,
+                metrics,
+                pf_theme::Base::Dusk,
+                text_scale,
+            )
+            .unwrap_or_else(|error| {
+                panic!("first-run at {text_scale}% failed paint containment: {error}")
+            });
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                .unwrap_or_else(|error| {
+                    panic!("first-run at {text_scale}% failed rendered legibility: {error}")
+                });
         }
     }
 

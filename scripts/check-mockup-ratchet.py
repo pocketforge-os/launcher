@@ -20,6 +20,7 @@ WAIVER_RE = re.compile(
     r"RATCHET-WAIVER:\s+(?P<screen>\S+)\s+(?P<old>\S+)\s+->\s+"
     r"(?P<new>\S+)\s+—\s+(?P<reason>\S.*)$"
 )
+PR_REFERENCE_RE = re.compile(r"(?:\bPR\s+)?\S+#\d+\b")
 
 
 def decimal(value: str) -> Decimal:
@@ -47,15 +48,24 @@ def thresholds(source: str) -> dict[str, Decimal]:
     return result
 
 
-def waiver_counts(source: str) -> Counter[tuple[str, Decimal, Decimal]]:
-    result: Counter[tuple[str, Decimal, Decimal]] = Counter()
+def waiver_counts(source: str) -> Counter[tuple[str, Decimal, Decimal | None]]:
+    result: Counter[tuple[str, Decimal, Decimal | None]] = Counter()
     for line in source.splitlines():
         if "RATCHET-WAIVER:" not in line:
             continue
         match = WAIVER_RE.search(line)
         if not match:
             raise ValueError(f"malformed ratchet waiver: {line.strip()}")
-        result[(match.group("screen"), decimal(match.group("old")), decimal(match.group("new")))] += 1
+        new_value = match.group("new")
+        if new_value == "REMOVED":
+            if not PR_REFERENCE_RE.search(match.group("reason")):
+                raise ValueError(
+                    f"removed-entry waiver must name the PR: {line.strip()}"
+                )
+            parsed_new = None
+        else:
+            parsed_new = decimal(new_value)
+        result[(match.group("screen"), decimal(match.group("old")), parsed_new)] += 1
     return result
 
 
@@ -105,9 +115,17 @@ def main() -> int:
 
     added_waivers = new_waivers - old_waivers
     failures = []
-    for screen, new_value in new.items():
-        old_value = old.get(screen)
-        if old_value is None or new_value >= old_value:
+    for screen, old_value in old.items():
+        new_value = new.get(screen)
+        if new_value is None:
+            waiver = (screen, old_value, None)
+            if added_waivers[waiver]:
+                added_waivers[waiver] -= 1
+                print(f"mockup ratchet removal waived: {screen} {old_value} -> REMOVED")
+            else:
+                failures.append(f"ratchet entry removed: {screen}")
+            continue
+        if new_value >= old_value:
             continue
         waiver = (screen, old_value, new_value)
         if added_waivers[waiver]:

@@ -2966,6 +2966,8 @@ impl ShellCore {
             PROMPTS_AREA_HEIGHT,
             SCENE_TRANSPARENT_TOKEN,
         ));
+        let prompt_height = scaled_text_box_height(32.0, self.text_scale);
+        let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
         let mut prompt_node = node(
             "prompts",
             if matches!(self.route, Route::Home | Route::Library) {
@@ -2979,13 +2981,13 @@ impl ShellCore {
             } else {
                 w - 600.0
             },
-            h - PROMPTS_AREA_HEIGHT,
+            prompt_top,
             if self.route == Route::Home {
                 612.0
             } else {
                 552.0
             },
-            32.0,
+            prompt_height,
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);

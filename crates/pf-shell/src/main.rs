@@ -3451,6 +3451,87 @@ mod durable_tests {
     }
 
     #[test]
+    fn prompt_row_reflows_when_text_scale_changes_through_shell_actions() {
+        fn assert_prompt_guard(core: &ShellCore, metrics: SurfaceMetrics) {
+            fn find_prompt(node: &Node) -> Option<&Node> {
+                (node.id.as_str() == "prompts")
+                    .then_some(node)
+                    .or_else(|| node.children.iter().find_map(find_prompt))
+            }
+
+            let scene = core.scene(metrics, "B Back").unwrap();
+            let prompt = find_prompt(scene.root())
+                .expect("shared prompt row")
+                .clone();
+            let expected_height = 32.0 * f32::from(core.text_scale()) / 100.0;
+            assert_eq!(prompt.bounds.height, expected_height);
+            assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
+            let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
+            let root = Node::new(
+                root_id.clone(),
+                Role::Group,
+                "",
+                pf_scene::Bounds::new(0.0, 0.0, metrics.logical_width, metrics.logical_height),
+                "--color-surface-canvas",
+            )
+            .with_children(vec![prompt]);
+            let prompt_scene = pf_scene::Scene::new(root, root_id).unwrap();
+            raster_guard_record(
+                &prompt_scene,
+                metrics,
+                core.theme_base(),
+                core.text_scale(),
+                false,
+            )
+            .unwrap();
+        }
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(
+            &FakePreferencePort::new(
+                [EffectivePreference {
+                    key: PreferenceKey("textScale".into()),
+                    effective: PreferenceValue::Text("100%".into()),
+                    stored: PreferenceValue::Text("100%".into()),
+                    applied: true,
+                }],
+                ChangeAuthority("user".into()),
+            ),
+            true,
+        )
+        .unwrap();
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Activate);
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        assert_prompt_guard(&core, metrics);
+
+        for expected in ["150%", "200%"] {
+            let Some(Effect::ChangePreference(change)) = core.action(&ShellAction::Activate) else {
+                panic!("text-scale control must emit a preference change")
+            };
+            assert_eq!(change.key.0, "textScale");
+            assert_eq!(change.value, PreferenceValue::Text(expected.into()));
+            core.preference_changed(&EffectivePreference {
+                key: change.key,
+                effective: change.value.clone(),
+                stored: change.value,
+                applied: true,
+            });
+            assert_prompt_guard(&core, metrics);
+        }
+    }
+
+    #[test]
     fn library_and_settings_evidence_routes_render_without_notes() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();

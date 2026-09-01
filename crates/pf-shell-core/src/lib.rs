@@ -45,11 +45,11 @@ use design_generated::{
     COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
     KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
     LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
-    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3,
-    SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SIDE_WIDTH,
+    RADIUS_S, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7,
+    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
+    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
+    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+    STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SIDE_WIDTH,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -93,9 +93,9 @@ fn caption_text_width(text: &str) -> f32 {
 // with the same Cosmic Text configuration that paints the Label role.
 fn room_label_advance(text: &str) -> f32 {
     match text {
-        "Home" => 39.0,
-        "Library" => 46.0,
-        "Settings" => 55.0,
+        "Home" => 43.0,
+        "Library" => 50.0,
+        "Settings" => 59.0,
         _ => label_text_width(text),
     }
 }
@@ -2694,14 +2694,15 @@ impl ShellCore {
             status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
         }
         if !status_parts.is_empty() {
+            let status_text = status_parts.join("     ");
             children.push(
                 node(
                     "status-cluster",
                     Role::Text,
-                    &status_parts.join("     "),
+                    &status_text,
                     battery_x + 32.0,
                     16.0,
-                    152.0,
+                    text_node_box_width(caption_text_width(&status_text)),
                     32.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -2712,9 +2713,9 @@ impl ShellCore {
             KEYCAP_MIN_WIDTH.max(caption_text_width("L") + 2.0 * KEYCAP_BORDER_WIDTH);
         let room_widths = [
             keycap_width,
-            room_label_advance("Home") + 2.0 * ROOM_HORIZONTAL_PADDING,
-            room_label_advance("Library") + 2.0 * ROOM_HORIZONTAL_PADDING,
-            room_label_advance("Settings") + 2.0 * ROOM_HORIZONTAL_PADDING,
+            text_node_box_width(room_label_advance("Home")),
+            text_node_box_width(room_label_advance("Library")),
+            text_node_box_width(room_label_advance("Settings")),
             keycap_width,
         ];
         let rooms_width = room_widths.iter().sum::<f32>() + ROOM_STRIP_GAP * 4.0;
@@ -2814,7 +2815,7 @@ impl ShellCore {
                         &format!("{id}-underline"),
                         Role::Group,
                         "",
-                        room_x + ROOM_HORIZONTAL_PADDING,
+                        room_x + TEXT_NODE_INLINE_INSET,
                         49.0,
                         room_label_advance(label),
                         3.0,
@@ -10689,6 +10690,107 @@ mod tests {
             max_y - min_y < 15,
             "Details ink must remain on one label row, got y={min_y}..={max_y}"
         );
+    }
+
+    #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route() {
+        fn mutate_label(
+            node: &mut Node,
+            id: &str,
+            label: Option<&str>,
+            width: Option<f32>,
+        ) -> bool {
+            if node.id.as_str() == id {
+                if let Some(label) = label {
+                    node.accessible_label = label.into();
+                }
+                if let Some(width) = width {
+                    node.bounds.width = width;
+                }
+                return true;
+            }
+            node.children
+                .iter_mut()
+                .any(|child| mutate_label(child, id, label, width))
+        }
+
+        fn label_ink(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> (usize, usize) {
+            let rendered = pf_render::Rasterizer::new().render(scene, metrics).unwrap();
+            let mut blank_root = scene.root().clone();
+            assert!(mutate_label(&mut blank_root, id, Some(""), None));
+            let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
+            let blank = pf_render::Rasterizer::new()
+                .render(&blank_scene, metrics)
+                .unwrap();
+            let mut columns = std::collections::BTreeSet::new();
+            let mut rows = std::collections::BTreeSet::new();
+            for (pixel, (painted, blank)) in rendered
+                .rgba
+                .chunks_exact(4)
+                .zip(blank.rgba.chunks_exact(4))
+                .enumerate()
+            {
+                if painted != blank {
+                    columns.insert(pixel % rendered.width as usize);
+                    rows.insert(pixel / rendered.width as usize);
+                }
+            }
+            let first_row = *rows
+                .first()
+                .unwrap_or_else(|| panic!("{id} must paint ink"));
+            (columns.len(), rows.last().unwrap() - first_row)
+        }
+
+        fn generous_ink_columns(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> usize {
+            let mut root = scene.root().clone();
+            assert!(mutate_label(&mut root, id, None, Some(300.0)));
+            let generous = Scene::new(root, scene.default_focus().clone()).unwrap();
+            label_ink(&generous, id, metrics).0
+        }
+
+        let mut core = fixture_core(vec![item(
+            "many",
+            "Many Moons",
+            vec![variant("native", "many-native", Availability::Ready)],
+        )]);
+        core.time_state = Ok(pf_ports::TimeState {
+            wall_clock: SystemTime::UNIX_EPOCH + Duration::from_secs(9 * 3_600 + 41 * 60),
+            timezone: "UTC".into(),
+            ntp_state: NtpState::Active,
+        });
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        for route in [
+            Route::Home,
+            Route::Library,
+            Route::Search,
+            Route::Details,
+            Route::VariantChooser,
+            Route::Settings,
+            Route::Quick,
+        ] {
+            core.go(route);
+            let scene = core.scene(metrics, "").unwrap();
+            for id in [
+                "room-home",
+                "room-library",
+                "room-settings",
+                "status-cluster",
+            ] {
+                let (columns, row_span) = label_ink(&scene, id, metrics);
+                assert_eq!(
+                    columns,
+                    generous_ink_columns(&scene, id, metrics),
+                    "{id} must paint every unclipped ink column on {route:?}"
+                );
+                assert!(row_span < 16, "{id} must stay on one text row on {route:?}");
+            }
+        }
     }
 
     #[test]

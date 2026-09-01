@@ -19,7 +19,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{RasterFrame, RenderNote};
+use pf_render::{RasterFrame, Rasterizer, RenderNote};
 use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -2206,10 +2206,212 @@ fn raster_guard_record(
     text_scale_percent: u16,
     baseline_record_only: bool,
 ) -> Result<String, String> {
-    match assert_raster_text_legible(scene, metrics, base, text_scale_percent) {
+    match assert_raster_text_paint_contained_and_complete(scene, metrics, base, text_scale_percent)
+        .and_then(|()| assert_raster_text_legible(scene, metrics, base, text_scale_percent))
+    {
         Ok(()) => Ok("PASS".to_owned()),
         Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
         Err(error) => Err(error),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::too_many_lines
+)]
+fn assert_raster_text_paint_contained_and_complete(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale: u16,
+) -> Result<(), String> {
+    fn text_nodes<'a>(node: &'a Node, nodes: &mut Vec<&'a Node>) {
+        if matches!(node.role, Role::Text | Role::Heading)
+            && !node.accessible_label.trim().is_empty()
+        {
+            nodes.push(node);
+        }
+        for child in &node.children {
+            text_nodes(child, nodes);
+        }
+    }
+
+    fn isolated_root(scene: &pf_scene::Scene, node: Node, metrics: SurfaceMetrics) -> Node {
+        let mut root = scene.root().clone();
+        root.role = Role::Group;
+        root.accessible_label.clear();
+        root.bounds =
+            pf_scene::Bounds::new(0.0, 0.0, metrics.logical_width, metrics.logical_height);
+        root.children = vec![node];
+        root
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TextOverflowExemption {
+        HorizontalPreviewClip,
+        SingleFringeRow,
+    }
+
+    fn allowed_text_overflow(node: &Node) -> Option<TextOverflowExemption> {
+        match node.id.as_str() {
+            // The unavailable-card caption uses a fixed 20px footer line box. Its
+            // glyph body is complete, but one anti-aliased fringe row is clipped
+            // deliberately to preserve the ratcheted card composition.
+            "home-card-reason-steam-link" | "library-card-reason-steam-link" => {
+                Some(TextOverflowExemption::SingleFringeRow)
+            }
+            // These compact trailing controls are deliberately horizontal previews:
+            // Safe Return shows a potentially long binding, SSIDs are unbounded
+            // external strings, and the device/storage descriptor mirrors explanatory
+            // parent-row content. Each complete value remains in its parent row's
+            // accessible label; only horizontal clipping is exempted here.
+            "settings-row-controls-safe-return-control"
+            | "settings-row-network-ssid-control"
+            | "settings-row-system-device-control" => {
+                Some(TextOverflowExemption::HorizontalPreviewClip)
+            }
+            _ => None,
+        }
+    }
+
+    fn declared_multiline(node: &Node) -> bool {
+        // Absolute-positioned shell text does not participate in layout, so this
+        // otherwise-unused constraint is a scene-carried declaration rather than
+        // an inference from the node id, geometry, or current copy. The shell-core
+        // constructor helper documents each deliberate use at its declaration.
+        node.layout.is_none() && node.bounds.max_height == Some(f32::INFINITY)
+    }
+
+    // Keep one rasterizer for the whole blanket pass so cosmic-text's font and
+    // glyph caches survive across node probes.
+    let mut rasterizer = Rasterizer::new();
+    rasterizer.set_theme_base(base);
+    rasterizer
+        .set_text_scale(f32::from(text_scale) / 100.0)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let mut render = |root: Node, render_metrics: SurfaceMetrics| -> Result<RasterFrame, String> {
+        let root_id = root.id.clone();
+        let isolated = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
+        rasterizer
+            .render(&isolated, render_metrics)
+            .map_err(|error| format!("render: {error:?}"))
+    };
+
+    let mut ink_extent = |node: Node| -> Result<(usize, usize), String> {
+        // Render only the isolated node's local envelope. Rendering every probe at
+        // the evidence surface size made this blanket guard scale with route area
+        // as well as node count (and exceeded a minute per route at 1280x720).
+        let render_metrics = SurfaceMetrics {
+            logical_width: (node.bounds.x + node.bounds.width).ceil().max(1.0) + 1.0,
+            logical_height: (node.bounds.y + node.bounds.height).ceil().max(1.0) + 1.0,
+            safe_insets: Insets::default(),
+            ..metrics
+        };
+        let mut blank = node.clone();
+        blank.role = Role::Group;
+        let painted = render(isolated_root(scene, node, render_metrics), render_metrics)?;
+        let blank = render(isolated_root(scene, blank, render_metrics), render_metrics)?;
+        let frame_width = painted.width as usize;
+        let mut columns = std::collections::BTreeSet::new();
+        let mut rows = std::collections::BTreeSet::new();
+        for (pixel, (ink, blank)) in painted
+            .rgba
+            .chunks_exact(4)
+            .zip(blank.rgba.chunks_exact(4))
+            .enumerate()
+        {
+            if ink != blank {
+                columns.insert(pixel % frame_width);
+                rows.insert(pixel / frame_width);
+            }
+        }
+        Ok((columns.len(), rows.len()))
+    };
+
+    let mut nodes = Vec::new();
+    text_nodes(scene.root(), &mut nodes);
+    let mut failures = Vec::new();
+    // Evidence frames repeat the same shared chrome on every route. Guard each
+    // exact node/render configuration once per process; route-specific nodes still
+    // receive their own pass because bounds, content, or state change the key.
+    static PASSED_NODES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let passed_nodes = PASSED_NODES.get_or_init(Default::default);
+    for node in nodes {
+        let cache_key = format!("{node:?}|{metrics:?}|{base:?}|{text_scale}");
+        if passed_nodes.lock().unwrap().contains(&cache_key) {
+            continue;
+        }
+        let failure_count = failures.len();
+        // Give both renders ample room without changing either fractional origin.
+        // Integer translation preserves the production raster phase.
+        let mut positioned = node.clone();
+        positioned.bounds.x += 256.0 - node.bounds.x.floor();
+        positioned.bounds.y += 128.0 - node.bounds.y.floor();
+        let (actual_columns, actual_rows) = ink_extent(positioned.clone())?;
+        let mut generous = positioned.clone();
+        // Centered text uses (width - advance) / 2. Widening by an even delta
+        // shifts it by an integer 128 px and preserves cosmic-text's raster phase.
+        generous.bounds.x -= 128.0;
+        generous.bounds.width = node.bounds.width + 256.0;
+        let (generous_columns, generous_width_rows) = ink_extent(generous.clone())?;
+        let overflow_exemption = allowed_text_overflow(node);
+        if actual_rows > generous_width_rows && !declared_multiline(node) {
+            failures.push(format!(
+                "{}: width-induced wrap in text declared single-line; actual_rows={actual_rows}, generous_rows={generous_width_rows}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        } else if actual_rows <= generous_width_rows
+            && actual_columns != generous_columns
+            && overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip)
+        {
+            failures.push(format!(
+                "{}: incomplete painted ink columns; actual={actual_columns}, generous={generous_columns}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        }
+
+        // Removing the bottom clip is represented by a generous-height paired
+        // render. The even delta keeps centered text on an integral raster phase;
+        // row-count parity is translation-invariant and exposes hidden wraps.
+        // A horizontal-preview exemption must not turn the preview's intentional
+        // narrow-width wrapping into a vertical exemption. Test its height on the
+        // same widened, phase-stable box used by the width reference, so only the
+        // vertical dimension differs between the paired renders.
+        let (height_actual_rows, mut generous_height) =
+            if overflow_exemption == Some(TextOverflowExemption::HorizontalPreviewClip) {
+                (generous_width_rows, generous)
+            } else {
+                (actual_rows, positioned)
+            };
+        generous_height.bounds.y -= 128.0;
+        generous_height.bounds.height = node.bounds.height + 256.0;
+        let generous_rows = ink_extent(generous_height)?.1;
+        let height_difference_allowed = matches!(
+            overflow_exemption,
+            Some(TextOverflowExemption::SingleFringeRow)
+        ) && generous_rows >= height_actual_rows
+            && generous_rows - height_actual_rows <= 1;
+        if height_actual_rows != generous_rows && !height_difference_allowed {
+            failures.push(format!(
+                "{}: painted ink escaped the bottom clip; actual_rows={height_actual_rows}, generous_rows={generous_rows}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        }
+        if failures.len() == failure_count {
+            passed_nodes.lock().unwrap().insert(cache_key);
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "raster text paint containment guard failed:\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -2918,6 +3120,129 @@ mod durable_tests {
         let baseline_record =
             raster_guard_record(&scene, metrics, pf_theme::Base::Dusk, 100, true).unwrap();
         assert_eq!(baseline_record, format!("FAIL: {normal_error}"));
+    }
+
+    fn paint_containment_failure(id: &str, label: &str, bounds: pf_scene::Bounds) -> String {
+        paint_containment_result(id, label, bounds).unwrap_err()
+    }
+
+    fn paint_containment_result(
+        id: &str,
+        label: &str,
+        bounds: pf_scene::Bounds,
+    ) -> Result<(), String> {
+        let root_id = pf_scene::NodeId::new("paint-containment-fixture").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 400.0, 160.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new(id).unwrap(),
+                Role::Text,
+                label,
+                bounds,
+                "--color-transparent",
+            )
+            .with_ink_token("--state-rest-text"),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 400.0,
+            logical_height: 160.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        assert_raster_text_paint_contained_and_complete(&scene, metrics, pf_theme::Base::Dusk, 100)
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_too_narrow_text_node() {
+        let failure = paint_containment_failure(
+            "r10-too-narrow-label",
+            "Recently played expedition",
+            pf_scene::Bounds::new(20.0, 20.0, 56.0, 48.0),
+        );
+        assert!(failure.contains("r10-too-narrow-label"), "{failure}");
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_wrap_into_bottom_clip() {
+        let failure = paint_containment_failure(
+            "chrome-r1-wrapped-label",
+            "Accessibility and controller settings",
+            pf_scene::Bounds::new(20.0, 20.0, 120.0, 18.0),
+        );
+        assert!(failure.contains("chrome-r1-wrapped-label"), "{failure}");
+    }
+
+    #[test]
+    fn blanket_paint_guard_rejects_visible_width_wrap_unless_declared_multiline() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 120.0, 80.0);
+        let failure = paint_containment_failure(
+            "single-line-intent-wrapped-label",
+            "Accessibility and controller settings",
+            bounds,
+        );
+        assert!(
+            failure.contains("single-line-intent-wrapped-label"),
+            "{failure}"
+        );
+        assert!(failure.contains("width-induced wrap"), "{failure}");
+
+        let mut multiline_bounds = bounds;
+        multiline_bounds.max_height = Some(f32::INFINITY);
+        paint_containment_result(
+            "declared-multiline-label",
+            "Accessibility and controller settings",
+            multiline_bounds,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blanket_paint_guard_catches_inset_less_width() {
+        let failure = paint_containment_failure(
+            "runtime-r4-inset-less-label",
+            "Battery unavailable",
+            pf_scene::Bounds::new(20.0, 20.0, 72.0, 32.0),
+        );
+        assert!(failure.contains("runtime-r4-inset-less-label"), "{failure}");
+    }
+
+    #[test]
+    fn horizontal_preview_exemption_does_not_hide_bottom_clip() {
+        let failure = paint_containment_failure(
+            "settings-row-network-ssid-control",
+            "PocketForge workshop network",
+            pf_scene::Bounds::new(20.0, 20.0, 120.0, 10.0),
+        );
+        assert!(
+            failure.contains("settings-row-network-ssid-control"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains("painted ink escaped the bottom clip"),
+            "horizontal preview exemption must not suppress height containment: {failure}"
+        );
+    }
+
+    #[test]
+    fn single_fringe_row_exemption_rejects_larger_bottom_clip() {
+        let failure = paint_containment_failure(
+            "home-card-reason-steam-link",
+            "Steam Link unavailable",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 1.0),
+        );
+        assert!(failure.contains("home-card-reason-steam-link"), "{failure}");
+        assert!(
+            failure.contains("painted ink escaped the bottom clip"),
+            "single-fringe exemption must reject divergence beyond one row: {failure}"
+        );
     }
 
     #[test]

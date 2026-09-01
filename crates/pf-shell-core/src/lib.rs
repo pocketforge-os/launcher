@@ -2800,13 +2800,8 @@ impl ShellCore {
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        if self.route == Route::Home {
-            rooms = home_rooms_layout(rooms, room_nodes, w);
-            children.push(rooms);
-        } else {
-            children.push(rooms);
-            children.extend(room_nodes);
-        }
+        rooms = rooms_layout(rooms, room_nodes, w);
+        children.push(rooms);
         if let Some(status) = self.session_status() {
             children.push(node(
                 "session-status",
@@ -2966,9 +2961,7 @@ impl ShellCore {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h);
         }
         children.push(prompt_node);
-        if self.route == Route::Home {
-            wrap_home_system_layout(&mut children, w);
-        }
+        wrap_system_layout(&mut children, w);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child);
@@ -2989,9 +2982,9 @@ impl ShellCore {
             COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_children(children);
+        #[cfg(test)]
+        let semantics_before = semantic_snapshot(&root);
         if self.route == Route::Home {
-            #[cfg(test)]
-            let semantics_before = semantic_snapshot(&root);
             resolve_layout(
                 &mut root,
                 metrics,
@@ -2999,9 +2992,24 @@ impl ShellCore {
                 &Rasterizer::new(),
                 &mut LayoutCache::default(),
             );
-            #[cfg(test)]
-            assert_eq!(semantic_snapshot(&root), semantics_before);
+        } else {
+            for child in &mut root.children {
+                if matches!(
+                    child.id.as_str(),
+                    "rooms-layout-anchor" | "system-status-layout-anchor"
+                ) {
+                    resolve_layout(
+                        child,
+                        metrics,
+                        f32::from(self.text_scale) / 100.0,
+                        &Rasterizer::new(),
+                        &mut LayoutCache::default(),
+                    );
+                }
+            }
         }
+        #[cfg(test)]
+        assert_eq!(semantic_snapshot(&root), semantics_before);
         apply_quiet_console_radius(&mut root, radius_scale);
         Some(
             Scene::new(root, NodeId::new(focus_id).unwrap())
@@ -6031,7 +6039,7 @@ fn fixed_layout(width: f32, height: f32) -> LayoutStyle {
     }
 }
 
-fn wrap_home_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
+fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
     let system_id = |id: &str| {
         matches!(
             id,
@@ -6095,13 +6103,14 @@ fn wrap_home_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
     nodes.insert(insertion, cluster);
 }
 
-fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> Node {
-    let mut nodes = nodes.into_iter();
-    let mut take = |expected: &str| {
-        let node = nodes.next().expect("complete Home rooms subtree");
-        assert_eq!(node.id.as_str(), expected);
-        node
-    };
+fn rooms_layout(mut rooms: Node, mut nodes: Vec<Node>, surface_width: f32) -> Node {
+    fn take(nodes: &mut Vec<Node>, expected: &str) -> Node {
+        let index = nodes
+            .iter()
+            .position(|node| node.id.as_str() == expected)
+            .unwrap_or_else(|| panic!("complete rooms subtree must contain {expected}"));
+        nodes.remove(index)
+    }
 
     let keycap = |mut border: Node, mut fill: Node, mut label: Node| {
         border.layout = Some(LayoutStyle {
@@ -6156,22 +6165,34 @@ fn home_rooms_layout(mut rooms: Node, nodes: Vec<Node>, surface_width: f32) -> N
     };
 
     let left = keycap(
-        take("room-keycap-left-border"),
-        take("room-keycap-left-fill"),
-        take("room-keycap-left"),
+        take(&mut nodes, "room-keycap-left-border"),
+        take(&mut nodes, "room-keycap-left-fill"),
+        take(&mut nodes, "room-keycap-left"),
     );
-    let home = take("room-home");
-    let home = room(home, Some(take("room-home-underline")));
-    let library = take("room-library");
-    let library = room(library, None);
-    let settings = take("room-settings");
-    let settings = room(settings, None);
+    let home = take(&mut nodes, "room-home");
+    let home_underline = nodes
+        .iter()
+        .any(|node| node.id.as_str() == "room-home-underline")
+        .then(|| take(&mut nodes, "room-home-underline"));
+    let home = room(home, home_underline);
+    let library = take(&mut nodes, "room-library");
+    let library_underline = nodes
+        .iter()
+        .any(|node| node.id.as_str() == "room-library-underline")
+        .then(|| take(&mut nodes, "room-library-underline"));
+    let library = room(library, library_underline);
+    let settings = take(&mut nodes, "room-settings");
+    let settings_underline = nodes
+        .iter()
+        .any(|node| node.id.as_str() == "room-settings-underline")
+        .then(|| take(&mut nodes, "room-settings-underline"));
+    let settings = room(settings, settings_underline);
     let right = keycap(
-        take("room-keycap-right-border"),
-        take("room-keycap-right-fill"),
-        take("room-keycap-right"),
+        take(&mut nodes, "room-keycap-right-border"),
+        take(&mut nodes, "room-keycap-right-fill"),
+        take(&mut nodes, "room-keycap-right"),
     );
-    assert!(nodes.next().is_none());
+    assert!(nodes.is_empty(), "rooms subtree contains unexpected nodes");
 
     let rooms_width = KEYCAP_MIN_WIDTH * 2.0
         + text_node_box_width(room_label_advance("Home"))
@@ -11030,6 +11051,10 @@ mod tests {
         ] {
             core.go(route);
             let scene = core.scene(metrics, "").unwrap();
+            assert!(
+                node_by_id(scene.root(), "rooms-layout-anchor").is_some(),
+                "{route:?} must render the status strip through the layout seam"
+            );
             for id in [
                 "room-home",
                 "room-library",
@@ -12539,80 +12564,95 @@ mod tests {
 
     #[test]
     fn chrome_room_strip_follows_css_geometry() {
-        let scene = core()
-            .scene(
-                SurfaceMetrics {
-                    logical_width: 1280.0,
-                    logical_height: 720.0,
-                    scale: 1.0,
-                    safe_insets: Default::default(),
-                    orientation: pf_scene::Orientation::Landscape,
-                },
-                "",
-            )
-            .unwrap();
-        let root = scene.root();
-        let rooms = node_by_id(root, "rooms").unwrap();
-        assert!((rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON);
-        assert!((rooms.bounds.y + rooms.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON);
-
-        let item_ids = [
-            "room-keycap-left-border",
-            "room-home",
-            "room-library",
-            "room-settings",
-            "room-keycap-right-border",
-        ];
-        for pair in item_ids.windows(2) {
-            let left = node_by_id(root, pair[0]).unwrap();
-            let right = node_by_id(root, pair[1]).unwrap();
-            let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = core();
+        for route in [Route::Home, Route::Library, Route::Settings] {
+            core.go(route);
+            let scene = core.scene(metrics, "").unwrap();
+            let root = scene.root();
             assert!(
-                (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
-                "{pair:?} gap={gap}"
+                node_by_id(root, "rooms-layout-anchor").is_some(),
+                "{route:?} must render the status strip through the layout seam"
             );
-        }
-
-        for (id, label) in [
-            ("room-home", "Home"),
-            ("room-library", "Library"),
-            ("room-settings", "Settings"),
-        ] {
-            let label_node = node_by_id(root, id).unwrap();
+            let rooms = node_by_id(root, "rooms").unwrap();
             assert!(
-                (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON
+                (rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON,
+                "{route:?} rooms bounds={:?}",
+                rooms.bounds
             );
-            if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
-                assert!((underline.bounds.width - room_label_advance(label)).abs() < f32::EPSILON);
+            assert!(
+                (rooms.bounds.y + rooms.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON,
+                "{route:?} rooms bounds={:?}",
+                rooms.bounds
+            );
+
+            let item_ids = [
+                "room-keycap-left-border",
+                "room-home",
+                "room-library",
+                "room-settings",
+                "room-keycap-right-border",
+            ];
+            for pair in item_ids.windows(2) {
+                let left = node_by_id(root, pair[0]).unwrap();
+                let right = node_by_id(root, pair[1]).unwrap();
+                let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
                 assert!(
-                    (underline.bounds.x + underline.bounds.width / 2.0
-                        - (label_node.bounds.x + label_node.bounds.width / 2.0))
-                        .abs()
-                        < f32::EPSILON
+                    (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
+                    "{pair:?} gap={gap}"
                 );
             }
-        }
 
-        for id in ["room-keycap-left", "room-keycap-right"] {
-            let border = node_by_id(root, &format!("{id}-border")).unwrap();
-            let glyph = node_by_id(root, id).unwrap();
-            assert_eq!(
-                (border.bounds.width, border.bounds.height),
-                (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
-            );
-            assert!(
-                (glyph.bounds.x + glyph.bounds.width / 2.0
-                    - (border.bounds.x + border.bounds.width / 2.0))
-                    .abs()
-                    <= 1.0
-            );
-            assert!(
-                (glyph.bounds.y + glyph.bounds.height / 2.0
-                    - (border.bounds.y + border.bounds.height / 2.0))
-                    .abs()
-                    <= 1.0
-            );
-            assert_eq!(glyph.text_align, TextAlign::Center);
+            for (id, label) in [
+                ("room-home", "Home"),
+                ("room-library", "Library"),
+                ("room-settings", "Settings"),
+            ] {
+                let label_node = node_by_id(root, id).unwrap();
+                assert!(
+                    (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs()
+                        < f32::EPSILON
+                );
+                if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                    assert!(
+                        (underline.bounds.width - room_label_advance(label)).abs() < f32::EPSILON
+                    );
+                    assert!(
+                        (underline.bounds.x + underline.bounds.width / 2.0
+                            - (label_node.bounds.x + label_node.bounds.width / 2.0))
+                            .abs()
+                            < f32::EPSILON
+                    );
+                }
+            }
+
+            for id in ["room-keycap-left", "room-keycap-right"] {
+                let border = node_by_id(root, &format!("{id}-border")).unwrap();
+                let glyph = node_by_id(root, id).unwrap();
+                assert_eq!(
+                    (border.bounds.width, border.bounds.height),
+                    (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+                );
+                assert!(
+                    (glyph.bounds.x + glyph.bounds.width / 2.0
+                        - (border.bounds.x + border.bounds.width / 2.0))
+                        .abs()
+                        <= 1.0
+                );
+                assert!(
+                    (glyph.bounds.y + glyph.bounds.height / 2.0
+                        - (border.bounds.y + border.bounds.height / 2.0))
+                        .abs()
+                        <= 1.0
+                );
+                assert_eq!(glyph.text_align, TextAlign::Center);
+            }
         }
     }
 

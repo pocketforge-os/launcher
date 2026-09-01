@@ -194,17 +194,17 @@ fn vertical_slice_frame_hashes_are_stable() {
         "f4dba3ca7fdc65e48ef3b1cf25932b000ced6e4ad5a2d0ffd4848a9c5e6dbf41  ",
         "eaa23861271950e47aae1ad0d93a6c8aee643c5adcaf5159203456c07aab1729  ",
         "02e04a6a158d4b65a8d0a73e14a6fcfd49e794ccbd3d2d137d4f420f8d8ef356  ",
-        "52acea3693899ad566b1301c16b974d936fbd0c8d8cb54d60cdc8d49b7a1f857  ",
+        "d2463e4b9f4480c09c78d0768768dad8034c0ac241092b395913d956f90187f1  ",
         // Library hashes intentionally rebaseline for the CSS flex row's natural-width
         // chips, divider-free 16px gaps, uniform selected border, and separator-free,
         // right-aligned prompt groups. These hashes include the unclipped chip and
         // prompt text; the approved design golden remains unchanged.
-        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
-        "a43589fabffecb2f0566567b2ba30e7d765fe929fd57f1d4fb5a61b80a7ab91d  ",
-        "9ca4687bd2b664a8ef17ca60a8142c4ad1b59e4a5f8f96c6bbafbe118997f693  ",
-        "8e2217a37cf99e82925caf7572b8b752e6173c4a39ad1e05dceaf1cc2c87cf79  ",
-        "49570b5761d8487b542c4886d81c46595084ff60968d5e53b285ad24ac71eb47  ",
-        "06991a457dfb28b14dd725f4b028ce92344b80cbe84954ff9c346eadd1708c25  ",
+        "a1a2be687bb6bd868e02a749c5b9cb61ef13f0dfae6777391013f36ccc941e6b  ",
+        "a1a2be687bb6bd868e02a749c5b9cb61ef13f0dfae6777391013f36ccc941e6b  ",
+        "852a51315b609d99667dc15385786ade287c6a16cf129e3d649d7da47b74da65  ",
+        "eca4ae82ff84c63e576f39046f05a9fee5c9df9a6a42c3771b0df1d8eb1560df  ",
+        "a7da805b0aa125d72622bd0156569f4ff0b650ecc8c9ef6616a1c890cc348b42  ",
+        "ee7df82cd08517b518c21acf047c86af4ce7f3e8c578a0ff89421cd46f907ff6  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
@@ -245,19 +245,19 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("e8a86aa8e934d6b4fd6f1c10e774ccdc8d57aae0ff385c7ceab64a70d1a94c1c  ")
+        transcript.contains("f495e4fa3a68323785b1c4c1941fe747994778ff54c66caddf5a453991a80ee2  ")
     );
     assert!(
-        transcript.contains("6280b745d96067738e519a2d25c4a517b0a02ab25aa0655719fd562dde0ebd5d  ")
+        transcript.contains("efb83dde696c5da6f46d6c5d818508f47e168d5478e0b05d4963bc8a64607907  ")
     );
     assert!(
-        transcript.contains("708578c894f705162d60c72056a32e8b5add474bd799754c531b4aa718051a3a  ")
+        transcript.contains("1ff0e5bb2f71981ffa2854ee7ea2b57f2269cbf21aa1639841e8ae48df9f0ba0  ")
     );
     assert!(
-        transcript.contains("6c345ac2580e69d6449ae92876d8e752bbdc3f6bedc04bfc9aad04882229228d  ")
+        transcript.contains("a369d031958855936f05bc0082e013ed6dc08691754479033e8ed7f321b11295  ")
     );
     assert!(
-        transcript.contains("38ae161596dfca2d70b353c1937f54feebd49de481e1fe6a2a2ad5eeb43c9cc9  ")
+        transcript.contains("ea60989f8ec936de71556eb09048bdb7700b614b1d8553851e7461852589adf8  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("controls.png").is_file());

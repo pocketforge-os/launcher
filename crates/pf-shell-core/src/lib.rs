@@ -84,19 +84,27 @@ fn label_text_width(text: &str) -> f32 {
     text.chars().count() as f32 * LABEL_GLYPH_ADVANCE
 }
 
-fn caption_text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE
+fn measured_text_advance(base_advance: f32, text_scale: u16) -> f32 {
+    base_advance * f32::from(text_scale) / 100.0
+}
+
+fn caption_text_width(text: &str, text_scale: u16) -> f32 {
+    measured_text_advance(
+        text.chars().count() as f32 * CAPTION_GLYPH_ADVANCE,
+        text_scale,
+    )
 }
 
 // Natural Manrope 14/600 advances for the finite room-strip vocabulary, measured
 // with the same Cosmic Text configuration that paints the Label role.
-fn room_label_advance(text: &str) -> f32 {
-    match text {
+fn room_label_advance(text: &str, text_scale: u16) -> f32 {
+    let base_advance = match text {
         "Home" => 43.0,
         "Library" => 50.0,
         "Settings" => 59.0,
         _ => label_text_width(text),
-    }
+    };
+    measured_text_advance(base_advance, text_scale)
 }
 
 // Natural Manrope 14/600 advances for the Library prompt verbs. These are measured
@@ -2701,7 +2709,7 @@ impl ShellCore {
                     &status_text,
                     battery_x + 32.0,
                     16.0,
-                    text_node_box_width(caption_text_width(&status_text)),
+                    text_node_box_width(caption_text_width(&status_text, self.text_scale)),
                     32.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -2800,7 +2808,7 @@ impl ShellCore {
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        rooms = rooms_layout(rooms, room_nodes, w);
+        rooms = rooms_layout(rooms, room_nodes, w, self.text_scale);
         children.push(rooms);
         if let Some(status) = self.session_status() {
             children.push(node(
@@ -6074,7 +6082,7 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
             "battery-cavity" => (148.0, 26.0, 18.0, 10.0),
             "battery-level" => (165.0 - node.bounds.width, 27.0, node.bounds.width, 8.0),
             "battery-terminal" => (142.0, 28.0, 2.0, 6.0),
-            "status-cluster" => (-16.0, 16.0, 152.0, 32.0),
+            "status-cluster" => (-16.0, 16.0, node.bounds.width.max(152.0), 32.0),
             _ => continue,
         };
         node.layout = Some(LayoutStyle {
@@ -6103,7 +6111,12 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
     nodes.insert(insertion, cluster);
 }
 
-fn rooms_layout(mut rooms: Node, mut nodes: Vec<Node>, surface_width: f32) -> Node {
+fn rooms_layout(
+    mut rooms: Node,
+    mut nodes: Vec<Node>,
+    surface_width: f32,
+    text_scale: u16,
+) -> Node {
     fn take(nodes: &mut Vec<Node>, expected: &str) -> Node {
         let index = nodes
             .iter()
@@ -6141,7 +6154,7 @@ fn rooms_layout(mut rooms: Node, mut nodes: Vec<Node>, surface_width: f32) -> No
         border
     };
     let room = |mut label: Node, underline: Option<Node>| {
-        let advance = room_label_advance(&label.accessible_label);
+        let advance = room_label_advance(&label.accessible_label, text_scale);
         let width = text_node_box_width(advance);
         label.layout = Some(LayoutStyle {
             ..fixed_layout(width, 32.0)
@@ -6195,9 +6208,9 @@ fn rooms_layout(mut rooms: Node, mut nodes: Vec<Node>, surface_width: f32) -> No
     assert!(nodes.is_empty(), "rooms subtree contains unexpected nodes");
 
     let rooms_width = KEYCAP_MIN_WIDTH * 2.0
-        + text_node_box_width(room_label_advance("Home"))
-        + text_node_box_width(room_label_advance("Library"))
-        + text_node_box_width(room_label_advance("Settings"))
+        + text_node_box_width(room_label_advance("Home", text_scale))
+        + text_node_box_width(room_label_advance("Library", text_scale))
+        + text_node_box_width(room_label_advance("Settings", text_scale))
         + ROOM_STRIP_GAP * 4.0;
     rooms.layout = Some(LayoutStyle {
         position: Position::Absolute,
@@ -10991,12 +11004,21 @@ mod tests {
                 .any(|child| mutate_label(child, id, label, width))
         }
 
-        fn label_ink(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> (usize, usize) {
-            let rendered = Rasterizer::new().render(scene, metrics).unwrap();
+        fn label_ink(
+            scene: &Scene,
+            id: &str,
+            metrics: SurfaceMetrics,
+            text_scale: u16,
+        ) -> (usize, usize) {
+            let mut rasterizer = Rasterizer::new();
+            rasterizer
+                .set_text_scale(f32::from(text_scale) / 100.0)
+                .unwrap();
+            let rendered = rasterizer.render(scene, metrics).unwrap();
             let mut blank_root = scene.root().clone();
             assert!(mutate_label(&mut blank_root, id, Some(""), None));
             let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
-            let blank = Rasterizer::new().render(&blank_scene, metrics).unwrap();
+            let blank = rasterizer.render(&blank_scene, metrics).unwrap();
             let mut columns = std::collections::BTreeSet::new();
             let mut rows = std::collections::BTreeSet::new();
             for (pixel, (painted, blank)) in rendered
@@ -11016,11 +11038,16 @@ mod tests {
             (columns.len(), rows.last().unwrap() - first_row)
         }
 
-        fn generous_ink_columns(scene: &Scene, id: &str, metrics: SurfaceMetrics) -> usize {
+        fn generous_ink_columns(
+            scene: &Scene,
+            id: &str,
+            metrics: SurfaceMetrics,
+            text_scale: u16,
+        ) -> usize {
             let mut root = scene.root().clone();
             assert!(mutate_label(&mut root, id, None, Some(300.0)));
             let generous = Scene::new(root, scene.default_focus().clone()).unwrap();
-            label_ink(&generous, id, metrics).0
+            label_ink(&generous, id, metrics, text_scale).0
         }
 
         let mut core = fixture_core(vec![item(
@@ -11040,34 +11067,40 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
-        for route in [
-            Route::Home,
-            Route::Library,
-            Route::Search,
-            Route::Details,
-            Route::VariantChooser,
-            Route::Settings,
-            Route::Quick,
-        ] {
-            core.go(route);
-            let scene = core.scene(metrics, "").unwrap();
-            assert!(
-                node_by_id(scene.root(), "rooms-layout-anchor").is_some(),
-                "{route:?} must render the status strip through the layout seam"
-            );
-            for id in [
-                "room-home",
-                "room-library",
-                "room-settings",
-                "status-cluster",
+        for text_scale in [100, 150, 200] {
+            core.text_scale = text_scale;
+            for route in [
+                Route::Home,
+                Route::Library,
+                Route::Search,
+                Route::Details,
+                Route::VariantChooser,
+                Route::Settings,
+                Route::Quick,
             ] {
-                let (columns, row_span) = label_ink(&scene, id, metrics);
-                assert_eq!(
-                    columns,
-                    generous_ink_columns(&scene, id, metrics),
-                    "{id} must paint every unclipped ink column on {route:?}"
+                core.go(route);
+                let scene = core.scene(metrics, "").unwrap();
+                assert!(
+                    node_by_id(scene.root(), "rooms-layout-anchor").is_some(),
+                    "{route:?} must render the status strip through the layout seam"
                 );
-                assert!(row_span < 16, "{id} must stay on one text row on {route:?}");
+                for id in [
+                    "room-home",
+                    "room-library",
+                    "room-settings",
+                    "status-cluster",
+                ] {
+                    let (columns, row_span) = label_ink(&scene, id, metrics, text_scale);
+                    assert_eq!(
+                        columns,
+                        generous_ink_columns(&scene, id, metrics, text_scale),
+                        "{id} must paint every unclipped ink column on {route:?} at {text_scale}%"
+                    );
+                    assert!(
+                        row_span < 16 * text_scale as usize / 100,
+                        "{id} must stay on one text row on {route:?} at {text_scale}%"
+                    );
+                }
             }
         }
     }
@@ -12621,7 +12654,8 @@ mod tests {
                 );
                 if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
                     assert!(
-                        (underline.bounds.width - room_label_advance(label)).abs() < f32::EPSILON
+                        (underline.bounds.width - room_label_advance(label, 100)).abs()
+                            < f32::EPSILON
                     );
                     assert!(
                         (underline.bounds.x + underline.bounds.width / 2.0

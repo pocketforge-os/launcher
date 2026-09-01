@@ -6395,7 +6395,16 @@ fn home_prompt_nodes(
         (KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0) * scale
     }
 
-    fn outline(prefix: &str, x: f32, y: f32, width: f32, height: f32) -> Node {
+    fn outline(
+        prefix: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        wide: bool,
+        scale: f32,
+    ) -> Node {
+        let radius = if wide { RADIUS_S * scale } else { height / 2.0 };
         node(
             &format!("{prefix}-border"),
             Role::Group,
@@ -6406,7 +6415,7 @@ fn home_prompt_nodes(
             height,
             SCENE_TRANSPARENT_TOKEN,
         )
-        .with_corner_radius(height / 2.0)
+        .with_corner_radius(radius)
         .with_border(COLOR_BORDER_STRONG_TOKEN, KEYCAP_BORDER_WIDTH)
     }
 
@@ -6435,7 +6444,15 @@ fn home_prompt_nodes(
         }
         let binding_width = binding_width(binding, scale);
         let prefix = format!("home-prompt-keycap-{index}");
-        nodes.push(outline(&prefix, x, y, binding_width, keycap_height));
+        nodes.push(outline(
+            &prefix,
+            x,
+            y,
+            binding_width,
+            keycap_height,
+            binding.chars().count() > 1,
+            scale,
+        ));
         nodes.push(
             node(
                 &prefix,

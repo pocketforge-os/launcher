@@ -3451,6 +3451,7 @@ mod durable_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn prompt_row_reflows_when_text_scale_changes_through_shell_actions() {
         fn assert_prompt_guard(core: &ShellCore, metrics: SurfaceMetrics) {
             fn find_prompt(node: &Node) -> Option<&Node> {
@@ -3467,6 +3468,8 @@ mod durable_tests {
             let expected_height = 32.0 * scale;
             assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
             assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
+            let mut saw_single_letter_keycap = false;
+            let mut saw_wide_keycap = false;
             for keycap in prompt.children.iter().filter(|node| {
                 let id = node.id.as_str();
                 id.starts_with("home-prompt-keycap-") && !id.ends_with("-border")
@@ -3479,10 +3482,22 @@ mod durable_tests {
                     .expect("each prompt keycap label has a border");
                 let expected_keycap_height = 24.0 * scale;
                 assert!((border.bounds.height - expected_keycap_height).abs() < f32::EPSILON);
+                let expected_radius = if keycap.accessible_label.chars().count() > 1 {
+                    saw_wide_keycap = true;
+                    6.0 * scale
+                } else {
+                    saw_single_letter_keycap = true;
+                    expected_keycap_height / 2.0
+                };
+                assert!((border.corner_radius - expected_radius).abs() < f32::EPSILON);
                 assert!((keycap.bounds.x - border.bounds.x).abs() < f32::EPSILON);
                 assert!((keycap.bounds.y - border.bounds.y).abs() < f32::EPSILON);
                 assert!((keycap.bounds.width - border.bounds.width).abs() < f32::EPSILON);
                 assert!((keycap.bounds.height - border.bounds.height).abs() < f32::EPSILON);
+            }
+            if !prompt.children.is_empty() {
+                assert!(saw_single_letter_keycap);
+                assert!(saw_wide_keycap);
             }
             let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
             let root = Node::new(

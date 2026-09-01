@@ -2363,6 +2363,28 @@ fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
     Ok(())
 }
 
+fn occlusion_isolate_node_path(current: &Node, replacement: &Node) -> Option<Node> {
+    if current.id == replacement.id {
+        return Some(replacement.clone());
+    }
+
+    let child = current
+        .children
+        .iter()
+        .find_map(|child| occlusion_isolate_node_path(child, replacement))?;
+    let mut ancestor = current.clone();
+    ancestor.role = Role::Group;
+    ancestor.accessible_label.clear();
+    ancestor.style_token = "--color-transparent".into();
+    ancestor.content = pf_scene::NodeContent::Label;
+    ancestor.ink_token = None;
+    ancestor.border_token = None;
+    ancestor.border_width = 0.0;
+    ancestor.elevation = pf_scene::Elevation::None;
+    ancestor.children = vec![child];
+    Some(ancestor)
+}
+
 // Render surfaces are far smaller than f32's exact-integer range.
 #[allow(clippy::cast_precision_loss)]
 fn occlusion_text_ink_bounds(
@@ -2371,16 +2393,17 @@ fn occlusion_text_ink_bounds(
     metrics: SurfaceMetrics,
     node: &Node,
 ) -> Result<Option<pf_scene::Bounds>, String> {
-    let mut root = scene.root().clone();
-    root.role = Role::Group;
-    root.accessible_label.clear();
-    root.children = vec![node.clone()];
+    let mut root = occlusion_isolate_node_path(scene.root(), node)
+        .ok_or_else(|| format!("{}: missing from scene tree", node.id.as_str()))?;
     let root_id = root.id.clone();
     let painted_scene =
         pf_scene::Scene::new(root.clone(), root_id.clone()).map_err(|error| error.to_string())?;
     let mut blank = node.clone();
     blank.role = Role::Group;
-    root.children = vec![blank];
+    blank.accessible_label.clear();
+    blank.content = pf_scene::NodeContent::Label;
+    root = occlusion_isolate_node_path(scene.root(), &blank)
+        .ok_or_else(|| format!("{}: missing from scene tree", node.id.as_str()))?;
     let blank_scene = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
     let painted = rasterizer
         .render(&painted_scene, metrics)
@@ -4030,6 +4053,60 @@ mod durable_tests {
         assert!(
             failure.contains("grown-hero-title")
                 && failure.contains("fixed-hero-status")
+                && failure.contains("foreign text"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_preserves_pressed_ancestor_transform_for_text_ink() {
+        let root_id = pf_scene::NodeId::new("transformed-text-occlusion-probe").unwrap();
+        let mut pressed_group = Node::new(
+            pf_scene::NodeId::new("pressed-offset-group").unwrap(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(180.0, 20.0, 20.0, 48.0),
+            "--color-transparent",
+        );
+        pressed_group.state.pressed = true;
+        pressed_group.children = vec![Node::new(
+            pf_scene::NodeId::new("transformed-label").unwrap(),
+            Role::Text,
+            "Shift",
+            pf_scene::Bounds::new(20.0, 20.0, 100.0, 48.0),
+            "--color-transparent",
+        )];
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            pressed_group,
+            Node::new(
+                pf_scene::NodeId::new("stationary-label").unwrap(),
+                Role::Text,
+                "X",
+                pf_scene::Bounds::new(70.0, 20.0, 40.0, 48.0),
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("transformed-label")
+                && failure.contains("stationary-label")
                 && failure.contains("foreign text"),
             "unexpected guard verdict: {failure}"
         );

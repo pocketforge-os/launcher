@@ -19,7 +19,7 @@ use pf_ports::{
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
-use pf_render::{RasterFrame, RenderNote};
+use pf_render::{RasterFrame, Rasterizer, RenderNote};
 use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
 use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
@@ -2227,11 +2227,6 @@ fn assert_raster_text_paint_contained_and_complete(
     base: pf_theme::Base,
     text_scale: u16,
 ) -> Result<(), String> {
-    let guard_metrics = SurfaceMetrics {
-        logical_width: metrics.logical_width + 512.0,
-        logical_height: metrics.logical_height + 256.0,
-        ..metrics
-    };
     fn text_nodes<'a>(node: &'a Node, nodes: &mut Vec<&'a Node>) {
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
@@ -2243,46 +2238,74 @@ fn assert_raster_text_paint_contained_and_complete(
         }
     }
 
-    fn isolated_root(scene: &pf_scene::Scene, node: Node) -> Node {
+    fn isolated_root(scene: &pf_scene::Scene, node: Node, metrics: SurfaceMetrics) -> Node {
         let mut root = scene.root().clone();
         root.role = Role::Group;
         root.accessible_label.clear();
-        root.bounds.width += 512.0;
-        root.bounds.height += 256.0;
+        root.bounds =
+            pf_scene::Bounds::new(0.0, 0.0, metrics.logical_width, metrics.logical_height);
         root.children = vec![node];
         root
     }
 
-    fn deliberate_vertical_overflow(node: &Node) -> Option<&'static str> {
+    fn allowed_text_overflow(node: &Node) -> Option<&'static str> {
         match node.id.as_str() {
-            // The unavailable Steam Link card's 20px caption line box intentionally
-            // clips one anti-aliased fringe row to stay inside the fixed card footer.
-            // Its full glyph body remains present; the route-level visual is frozen.
+            // The unavailable-card caption uses a fixed 20px footer line box. Its
+            // glyph body is complete, but one anti-aliased fringe row is clipped
+            // deliberately to preserve the ratcheted card composition.
             "home-card-reason-steam-link" | "library-card-reason-steam-link" => {
-                Some("fixed card-footer AA fringe clip")
+                Some("fixed unavailable-card footer clips one anti-aliased fringe row")
             }
+            // The disabled Safe Return row deliberately presents the device's
+            // potentially long binding as a clipped trailing-control preview; the
+            // complete binding remains available in the row's accessible label.
+            "settings-row-controls-safe-return-control" => {
+                Some("fixed-width trailing-control preview; full binding is on the parent row")
+            }
+            // SSIDs are unbounded external strings. The row intentionally shows a
+            // clipped trailing preview while retaining the complete SSID in the
+            // parent row's accessible label.
+            "settings-row-network-ssid-control" => {
+                Some("fixed-width trailing-control preview; full SSID is on the parent row")
+            }
+            // The device/storage descriptor is explanatory parent-row content,
+            // mirrored into the compact trailing-control slot as a preview.
+            "settings-row-system-device-control" => Some(
+                "fixed-width trailing-control preview; full device descriptor is on the parent row",
+            ),
             _ => None,
         }
     }
 
-    let render = |root: Node| -> Result<RasterFrame, String> {
+    // Keep one rasterizer for the whole blanket pass so cosmic-text's font and
+    // glyph caches survive across node probes.
+    let mut rasterizer = Rasterizer::new();
+    rasterizer.set_theme_base(base);
+    rasterizer
+        .set_text_scale(f32::from(text_scale) / 100.0)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let mut render = |root: Node, render_metrics: SurfaceMetrics| -> Result<RasterFrame, String> {
         let root_id = root.id.clone();
         let isolated = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
-        let mut host = OffscreenHost::new(guard_metrics);
-        host.set_theme_base(base);
-        host.set_text_scale(f32::from(text_scale) / 100.0)
-            .map_err(|error| format!("render: {error:?}"))?;
-        host.present(&isolated).map_err(|error| error.to_string())?;
-        host.frame()
-            .cloned()
-            .ok_or("raster guard frame missing".into())
+        rasterizer
+            .render(&isolated, render_metrics)
+            .map_err(|error| format!("render: {error:?}"))
     };
 
-    let ink_extent = |node: Node| -> Result<(usize, usize), String> {
+    let mut ink_extent = |node: Node| -> Result<(usize, usize), String> {
+        // Render only the isolated node's local envelope. Rendering every probe at
+        // the evidence surface size made this blanket guard scale with route area
+        // as well as node count (and exceeded a minute per route at 1280x720).
+        let render_metrics = SurfaceMetrics {
+            logical_width: (node.bounds.x + node.bounds.width).ceil().max(1.0) + 1.0,
+            logical_height: (node.bounds.y + node.bounds.height).ceil().max(1.0) + 1.0,
+            safe_insets: Insets::default(),
+            ..metrics
+        };
         let mut blank = node.clone();
         blank.role = Role::Group;
-        let painted = render(isolated_root(scene, node))?;
-        let blank = render(isolated_root(scene, blank))?;
+        let painted = render(isolated_root(scene, node, render_metrics), render_metrics)?;
+        let blank = render(isolated_root(scene, blank, render_metrics), render_metrics)?;
         let frame_width = painted.width as usize;
         let mut columns = std::collections::BTreeSet::new();
         let mut rows = std::collections::BTreeSet::new();
@@ -2329,7 +2352,10 @@ fn assert_raster_text_paint_contained_and_complete(
         let (generous_columns, generous_width_rows) = ink_extent(generous)?;
         // A deliberately multiline node changes column occupancy when widened;
         // its completeness is governed by the height comparison below instead.
-        if actual_rows <= generous_width_rows && actual_columns != generous_columns {
+        if actual_rows <= generous_width_rows
+            && actual_columns != generous_columns
+            && allowed_text_overflow(node).is_none()
+        {
             failures.push(format!(
                 "{}: incomplete painted ink columns; actual={actual_columns}, generous={generous_columns}, bounds={:?}",
                 node.id.as_str(), node.bounds
@@ -2343,7 +2369,7 @@ fn assert_raster_text_paint_contained_and_complete(
         generous_height.bounds.y -= 128.0;
         generous_height.bounds.height = node.bounds.height + 256.0;
         let generous_rows = ink_extent(generous_height)?.1;
-        if actual_rows != generous_rows && deliberate_vertical_overflow(node).is_none() {
+        if actual_rows != generous_rows && allowed_text_overflow(node).is_none() {
             failures.push(format!(
                 "{}: painted ink escaped the bottom clip; actual_rows={actual_rows}, generous_rows={generous_rows}, bounds={:?}",
                 node.id.as_str(), node.bounds

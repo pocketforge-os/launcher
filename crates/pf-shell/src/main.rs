@@ -3033,11 +3033,12 @@ mod durable_tests {
         fn assert_scene_invariants(&self) {
             let scene = self.scene();
             ensure_action_labels(&scene).unwrap();
-            assert_raster_text_legible(
+            raster_guard_record(
                 &scene,
                 self.metrics,
                 self.core.theme_base(),
                 self.core.text_scale(),
+                false,
             )
             .unwrap();
         }

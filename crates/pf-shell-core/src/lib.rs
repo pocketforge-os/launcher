@@ -2312,6 +2312,7 @@ impl ShellCore {
         match self.route {
             Route::Home => self.go(Route::Library),
             Route::Library => self.go(Route::Settings),
+            Route::Settings => self.go(Route::Home),
             _ => {}
         }
     }
@@ -2319,6 +2320,7 @@ impl ShellCore {
         match self.route {
             Route::Settings => self.go(Route::Library),
             Route::Library => self.go(Route::Home),
+            Route::Home => self.go(Route::Settings),
             _ => {}
         }
     }

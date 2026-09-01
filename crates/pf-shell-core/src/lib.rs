@@ -3261,7 +3261,11 @@ impl ShellCore {
                     344.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(hero_wash_source(), ImageFit::Cover),
+                .with_image(hero_wash_source(), ImageFit::Cover)
+                // The wash is the ambient image beneath the whole hero composition,
+                // not foreign foreground content. Keep that role explicit in the
+                // scene graph so paint-order guards never have to infer it by id.
+                .with_ink_token("--scene-underlay-role"),
                 heading,
                 node(
                     "hero-title",

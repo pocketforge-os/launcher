@@ -2206,7 +2206,7 @@ fn raster_guard_record(
     text_scale_percent: u16,
     baseline_record_only: bool,
 ) -> Result<String, String> {
-    match assert_scene_occlusion_safe(scene, base)
+    match assert_scene_occlusion_safe(scene, metrics, base, text_scale_percent)
         .and_then(|()| {
             assert_raster_text_paint_contained_and_complete(
                 scene,
@@ -2224,11 +2224,14 @@ fn raster_guard_record(
 }
 
 const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
+const UNDERLAY_ROLE_MARKER: &str = "--scene-underlay-role";
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn assert_scene_occlusion_safe(
     scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
     base: pf_theme::Base,
+    text_scale: u16,
 ) -> Result<(), String> {
     struct PaintedNode<'a> {
         node: &'a Node,
@@ -2272,6 +2275,10 @@ fn assert_scene_occlusion_safe(
 
     fn declares_overlay(node: &Node) -> bool {
         node.ink_token.as_deref() == Some(OVERLAY_ROLE_MARKER)
+    }
+
+    fn declares_underlay(node: &Node) -> bool {
+        node.ink_token.as_deref() == Some(UNDERLAY_ROLE_MARKER)
     }
 
     fn opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
@@ -2326,6 +2333,63 @@ fn assert_scene_occlusion_safe(
         assert_fade_is_declared_gradient(fade.node)?;
     }
 
+    // Text line boxes deliberately include padding for layout and focus geometry.
+    // Compare the pixels the renderer actually paints, not those padded boxes.
+    let mut rasterizer = Rasterizer::new();
+    rasterizer.set_theme_base(base);
+    rasterizer
+        .set_text_scale(f32::from(text_scale) / 100.0)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let mut text_ink_bounds = |node: &Node| -> Result<Option<pf_scene::Bounds>, String> {
+        let mut root = scene.root().clone();
+        root.role = Role::Group;
+        root.accessible_label.clear();
+        root.children = vec![node.clone()];
+        let root_id = root.id.clone();
+        let painted_scene = pf_scene::Scene::new(root.clone(), root_id.clone())
+            .map_err(|error| error.to_string())?;
+        let mut blank = node.clone();
+        blank.role = Role::Group;
+        root.children = vec![blank];
+        let blank_scene = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
+        let painted = rasterizer
+            .render(&painted_scene, metrics)
+            .map_err(|error| format!("render: {error:?}"))?;
+        let blank = rasterizer
+            .render(&blank_scene, metrics)
+            .map_err(|error| format!("render: {error:?}"))?;
+        let width = painted.width as usize;
+        let mut extent: Option<(usize, usize, usize, usize)> = None;
+        for (pixel, (ink, background)) in painted
+            .rgba
+            .chunks_exact(4)
+            .zip(blank.rgba.chunks_exact(4))
+            .enumerate()
+        {
+            if ink == background {
+                continue;
+            }
+            let (x, y) = (pixel % width, pixel / width);
+            extent = Some(extent.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
+                (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+            }));
+        }
+        Ok(extent.map(|(min_x, min_y, max_x, max_y)| {
+            pf_scene::Bounds::new(
+                min_x as f32,
+                min_y as f32,
+                (max_x - min_x + 1) as f32,
+                (max_y - min_y + 1) as f32,
+            )
+        }))
+    };
+
+    let mut ink_bounds_by_id = BTreeMap::new();
+    for entry in &nodes {
+        if is_text(entry.node) {
+            ink_bounds_by_id.insert(entry.node.id.as_str(), text_ink_bounds(entry.node)?);
+        }
+    }
     let mut failures = Vec::new();
     for (later_index, later) in nodes.iter().enumerate() {
         for earlier in &nodes[..later_index] {
@@ -2333,6 +2397,7 @@ fn assert_scene_occlusion_safe(
                 continue;
             }
             if is_content(earlier.node)
+                && !declares_underlay(earlier.node)
                 && opaque_fill(later.node, base)
                 && !declares_overlay(later.node)
             {
@@ -2346,6 +2411,9 @@ fn assert_scene_occlusion_safe(
                 && is_text(later.node)
                 && !declares_overlay(earlier.node)
                 && !declares_overlay(later.node)
+                && ink_bounds_by_id[earlier.node.id.as_str()]
+                    .zip(ink_bounds_by_id[later.node.id.as_str()])
+                    .is_some_and(|(earlier_ink, later_ink)| intersects(earlier_ink, later_ink))
             {
                 failures.push(format!(
                     "text {} intersects foreign text {}",
@@ -3819,7 +3887,15 @@ mod durable_tests {
         ]);
         let scene = pf_scene::Scene::new(root, root_id).unwrap();
 
-        let failure = assert_scene_occlusion_safe(&scene, pf_theme::Base::Dusk).unwrap_err();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
         assert!(
             failure.contains("invented-prompt-panel")
                 && failure.contains("foreign-card-title")
@@ -3850,13 +3926,21 @@ mod durable_tests {
                 pf_scene::NodeId::new("fixed-hero-status").unwrap(),
                 Role::Text,
                 "Ready",
-                pf_scene::Bounds::new(20.0, 70.0, 100.0, 30.0),
+                pf_scene::Bounds::new(20.0, 20.0, 260.0, 64.0),
                 "--color-transparent",
             ),
         ]);
         let scene = pf_scene::Scene::new(root, root_id).unwrap();
 
-        let failure = assert_scene_occlusion_safe(&scene, pf_theme::Base::Dusk).unwrap_err();
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
         assert!(
             failure.contains("grown-hero-title")
                 && failure.contains("fixed-hero-status")

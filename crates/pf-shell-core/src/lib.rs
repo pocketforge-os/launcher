@@ -47,10 +47,11 @@ use design_generated::{
     COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
     KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
     LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
-    RADIUS_S, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7,
-    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
-    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
-    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3,
+    SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
+    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
+    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
+    STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -121,6 +122,10 @@ fn library_prompt_verb_width(text: &str) -> f32 {
 
 fn text_node_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * TEXT_NODE_INLINE_INSET
+}
+
+fn room_label_box_width(content_advance: f32) -> f32 {
+    content_advance + 2.0 * ROOM_HORIZONTAL_PADDING
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
@@ -6155,17 +6160,20 @@ fn rooms_layout(
     };
     let room = |mut label: Node, underline: Option<Node>| {
         let advance = room_label_advance(&label.accessible_label, text_scale);
-        let width = text_node_box_width(advance);
+        let width = room_label_box_width(advance);
         label.layout = Some(LayoutStyle {
             ..fixed_layout(width, 32.0)
         });
+        // Center alignment paints into the full node width. Start alignment reserves
+        // the renderer's larger inline inset, which is not part of the room CSS box.
+        label.text_align = TextAlign::Center;
         if let Some(mut underline) = underline {
             underline.layout = Some(LayoutStyle {
                 position: Position::Absolute,
                 inset: Edges {
                     top: LayoutValue::Px(33.0),
                     bottom: LayoutValue::Auto,
-                    left: LayoutValue::Px(TEXT_NODE_INLINE_INSET),
+                    left: LayoutValue::Px(ROOM_HORIZONTAL_PADDING),
                     right: LayoutValue::Auto,
                 },
                 width: LayoutValue::Px(advance),
@@ -6208,9 +6216,9 @@ fn rooms_layout(
     assert!(nodes.is_empty(), "rooms subtree contains unexpected nodes");
 
     let rooms_width = KEYCAP_MIN_WIDTH * 2.0
-        + text_node_box_width(room_label_advance("Home", text_scale))
-        + text_node_box_width(room_label_advance("Library", text_scale))
-        + text_node_box_width(room_label_advance("Settings", text_scale))
+        + room_label_box_width(room_label_advance("Home", text_scale))
+        + room_label_box_width(room_label_advance("Library", text_scale))
+        + room_label_box_width(room_label_advance("Settings", text_scale))
         + ROOM_STRIP_GAP * 4.0;
     rooms.layout = Some(LayoutStyle {
         position: Position::Absolute,
@@ -12605,87 +12613,98 @@ mod tests {
             orientation: pf_scene::Orientation::Landscape,
         };
         let mut core = core();
-        for route in [Route::Home, Route::Library, Route::Settings] {
-            core.go(route);
-            let scene = core.scene(metrics, "").unwrap();
-            let root = scene.root();
-            assert!(
-                node_by_id(root, "rooms-layout-anchor").is_some(),
-                "{route:?} must render the status strip through the layout seam"
-            );
-            let rooms = node_by_id(root, "rooms").unwrap();
-            assert!(
-                (rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON,
-                "{route:?} rooms bounds={:?}",
-                rooms.bounds
-            );
-            assert!(
-                (rooms.bounds.y + rooms.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON,
-                "{route:?} rooms bounds={:?}",
-                rooms.bounds
-            );
-
-            let item_ids = [
-                "room-keycap-left-border",
-                "room-home",
-                "room-library",
-                "room-settings",
-                "room-keycap-right-border",
-            ];
-            for pair in item_ids.windows(2) {
-                let left = node_by_id(root, pair[0]).unwrap();
-                let right = node_by_id(root, pair[1]).unwrap();
-                let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+        for text_scale in [100, 150, 200] {
+            core.text_scale = text_scale;
+            for route in [Route::Home, Route::Library, Route::Settings] {
+                core.go(route);
+                let scene = core.scene(metrics, "").unwrap();
+                let root = scene.root();
                 assert!(
-                    (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
-                    "{pair:?} gap={gap}"
+                    node_by_id(root, "rooms-layout-anchor").is_some(),
+                    "{route:?} must render the status strip through the layout seam"
                 );
-            }
-
-            for (id, label) in [
-                ("room-home", "Home"),
-                ("room-library", "Library"),
-                ("room-settings", "Settings"),
-            ] {
-                let label_node = node_by_id(root, id).unwrap();
+                let rooms = node_by_id(root, "rooms").unwrap();
                 assert!(
-                    (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs()
-                        < f32::EPSILON
+                    (rooms.bounds.x + rooms.bounds.width / 2.0 - 640.0).abs() < f32::EPSILON,
+                    "{route:?} rooms bounds={:?}",
+                    rooms.bounds
                 );
-                if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                assert!(
+                    (rooms.bounds.y + rooms.bounds.height / 2.0 - 32.0).abs() < f32::EPSILON,
+                    "{route:?} rooms bounds={:?}",
+                    rooms.bounds
+                );
+
+                let item_ids = [
+                    "room-keycap-left-border",
+                    "room-home",
+                    "room-library",
+                    "room-settings",
+                    "room-keycap-right-border",
+                ];
+                for pair in item_ids.windows(2) {
+                    let left = node_by_id(root, pair[0]).unwrap();
+                    let right = node_by_id(root, pair[1]).unwrap();
+                    let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
                     assert!(
-                        (underline.bounds.width - room_label_advance(label, 100)).abs()
-                            < f32::EPSILON
-                    );
-                    assert!(
-                        (underline.bounds.x + underline.bounds.width / 2.0
-                            - (label_node.bounds.x + label_node.bounds.width / 2.0))
-                            .abs()
-                            < f32::EPSILON
+                        (gap - ROOM_STRIP_GAP).abs() < f32::EPSILON,
+                        "{pair:?} gap={gap}"
                     );
                 }
-            }
 
-            for id in ["room-keycap-left", "room-keycap-right"] {
-                let border = node_by_id(root, &format!("{id}-border")).unwrap();
-                let glyph = node_by_id(root, id).unwrap();
-                assert_eq!(
-                    (border.bounds.width, border.bounds.height),
-                    (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
-                );
-                assert!(
-                    (glyph.bounds.x + glyph.bounds.width / 2.0
-                        - (border.bounds.x + border.bounds.width / 2.0))
-                        .abs()
-                        <= 1.0
-                );
-                assert!(
-                    (glyph.bounds.y + glyph.bounds.height / 2.0
-                        - (border.bounds.y + border.bounds.height / 2.0))
-                        .abs()
-                        <= 1.0
-                );
-                assert_eq!(glyph.text_align, TextAlign::Center);
+                for (id, label) in [
+                    ("room-home", "Home"),
+                    ("room-library", "Library"),
+                    ("room-settings", "Settings"),
+                ] {
+                    let label_node = node_by_id(root, id).unwrap();
+                    let expected_width =
+                        room_label_advance(label, text_scale) + 2.0 * ROOM_HORIZONTAL_PADDING;
+                    assert!(
+                        (label_node.bounds.width - expected_width).abs() < f32::EPSILON,
+                        "{route:?} {label} at {text_scale}% width={} expected={expected_width}",
+                        label_node.bounds.width
+                    );
+                    assert_eq!(label_node.text_align, TextAlign::Center);
+                    assert!(
+                        (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs()
+                            < f32::EPSILON
+                    );
+                    if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                        assert!(
+                            (underline.bounds.width - room_label_advance(label, text_scale)).abs()
+                                < f32::EPSILON
+                        );
+                        assert!(
+                            (underline.bounds.x + underline.bounds.width / 2.0
+                                - (label_node.bounds.x + label_node.bounds.width / 2.0))
+                                .abs()
+                                < f32::EPSILON
+                        );
+                    }
+                }
+
+                for id in ["room-keycap-left", "room-keycap-right"] {
+                    let border = node_by_id(root, &format!("{id}-border")).unwrap();
+                    let glyph = node_by_id(root, id).unwrap();
+                    assert_eq!(
+                        (border.bounds.width, border.bounds.height),
+                        (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+                    );
+                    assert!(
+                        (glyph.bounds.x + glyph.bounds.width / 2.0
+                            - (border.bounds.x + border.bounds.width / 2.0))
+                            .abs()
+                            <= 1.0
+                    );
+                    assert!(
+                        (glyph.bounds.y + glyph.bounds.height / 2.0
+                            - (border.bounds.y + border.bounds.height / 2.0))
+                            .abs()
+                            <= 1.0
+                    );
+                    assert_eq!(glyph.text_align, TextAlign::Center);
+                }
             }
         }
     }

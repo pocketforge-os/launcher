@@ -243,6 +243,23 @@ fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
         + CHIP_HORIZONTAL_PADDING
 }
 
+fn scaled_library_chip_width(label: &str, count: Option<usize>, text_scale: u16) -> f32 {
+    if text_scale == 100 {
+        return library_chip_width(label, count);
+    }
+
+    CHIP_HORIZONTAL_PADDING
+        + measured_text_advance(label_text_width(label) + 20.0, text_scale)
+        + count.map_or(0.0, |value| {
+            CHIP_COUNT_GAP
+                + text_node_box_width(measured_text_advance(
+                    label_text_width(&value.to_string()),
+                    text_scale,
+                ))
+        })
+        + CHIP_HORIZONTAL_PADDING
+}
+
 fn ready_variant_label(variant: &Variant) -> String {
     let identity = humanize_identifier(&variant.id);
     match ready_variant_capability(variant) {
@@ -2812,21 +2829,26 @@ impl ShellCore {
                 % 86_400;
             status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
         }
-        if !status_parts.is_empty() {
+        // At enlarged text on compact surfaces the room switcher consumes the full
+        // status row. Keep that primary navigation unobscured; the same status data
+        // remains available once the surface reaches the six-column breakpoint.
+        if !status_parts.is_empty() && (self.text_scale == 100 || w >= 800.0) {
             let status_text = status_parts.join("     ");
-            children.push(
-                node(
-                    "status-cluster",
-                    Role::Text,
-                    &status_text,
-                    battery_x + 32.0,
-                    16.0,
-                    text_node_box_width(caption_text_width(&status_text, self.text_scale)),
-                    32.0,
-                    SCENE_TRANSPARENT_TOKEN,
-                )
-                .with_type_role(TypeRole::Caption),
-            );
+            let mut status = node(
+                "status-cluster",
+                Role::Text,
+                &status_text,
+                battery_x + 32.0,
+                16.0,
+                text_node_box_width(caption_text_width(&status_text, self.text_scale)),
+                scaled_text_box_height(32.0, self.text_scale),
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption);
+            if self.text_scale > 100 {
+                status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
+            }
+            children.push(status);
         }
         let room_left = w / 2.0 - 220.0;
         let mut room_nodes = Vec::new();
@@ -3079,7 +3101,7 @@ impl ShellCore {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
-        wrap_system_layout(&mut children, w);
+        wrap_system_layout(&mut children, w, self.text_scale);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child, self.text_scale);
@@ -3528,7 +3550,7 @@ impl ShellCore {
             ];
             let chip_widths = filters
                 .iter()
-                .map(|(label, count, _)| library_chip_width(label, *count))
+                .map(|(label, count, _)| scaled_library_chip_width(label, *count, self.text_scale))
                 .collect::<Vec<_>>();
             let required_toolbar_width = chip_widths.iter().sum::<f32>()
                 + (geometry.toolbar_columns - 1) as f32 * LIBRARY_TOOLBAR_GAP;
@@ -3538,6 +3560,7 @@ impl ShellCore {
                 (w - 2.0 * LIBRARY_SIDE_MARGIN - LIBRARY_TOOLBAR_GAP - required_toolbar_width)
                     .max(LIBRARY_SEARCH_MIN_WIDTH)
             };
+            let search_height = scaled_text_box_height(LIB_TOOLBAR_HEIGHT, self.text_scale);
             let mut search = node(
                 "library-search",
                 Role::Button,
@@ -3545,7 +3568,7 @@ impl ShellCore {
                 LIBRARY_SIDE_MARGIN,
                 LIB_HEAD_TOP,
                 search_width,
-                LIB_TOOLBAR_HEIGHT,
+                search_height,
                 STATE_REST_SURFACE_TOKEN,
             );
             search.state.focused = self.focus == 0;
@@ -3558,7 +3581,7 @@ impl ShellCore {
                     LIBRARY_SIDE_MARGIN + SPACE_4,
                     LIB_HEAD_TOP + 8.0,
                     search_width - 32.0,
-                    28.0,
+                    scaled_text_box_height(28.0, self.text_scale),
                     STATE_REST_SURFACE_TOKEN,
                 )
                 .with_type_role(TypeRole::Label),
@@ -3593,14 +3616,33 @@ impl ShellCore {
                 };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
-                let chip_height = CHIP_HEIGHT;
-                let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
+                let chip_height = scaled_text_box_height(CHIP_HEIGHT, self.text_scale);
+                let chip_row_gap = 68.0 - CHIP_HEIGHT;
+                let chip_padding = if compact_toolbar && self.text_scale == 200 {
+                    0.0
+                } else {
+                    CHIP_HORIZONTAL_PADDING
+                };
+                let count_width = count.map_or(0.0, |value| {
+                    measured_text_advance(label_text_width(&value.to_string()), self.text_scale)
+                });
+                let count_box_width = text_node_box_width(count_width);
+                let available_label_width = (chip_width
+                    - 2.0 * chip_padding
+                    - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_box_width))
+                .max(0.0);
+                let label_width = if self.text_scale == 100 {
+                    label_text_width(&label) + 20.0
+                } else {
+                    available_label_width
+                };
+                let label = scale_aware_single_line(&label, available_label_width, self.text_scale);
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
                     &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
                     chip_x,
-                    toolbar_top + chip_row as f32 * 68.0,
+                    toolbar_top + chip_row as f32 * (chip_height + chip_row_gap),
                     chip_width,
                     chip_height,
                     STATE_REST_SURFACE_TOKEN,
@@ -3656,10 +3698,14 @@ impl ShellCore {
                         &format!("library-filter-{index}-label"),
                         Role::Text,
                         &label,
-                        chip.bounds.x + CHIP_HORIZONTAL_PADDING,
+                        chip.bounds.x + chip_padding,
                         chip.bounds.y + 5.0,
-                        label_text_width(&label) + 20.0,
-                        26.0,
+                        label_width,
+                        if self.text_scale == 100 {
+                            26.0
+                        } else {
+                            scaled_text_box_height(28.0, self.text_scale)
+                        },
                         chip.style_token.as_str(),
                     )
                     .with_type_role(TypeRole::Label);
@@ -3672,12 +3718,14 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width
-                                - CHIP_HORIZONTAL_PADDING
-                                - text_node_box_width(count_width),
+                            chip.bounds.x + chip_width - chip_padding - count_box_width,
                             chip.bounds.y + 5.0,
-                            text_node_box_width(count_width),
-                            26.0,
+                            count_box_width,
+                            if self.text_scale == 100 {
+                                26.0
+                            } else {
+                                scaled_text_box_height(28.0, self.text_scale)
+                            },
                             chip.style_token.as_str(),
                         )
                         .with_type_role(TypeRole::Label);
@@ -3692,20 +3740,35 @@ impl ShellCore {
                         Role::Group,
                         "",
                         chip_x + CHIP_BORDER_WIDTH,
-                        toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
+                        toolbar_top + chip_row as f32 * (chip_height + chip_row_gap) + chip_height
+                            - 3.0,
                         chip_width - 2.0 * CHIP_BORDER_WIDTH,
                         3.0,
                         STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
-            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
+            let library_title_height = scaled_text_box_height(34.0, self.text_scale);
+            let library_cue_slot_height = if self.text_scale == 100 {
+                0.0
+            } else {
+                scaled_text_box_height(28.0, self.text_scale) + CARD_CAPTION_GAP
+            };
+            let row_height = LIB_CARD_ART_HEIGHT
+                + CARD_LABEL_GAP
+                + library_cue_slot_height
+                + library_title_height
+                + SPACE_5;
             let card_top = geometry.card_top;
             let mut visible_rows: usize = 1;
-            while if geometry.columns == 6 {
+            let card_content_height = LIB_CARD_ART_HEIGHT
+                + CARD_LABEL_GAP
+                + library_cue_slot_height
+                + library_title_height;
+            while if geometry.columns == 6 && self.text_scale == 100 {
                 card_top + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
             } else {
-                card_top + visible_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
+                card_top + visible_rows as f32 * row_height + card_content_height
                     <= h - PROMPTS_AREA_HEIGHT
             } {
                 visible_rows += 1;
@@ -3728,7 +3791,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0,
+                    card_content_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 card.state.focused = self.focus == i + 5;
@@ -3773,30 +3836,35 @@ impl ShellCore {
                     art.state.focused = true;
                 }
                 if item.favorite {
+                    let (pin_width, pin_height) =
+                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
+                    let pin_center_y = card.bounds.y + 18.0;
                     card.children.push(
                         node(
                             &format!("favorite-pin-{}", item.id),
                             Role::Text,
                             "★",
-                            card.bounds.x + geometry.card_width - 28.0,
-                            card.bounds.y + 8.0,
-                            20.0,
-                            20.0,
+                            pin_center_x - pin_width / 2.0,
+                            pin_center_y - pin_height / 2.0,
+                            pin_width,
+                            pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
                         .with_type_role(TypeRole::Caption),
                     );
                 }
-                let title_y = card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                let title_y =
+                    card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + library_cue_slot_height;
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
                         Role::Text,
-                        &item.title,
+                        &scale_aware_single_line(&item.title, geometry.card_width, self.text_scale),
                         card.bounds.x,
                         title_y,
                         geometry.card_width,
-                        34.0,
+                        library_title_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
                     .with_type_role(TypeRole::Label),
@@ -5848,7 +5916,8 @@ fn plate_art_nodes(
     );
     let mut nodes = vec![art];
     let home = context == "home-card";
-    let stack_scale = if home {
+    let scale_aware_card = !favorite && !detail;
+    let stack_scale = if scale_aware_card {
         f32::from(text_scale) / 100.0
     } else {
         1.0
@@ -6003,15 +6072,21 @@ fn add_unavailable_card_cues(
     show_reason: bool,
 ) {
     let home = context == "home-card";
-    let title_y = y + art_height + CARD_LABEL_GAP;
-    let title_height = if home {
+    let scale_aware_card = context != "favorite-card" && context != "detail-art";
+    let library_cue_slot_height = if scale_aware_card && !home && text_scale != 100 {
+        scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
+    } else {
+        0.0
+    };
+    let title_y = y + art_height + CARD_LABEL_GAP + library_cue_slot_height;
+    let title_height = if scale_aware_card {
         scaled_text_box_height(28.0, text_scale)
     } else {
         28.0
     };
     let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
-        if home && text_scale != 100 {
+        if scale_aware_card && text_scale != 100 {
             (
                 measured_text_advance(base_width, text_scale)
                     .max(text_node_box_width(caption_text_width(text, text_scale)))
@@ -6020,6 +6095,15 @@ fn add_unavailable_card_cues(
             )
         } else {
             (base_width, base_height)
+        }
+    };
+    let badge_top = |badge_height: f32| {
+        if home {
+            y + art_height - 46.0
+        } else if scale_aware_card && text_scale != 100 {
+            y + art_height + CARD_LABEL_GAP
+        } else {
+            y + art_height - 18.0 - badge_height
         }
     };
     if matches!(availability, Availability::Ready)
@@ -6038,7 +6122,7 @@ fn add_unavailable_card_cues(
                 Role::Text,
                 &badge,
                 x + 10.0,
-                y + art_height - 46.0,
+                badge_top(badge_height),
                 badge_width,
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
@@ -6072,7 +6156,7 @@ fn add_unavailable_card_cues(
                 Role::Text,
                 &badge,
                 x + 10.0,
-                y + art_height - 46.0,
+                badge_top(badge_height),
                 badge_width,
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
@@ -6113,7 +6197,7 @@ fn add_unavailable_card_cues(
             Role::Text,
             &badge,
             x + 10.0,
-            y + art_height - 46.0,
+            badge_top(badge_height),
             badge_width,
             badge_height,
             COLOR_SURFACE_CANVAS_TOKEN,
@@ -6139,13 +6223,13 @@ fn add_unavailable_card_cues(
         || full_reason.clone(),
         |max_lines| ellipsize_to_lines(&full_reason, width, max_lines),
     );
-    let reason = if home {
+    let reason = if scale_aware_card {
         scale_aware_single_line(&reason, width, text_scale)
     } else {
         reason
     };
     let reason_lines = (label_text_width(&reason) / width).ceil().max(1.0);
-    let reason_height = if home {
+    let reason_height = if scale_aware_card {
         scaled_text_box_height(20.0, text_scale)
     } else {
         8.0 + 20.0 * reason_lines
@@ -6378,7 +6462,7 @@ fn fixed_layout(width: f32, height: f32) -> LayoutStyle {
     }
 }
 
-fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
+fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16) {
     let system_id = |id: &str| {
         matches!(
             id,
@@ -6413,7 +6497,12 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
             "battery-cavity" => (148.0, 26.0, 18.0, 10.0),
             "battery-level" => (165.0 - node.bounds.width, 27.0, node.bounds.width, 8.0),
             "battery-terminal" => (142.0, 28.0, 2.0, 6.0),
-            "status-cluster" => (-16.0, 16.0, node.bounds.width.max(152.0), 32.0),
+            "status-cluster" => (
+                if text_scale == 100 { -16.0 } else { 0.0 },
+                16.0,
+                node.bounds.width.max(152.0),
+                node.bounds.height,
+            ),
             _ => continue,
         };
         node.layout = Some(LayoutStyle {

@@ -3346,7 +3346,7 @@ mod durable_tests {
 
             driver.metrics.logical_width = 1280.0;
             driver.action(custom("Room.next"));
-            if cell.high_contrast {
+            if cell.high_contrast && cell.text_scale == 100 {
                 assert_settings_high_contrast_known_defect(&driver, cell);
             } else {
                 assert_cell(&driver, cell, "Settings");

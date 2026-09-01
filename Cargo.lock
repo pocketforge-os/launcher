@@ -444,7 +444,7 @@ dependencies = [
 [[package]]
 name = "pf-framehost"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "libc",
  "pf-ports",
@@ -455,7 +455,7 @@ dependencies = [
 [[package]]
 name = "pf-framehost-wayland"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "libc",
  "pf-ports",
@@ -470,7 +470,7 @@ dependencies = [
 [[package]]
 name = "pf-input-map"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-ports",
  "pf-scene",
@@ -481,7 +481,7 @@ dependencies = [
 [[package]]
 name = "pf-ports"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-render",
  "pf-scene",
@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "serde",
  "serde_json",
@@ -499,7 +499,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs-port"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-ports",
  "pf-prefs",
@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "pf-prefsd"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "libc",
  "pf-prefs",
@@ -522,12 +522,12 @@ dependencies = [
 [[package]]
 name = "pf-render"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "cosmic-text",
  "pf-scene",
  "pf-theme",
- "png",
+ "png 0.17.16",
  "serde_json",
  "tiny-skia",
 ]
@@ -535,7 +535,7 @@ dependencies = [
 [[package]]
 name = "pf-scene"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "taffy",
 ]
@@ -543,7 +543,7 @@ dependencies = [
 [[package]]
 name = "pf-session-authority"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-ports",
  "pf-wire",
@@ -554,7 +554,7 @@ dependencies = [
 [[package]]
 name = "pf-session-client"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-ports",
  "pf-session-authority",
@@ -583,7 +583,7 @@ dependencies = [
  "pf-shell-core",
  "pf-theme",
  "pf-wire",
- "png",
+ "png 0.17.16",
  "rustix",
  "serde_json",
  "sha2",
@@ -600,14 +600,14 @@ dependencies = [
  "pf-scene",
  "pf-session-authority",
  "pf-theme",
- "png",
+ "png 0.17.16",
  "sha2",
 ]
 
 [[package]]
 name = "pf-theme"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 dependencies = [
  "pf-scene",
  "roxmltree",
@@ -618,7 +618,7 @@ dependencies = [
 [[package]]
 name = "pf-wire"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=cc6f23b4d4cc7c0db470553a7302e94f6d3416a7#cc6f23b4d4cc7c0db470553a7302e94f6d3416a7"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
 
 [[package]]
 name = "pkg-config"
@@ -633,6 +633,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
 dependencies = [
  "bitflags 1.3.2",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags 2.13.1",
  "crc32fast",
  "fdeflate",
  "flate2",
@@ -953,24 +966,24 @@ dependencies = [
 
 [[package]]
 name = "tiny-skia"
-version = "0.11.4"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83d13394d44dae3207b52a326c0c85a8bf87f1541f23b0d143811088497b09ab"
+checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
 dependencies = [
  "arrayref",
  "arrayvec",
  "bytemuck",
  "cfg-if",
  "log",
- "png",
+ "png 0.18.1",
  "tiny-skia-path",
 ]
 
 [[package]]
 name = "tiny-skia-path"
-version = "0.11.4"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",

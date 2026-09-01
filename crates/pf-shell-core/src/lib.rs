@@ -6269,6 +6269,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
         KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn outline(prefix: &str, x: f32, y: f32, width: f32, wide: bool) -> Node {
         let radius = if wide {
             RADIUS_S.min(KEYCAP_HEIGHT / 2.0)
@@ -6285,72 +6286,49 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
             KEYCAP_HEIGHT,
             SCENE_TRANSPARENT_TOKEN,
         );
-        let diagonal = (radius * 0.3).max(2.0).round();
-        let straight_inset = (radius - diagonal).max(1.0);
-        let horizontal = width - 2.0 * straight_inset;
-        let vertical = KEYCAP_HEIGHT - 2.0 * straight_inset;
-        for (name, edge_x, edge_y, edge_width, edge_height) in [
-            ("top", x + straight_inset, y, horizontal, 1.0),
-            (
-                "bottom",
-                x + straight_inset,
-                y + KEYCAP_HEIGHT - 1.0,
-                horizontal,
-                1.0,
-            ),
-            ("left", x, y + straight_inset, 1.0, vertical),
-            ("right", x + width - 1.0, y + straight_inset, 1.0, vertical),
-            ("top-left", x + diagonal, y + 1.0, diagonal, 1.0),
-            (
-                "top-right",
-                x + width - 2.0 * diagonal,
-                y + 1.0,
-                diagonal,
-                1.0,
-            ),
-            (
-                "bottom-left",
-                x + diagonal,
-                y + KEYCAP_HEIGHT - 2.0,
-                diagonal,
-                1.0,
-            ),
-            (
-                "bottom-right",
-                x + width - 2.0 * diagonal,
-                y + KEYCAP_HEIGHT - 2.0,
-                diagonal,
-                1.0,
-            ),
-            ("upper-left", x + 1.0, y + diagonal, 1.0, diagonal),
-            ("upper-right", x + width - 2.0, y + diagonal, 1.0, diagonal),
-            (
-                "lower-left",
-                x + 1.0,
-                y + KEYCAP_HEIGHT - 2.0 * diagonal,
-                1.0,
-                diagonal,
-            ),
-            (
-                "lower-right",
-                x + width - 2.0,
-                y + KEYCAP_HEIGHT - 2.0 * diagonal,
-                1.0,
-                diagonal,
-            ),
-        ] {
-            border.children.push(node(
-                &format!("{prefix}-border-{name}"),
-                Role::Group,
-                "",
-                edge_x,
-                edge_y,
-                edge_width,
-                edge_height,
-                COLOR_BORDER_STRONG_TOKEN,
-            ));
+        // The scene protocol has no stroke primitive. Trace the rounded perimeter as
+        // adjacent one-pixel rows; unlike the former four-edge approximation, every
+        // corner sample meets its neighbours and therefore paints one continuous ring.
+        for row in 0..KEYCAP_HEIGHT as usize {
+            let row_center = row as f32 + 0.5;
+            let from_end = row_center.min(KEYCAP_HEIGHT - row_center);
+            let inset = if from_end < radius {
+                (radius - (radius * radius - (radius - from_end).powi(2)).sqrt()).round()
+            } else {
+                0.0
+            };
+            let (left_width, right_x) = if row == 0 || row + 1 == KEYCAP_HEIGHT as usize {
+                (width - 2.0 * inset, x + inset)
+            } else {
+                (1.0, x + width - inset - 1.0)
+            };
+            let edges = if row == 0 || row + 1 == KEYCAP_HEIGHT as usize {
+                vec![("span", x + inset, left_width)]
+            } else {
+                vec![("left", x + inset, 1.0), ("right", right_x, 1.0)]
+            };
+            for (side, edge_x, edge_width) in edges {
+                border.children.push(node(
+                    &format!("{prefix}-border-row-{row}-{side}"),
+                    Role::Group,
+                    "",
+                    edge_x,
+                    y + row as f32,
+                    edge_width,
+                    1.0,
+                    COLOR_BORDER_STRONG_TOKEN,
+                ));
+            }
         }
         border
+    }
+
+    fn translate(node: &mut Node, dx: f32, dy: f32) {
+        node.bounds.x += dx;
+        node.bounds.y += dy;
+        for child in &mut node.children {
+            translate(child, dx, dy);
+        }
     }
 
     let y = surface_height - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
@@ -6408,15 +6386,19 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
     }
     let offset = surface_width - SPACE_7 - x;
     for node in &mut nodes {
-        node.bounds.x += offset;
-        for child in &mut node.children {
-            child.bounds.x += offset;
-        }
+        translate(node, offset, 0.0);
     }
     nodes
 }
 
 fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+    fn translate(node: &mut Node, dx: f32, dy: f32) {
+        node.bounds.x += dx;
+        node.bounds.y += dy;
+        for child in &mut node.children {
+            translate(child, dx, dy);
+        }
+    }
     let normalized = footer.replace("     ", " · ");
     let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height);
     let prompt_top = surface_height - PROMPTS_AREA_HEIGHT;
@@ -6432,8 +6414,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         else {
             continue;
         };
-        node.bounds.x -= index as f32 * SPACE_2;
-        node.bounds.y = centered_y;
+        translate(node, -(index as f32 * SPACE_2), centered_y - node.bounds.y);
     }
     let prompt_count = nodes
         .iter()
@@ -6464,10 +6445,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         for node in nodes.iter_mut().filter(|node| {
             node.id.as_str() == prefix || node.id.as_str() == format!("{prefix}-border")
         }) {
-            node.bounds.x += x - keycap_x;
-            for child in &mut node.children {
-                child.bounds.x += x - keycap_x;
-            }
+            translate(node, x - keycap_x, 0.0);
         }
         x += keycap_width + SPACE_2;
 
@@ -6496,7 +6474,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
             });
     let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
     for node in &mut nodes {
-        node.bounds.x += offset;
+        translate(node, offset, 0.0);
     }
     nodes
 }
@@ -6702,20 +6680,30 @@ fn place_library_fade_below_footer(children: &mut Vec<Node>) {
 
 fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     let id = node.id.as_str();
+    let prompt_keycap = id
+        .strip_prefix("home-prompt-keycap-")
+        .and_then(|suffix| suffix.strip_suffix("-border").or(Some(suffix)))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        });
     let numeric_suffix = |prefix: &str| {
         id.strip_prefix(prefix).is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
     };
-    let radius = if id.starts_with("home-prompt-keycap-0")
-        || id.starts_with("room-keycap-")
+    let radius = if prompt_keycap {
+        Some(if node.bounds.width > KEYCAP_MIN_WIDTH {
+            RADIUS_S
+        } else {
+            RADIUS_PILL
+        })
+    } else if id.starts_with("room-keycap-")
         || id.contains("keycap")
             && (id.to_ascii_lowercase().contains("select")
                 || id.to_ascii_lowercase().contains("start"))
     {
         Some(RADIUS_S)
-    } else if id.starts_with("home-prompt-keycap-")
-        || id == "attention"
+    } else if id == "attention"
         || id == "attention-pill"
         || id == "attention-pill-border"
         || id == "attention-dot"
@@ -11005,8 +10993,21 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::float_cmp
+    )]
     fn shared_prompt_rows_are_outline_only_plain_text_with_token_spacing() {
         fn assert_prompt_paint(scene: &Scene, prompt_count: usize) {
+            fn clear_label(node: &mut Node, id: &str) -> bool {
+                if node.id.as_str() == id {
+                    node.accessible_label.clear();
+                    return true;
+                }
+                node.children.iter_mut().any(|child| clear_label(child, id))
+            }
+
             let prompts = node_by_id(scene.root(), "prompts").unwrap();
             assert!(
                 !prompts
@@ -11028,6 +11029,12 @@ mod tests {
                 );
                 assert_eq!(verb.ink_token.as_deref(), Some(COLOR_TEXT_SECONDARY_TOKEN));
                 assert_eq!(border.style_token, SCENE_TRANSPARENT_TOKEN);
+                let expected_radius = if border.bounds.width > KEYCAP_MIN_WIDTH {
+                    RADIUS_S
+                } else {
+                    border.bounds.height / 2.0
+                };
+                assert_eq!(border.corner_radius, expected_radius);
                 assert!(
                     !border.children.is_empty()
                         && border.children.iter().all(|edge| {
@@ -11035,6 +11042,42 @@ mod tests {
                                 && edge.accessible_label.is_empty()
                         }),
                     "keycap outline must carry only the border-strong paint token"
+                );
+                assert!(border.children.iter().all(|edge| {
+                    edge.bounds.x >= border.bounds.x
+                        && edge.bounds.x + edge.bounds.width
+                            <= border.bounds.x + border.bounds.width
+                        && edge.bounds.y >= border.bounds.y
+                        && edge.bounds.y + edge.bounds.height
+                            <= border.bounds.y + border.bounds.height
+                }));
+
+                let metrics = SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                };
+                let painted = Rasterizer::new().render(scene, metrics).unwrap();
+                let mut blank_root = scene.root().clone();
+                assert!(clear_label(&mut blank_root, &prefix));
+                let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
+                let blank = Rasterizer::new().render(&blank_scene, metrics).unwrap();
+                let ink_columns = painted
+                    .rgba
+                    .chunks_exact(4)
+                    .zip(blank.rgba.chunks_exact(4))
+                    .enumerate()
+                    .filter_map(|(pixel, (ink_pixel, blank_pixel))| {
+                        (ink_pixel != blank_pixel).then_some(pixel % painted.width as usize)
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert!(
+                    *ink_columns.first().unwrap() > border.bounds.x as usize
+                        && *ink_columns.last().unwrap()
+                            < (border.bounds.x + border.bounds.width) as usize,
+                    "keycap label ink must lie strictly inside its border"
                 );
                 assert!(
                     (verb.bounds.x - (border.bounds.x + border.bounds.width) - SPACE_2).abs()

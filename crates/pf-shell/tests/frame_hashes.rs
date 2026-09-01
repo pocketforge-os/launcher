@@ -193,10 +193,10 @@ fn vertical_slice_frame_hashes_are_stable() {
         // Home prompt rows intentionally rebaseline to the design's outline-only
         // keycaps and plain labels. The footer background now remains visible through
         // every chip; routes which do not use the shared builder remain byte-identical.
-        "8c09da378fcdce9d729874f6de090e0c715856395e363f091df072c92db85c83  ",
-        "fa2796d1bfd524fc310081f80086c70e46287fcfff1424fb177589991c1e6cdf  ",
-        "8b324d83132a423274a10d366f896d82e9ea3190caec20818038adb9992a4fc9  ",
-        "353b5bc75164e637f7be7bee1c1f0ca8b406bb250df66b1588d4922a12152221  ",
+        "52cca2ace632091c8ff4efa005baf271807803f92cecb923d1bb20e74dc28329  ",
+        "a7df90196a6dc180038920c0f5a05e6299938968ea7ccf9354cd71c88a534086  ",
+        "11d43c63fcffb43dbbbc79321eb33816c2243b024aa254bc0996abcab0651ea2  ",
+        "d5825aab35d0ab5c9a3eb40fd9c84604571b3a9b250c9942ae3539c19da3b2d1  ",
         "95bdb92d1d35a55f305f24ba0262ba6d9e246023fe905bccedbcf9b1e958ed71  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
@@ -207,9 +207,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("fa2796d"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("a7df901"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("353b5bc"),
+        lines.lines().nth(3).unwrap().starts_with("d5825aa"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -284,6 +284,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("53c613bd0e1b6dbd98bc9793d206464619d7214a73fb0a5a0e30f6560c931473  ")
+        transcript.contains("9b06d1ece637410188613c1cd80eb127ab0299626ea91d7d40fe1588ed9d9217  ")
     );
 }

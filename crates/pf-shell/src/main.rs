@@ -2227,6 +2227,15 @@ const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
 const UNDERLAY_ROLE_MARKER: &str = "--scene-underlay-role";
 
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+fn text_ink_intersects(
+    earlier_ink: Option<pf_scene::Bounds>,
+    later_ink: Option<pf_scene::Bounds>,
+) -> bool {
+    earlier_ink.zip(later_ink).is_some_and(|(a, b)| {
+        a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+    })
+}
+
 fn assert_scene_occlusion_safe(
     scene: &pf_scene::Scene,
     metrics: SurfaceMetrics,
@@ -2393,10 +2402,11 @@ fn assert_scene_occlusion_safe(
     let mut failures = Vec::new();
     for (later_index, later) in nodes.iter().enumerate() {
         for earlier in &nodes[..later_index] {
-            if related(earlier, later) || !intersects(earlier.node.bounds, later.node.bounds) {
+            if related(earlier, later) {
                 continue;
             }
             if is_content(earlier.node)
+                && intersects(earlier.node.bounds, later.node.bounds)
                 && !declares_underlay(earlier.node)
                 && opaque_fill(later.node, base)
                 && !declares_overlay(later.node)
@@ -2411,9 +2421,10 @@ fn assert_scene_occlusion_safe(
                 && is_text(later.node)
                 && !declares_overlay(earlier.node)
                 && !declares_overlay(later.node)
-                && ink_bounds_by_id[earlier.node.id.as_str()]
-                    .zip(ink_bounds_by_id[later.node.id.as_str()])
-                    .is_some_and(|(earlier_ink, later_ink)| intersects(earlier_ink, later_ink))
+                && text_ink_intersects(
+                    ink_bounds_by_id[earlier.node.id.as_str()],
+                    ink_bounds_by_id[later.node.id.as_str()],
+                )
             {
                 failures.push(format!(
                     "text {} intersects foreign text {}",
@@ -3947,6 +3958,19 @@ mod durable_tests {
                 && failure.contains("foreign text"),
             "unexpected guard verdict: {failure}"
         );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_text_ink_across_disjoint_node_bounds() {
+        let title_bounds = pf_scene::Bounds::new(20.0, 20.0, 260.0, 32.0);
+        let status_bounds = pf_scene::Bounds::new(20.0, 56.0, 260.0, 32.0);
+        assert!(title_bounds.y + title_bounds.height <= status_bounds.y);
+        let grown_title_ink = pf_scene::Bounds::new(26.0, 28.0, 215.0, 36.0);
+        let fixed_status_ink = pf_scene::Bounds::new(27.0, 58.0, 43.0, 15.0);
+        assert!(text_ink_intersects(
+            Some(grown_title_ink),
+            Some(fixed_status_ink)
+        ));
     }
 
     #[test]

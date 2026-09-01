@@ -71,6 +71,8 @@ const HOME_SHELF_LIMIT: usize = 6;
 const HOME_SHELF_GAP: f32 = 47.2;
 const LIBRARY_SIDE_MARGIN: f32 = SPACE_7;
 const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
+const COMPACT_LIBRARY_TOOLBAR_TOP: f32 = 180.0;
+const LIBRARY_TOOLBAR_ROW_GAP: f32 = 68.0 - CHIP_HEIGHT;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
@@ -327,6 +329,21 @@ impl LibraryGeometry {
 
     fn wrapped_toolbar(self) -> bool {
         self.toolbar_rows() > 1
+    }
+
+    fn compact_toolbar_bottom(self, text_scale: u16) -> f32 {
+        let rows = self.toolbar_rows();
+        COMPACT_LIBRARY_TOOLBAR_TOP
+            + rows as f32 * scaled_text_box_height(CHIP_HEIGHT, text_scale)
+            + rows.saturating_sub(1) as f32 * LIBRARY_TOOLBAR_ROW_GAP
+    }
+
+    fn scaled_card_top(self, text_scale: u16) -> f32 {
+        if self.columns == 6 {
+            return self.card_top;
+        }
+        let original_separation = self.card_top - self.compact_toolbar_bottom(100);
+        self.compact_toolbar_bottom(text_scale) + original_separation
     }
 
     fn toolbar_to_grid_column(self, toolbar_column: usize) -> usize {
@@ -3593,7 +3610,11 @@ impl ShellCore {
                 } else {
                     LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
-                let toolbar_top = if compact_toolbar { 180.0 } else { LIB_HEAD_TOP };
+                let toolbar_top = if compact_toolbar {
+                    COMPACT_LIBRARY_TOOLBAR_TOP
+                } else {
+                    LIB_HEAD_TOP
+                };
                 let toolbar_width = if compact_toolbar {
                     w - 2.0 * LIBRARY_SIDE_MARGIN
                 } else {
@@ -3617,7 +3638,7 @@ impl ShellCore {
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
                 let chip_height = scaled_text_box_height(CHIP_HEIGHT, self.text_scale);
-                let chip_row_gap = 68.0 - CHIP_HEIGHT;
+                let chip_row_gap = LIBRARY_TOOLBAR_ROW_GAP;
                 let chip_padding = if compact_toolbar && self.text_scale == 200 {
                     0.0
                 } else {
@@ -3759,7 +3780,7 @@ impl ShellCore {
                 + library_cue_slot_height
                 + library_title_height
                 + SPACE_5;
-            let card_top = geometry.card_top;
+            let card_top = geometry.scaled_card_top(self.text_scale);
             let mut visible_rows: usize = 1;
             let card_content_height = LIB_CARD_ART_HEIGHT
                 + CARD_LABEL_GAP
@@ -10834,6 +10855,63 @@ mod tests {
                 .any(|card| { card.id.as_str() == "library-item-item-7" && card.state.focused }),
             "the focused card must remain in the emitted row"
         );
+    }
+
+    #[test]
+    fn scaled_compact_library_grid_starts_below_the_filter_toolbar() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+
+        for text_scale in [150, 200] {
+            core.text_scale = text_scale;
+            for width in [480.0, 640.0] {
+                let scene = core
+                    .scene(
+                        SurfaceMetrics {
+                            logical_width: width,
+                            logical_height: 720.0,
+                            scale: 1.0,
+                            safe_insets: Default::default(),
+                            orientation: pf_scene::Orientation::Landscape,
+                        },
+                        "",
+                    )
+                    .unwrap();
+                let toolbar_bottom = scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("library-filter-"))
+                    .map(|node| node.bounds.y + node.bounds.height)
+                    .fold(0.0_f32, f32::max);
+                let card_top = scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("library-item-"))
+                    .map(|node| node.bounds.y)
+                    .reduce(f32::min)
+                    .expect("compact Library must emit a visible card row");
+
+                assert!(
+                    toolbar_bottom <= card_top,
+                    "filter toolbar bottom {toolbar_bottom} overlaps card top {card_top} at {text_scale}% and width {width}"
+                );
+            }
+        }
     }
 
     #[test]

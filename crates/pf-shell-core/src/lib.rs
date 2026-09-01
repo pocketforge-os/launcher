@@ -126,6 +126,29 @@ fn text_node_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * TEXT_NODE_INLINE_INSET
 }
 
+fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
+    measured_text_advance(base_height, text_scale)
+}
+
+fn settings_value_advance(text: &str, text_scale: u16) -> f32 {
+    let base_advance = match text {
+        "100%" | "150%" => 34.0,
+        "200%" => 37.0,
+        "ON" => 20.0,
+        "OFF" => 27.0,
+        _ => label_text_width(text),
+    };
+    measured_text_advance(base_advance, text_scale)
+}
+
+fn settings_scaled_box_width(base_width: f32, text: &str, text_scale: u16) -> f32 {
+    let advance_delta =
+        settings_value_advance(text, text_scale) - settings_value_advance(text, 100);
+    // Centered text must retain its integral raster phase as the box grows. Round
+    // the measured growth to an even delta so both alignment insets gain whole px.
+    base_width + (advance_delta / 2.0).ceil() * 2.0
+}
+
 fn room_label_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * ROOM_HORIZONTAL_PADDING
 }
@@ -4332,10 +4355,14 @@ impl ShellCore {
         }
         let portrait = h > w;
         let nav_width = if w >= 960.0 { 260.0 } else { 220.0 };
+        let nav_scale_delta = f32::from(self.text_scale) / 100.0 - 1.0;
+        let scaled_nav_width = nav_width + 72.0 * nav_scale_delta;
         let rooms = self.settings_rooms();
         if !portrait || !self.settings_in_rows {
             let nav_left = 32.0;
             let nav_top = 168.0;
+            let nav_label_height = 30.0 + 16.0 * nav_scale_delta;
+            let nav_label_inset = 12.0 - 8.0 * nav_scale_delta;
             for (index, room) in rooms.iter().copied().enumerate() {
                 let selected = room == self.settings_room;
                 let focused = !self.settings_in_rows && self.focus == index;
@@ -4352,7 +4379,7 @@ impl ShellCore {
                     name,
                     nav_left,
                     nav_top + index as f32 * 62.0,
-                    nav_width - 32.0,
+                    scaled_nav_width - 32.0,
                     50.0,
                     if focused {
                         STATE_REST_SURFACE_TOKEN
@@ -4367,10 +4394,10 @@ impl ShellCore {
                     &format!("settings-nav-{}-label", name.to_ascii_lowercase()),
                     Role::Text,
                     &format!("{} {name}", if selected { "▌" } else { " " }),
-                    nav.bounds.x + 12.0,
-                    nav.bounds.y + 10.0,
-                    nav.bounds.width - 24.0,
-                    30.0,
+                    nav.bounds.x + nav_label_inset,
+                    nav.bounds.y + (nav.bounds.height - nav_label_height) / 2.0,
+                    nav.bounds.width - 2.0 * nav_label_inset,
+                    nav_label_height,
                     if focused {
                         STATE_REST_SURFACE_TOKEN
                     } else {
@@ -4386,7 +4413,11 @@ impl ShellCore {
             }
         }
 
-        let content_left = if portrait { 32.0 } else { nav_width + 56.0 };
+        let content_left = if portrait {
+            32.0
+        } else {
+            scaled_nav_width + 56.0
+        };
         let content_width = w - content_left - 40.0;
         let title = match self.settings_room {
             SettingsRoom::Accessibility => "Accessibility",
@@ -4476,6 +4507,9 @@ impl ShellCore {
                 STATE_DISABLED_BORDER_TOKEN
             };
             let lines = row.label.lines().collect::<Vec<_>>();
+            let row_line_height = scaled_text_box_height(24.0, self.text_scale);
+            let row_line_top = 7.0 * scale;
+            let row_line_step = 25.0 * scale;
             let mut fills = Vec::new();
             let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
@@ -4484,11 +4518,18 @@ impl ShellCore {
                     Role::Text,
                     line,
                     content_left + 16.0,
-                    scene_row.bounds.y + 7.0 + line_index as f32 * 25.0,
+                    scene_row.bounds.y + row_line_top + line_index as f32 * row_line_step,
                     content_width - 150.0,
-                    24.0,
+                    row_line_height,
                     row_surface,
                 );
+                // Single-line source/status notices are prose, not compact row
+                // labels. At enlarged text scales they intentionally wrap within
+                // the row and carry the scene's explicit multiline declaration.
+                if !interactive && lines.len() == 1 && self.text_scale > 100 {
+                    label.bounds.height = row_height - 2.0 * row_line_top;
+                    label = declared_multiline(label);
+                }
                 label.state.focused = focused;
                 text.push(label);
             }
@@ -4497,29 +4538,37 @@ impl ShellCore {
                     .last()
                     .and_then(|line| line.rsplit_once(" · "))
                     .map_or("100%", |(_, effective)| effective);
-                let control_left = content_left + content_width - 240.0;
+                let value_widths = ["100%", "150%", "200%"]
+                    .map(|value| settings_scaled_box_width(56.0, value, self.text_scale));
+                let segment_widths = value_widths.map(|width| (width + 16.0).max(72.0));
+                let control_width = segment_widths.iter().sum::<f32>();
+                let control_left = content_left + content_width - 24.0 - control_width;
+                let control_top = scene_row.bounds.y + 20.0 * scale;
+                let control_height = scaled_text_box_height(34.0, self.text_scale);
                 fills.push(node(
                     "settings-text-scale-segmented-control",
                     Role::Group,
                     "",
                     control_left,
-                    scene_row.bounds.y + 20.0,
-                    216.0,
-                    34.0,
+                    control_top,
+                    control_width,
+                    control_height,
                     STATE_REST_SURFACE_TOKEN,
                 ));
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
-                    let x = control_left + segment as f32 * 72.0;
+                    let x = control_left + segment_widths[..segment].iter().sum::<f32>();
+                    let segment_width = segment_widths[segment];
+                    let value_width = value_widths[segment];
                     if selected {
                         fills.push(node(
                             &format!("settings-text-scale-selected-{value}"),
                             Role::Group,
                             "",
                             x,
-                            scene_row.bounds.y + 20.0,
-                            72.0,
-                            34.0,
+                            control_top,
+                            segment_width,
+                            control_height,
                             COLOR_SURFACE_RAISED_TOKEN,
                         ));
                     }
@@ -4529,9 +4578,9 @@ impl ShellCore {
                             Role::Group,
                             "",
                             x,
-                            scene_row.bounds.y + 20.0,
+                            control_top,
                             SEGMENT_DIVIDER_WIDTH,
-                            34.0,
+                            control_height,
                             STATE_DISABLED_BORDER_TOKEN,
                         ));
                     }
@@ -4539,10 +4588,10 @@ impl ShellCore {
                         &format!("settings-text-scale-value-{value}"),
                         Role::Text,
                         value,
-                        x + 8.0,
-                        scene_row.bounds.y + 24.0,
-                        56.0,
-                        26.0,
+                        x + (segment_width - value_width) / 2.0,
+                        scene_row.bounds.y + 24.0 * scale,
+                        value_width,
+                        scaled_text_box_height(26.0, self.text_scale),
                         if selected {
                             COLOR_SURFACE_RAISED_TOKEN
                         } else {
@@ -4558,15 +4607,18 @@ impl ShellCore {
                     .is_some_and(|line| line.starts_with("ON") || line.starts_with("OFF"))
             {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
-                let control_left = content_left + content_width - 136.0;
+                let state = if on { "ON" } else { "OFF" };
+                let state_width = settings_scaled_box_width(44.0, state, self.text_scale);
+                let control_right = content_left + content_width - 26.0;
+                let control_left = control_right - state_width - 8.0 - 58.0;
                 let mut state_node = node(
                     &format!("settings-toggle-{}-state", row.id),
                     Role::Text,
-                    if on { "ON" } else { "OFF" },
+                    state,
                     control_left,
-                    scene_row.bounds.y + 24.0,
-                    44.0,
-                    26.0,
+                    scene_row.bounds.y + 24.0 * scale,
+                    state_width,
+                    scaled_text_box_height(26.0, self.text_scale),
                     row_surface,
                 );
                 state_node.state.focused = focused;
@@ -4575,7 +4627,7 @@ impl ShellCore {
                     &format!("settings-toggle-{}-track", row.id),
                     Role::Group,
                     "",
-                    control_left + 52.0,
+                    control_left + state_width + 8.0,
                     scene_row.bounds.y + 25.0,
                     58.0,
                     28.0,
@@ -4589,7 +4641,7 @@ impl ShellCore {
                     &format!("settings-toggle-{}-knob", row.id),
                     Role::Group,
                     "",
-                    control_left + if on { 86.0 } else { 56.0 },
+                    control_left + state_width + if on { 42.0 } else { 12.0 },
                     scene_row.bounds.y + 29.0,
                     20.0,
                     20.0,
@@ -4600,14 +4652,15 @@ impl ShellCore {
                     },
                 ));
             } else if let Some(control) = lines.get(2) {
+                let control_width = 104.0 * scale;
                 let mut control_node = node(
                     &format!("settings-row-{}-control", row.id),
                     Role::Text,
                     control,
-                    content_left + content_width - 120.0,
-                    scene_row.bounds.y + 24.0,
-                    104.0,
-                    26.0,
+                    content_left + content_width - 16.0 - control_width,
+                    scene_row.bounds.y + 24.0 * scale,
+                    control_width,
+                    scaled_text_box_height(26.0, self.text_scale) + 8.0 * (scale - 1.0),
                     row_surface,
                 );
                 control_node.state.focused = focused;
@@ -6138,9 +6191,12 @@ fn rooms_layout(
         nodes.remove(index)
     }
 
+    let scale_delta = f32::from(text_scale) / 100.0 - 1.0;
+    let keycap_height = KEYCAP_HEIGHT + 8.0 * scale_delta;
+    let room_height = 32.0 + 12.0 * scale_delta;
     let keycap = |mut border: Node, mut fill: Node, mut label: Node| {
         border.layout = Some(LayoutStyle {
-            ..fixed_layout(KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+            ..fixed_layout(KEYCAP_MIN_WIDTH, keycap_height)
         });
         fill.layout = Some(LayoutStyle {
             position: Position::Absolute,
@@ -6170,7 +6226,7 @@ fn rooms_layout(
         let advance = room_label_advance(&label.accessible_label, text_scale);
         let width = room_label_box_width(advance);
         label.layout = Some(LayoutStyle {
-            ..fixed_layout(width, 32.0)
+            ..fixed_layout(width, room_height)
         });
         // Center alignment paints into the full node width. Start alignment reserves
         // the renderer's larger inline inset, which is not part of the room CSS box.
@@ -6179,7 +6235,7 @@ fn rooms_layout(
             underline.layout = Some(LayoutStyle {
                 position: Position::Absolute,
                 inset: Edges {
-                    top: LayoutValue::Px(33.0),
+                    top: LayoutValue::Px(room_height + 1.0),
                     bottom: LayoutValue::Auto,
                     left: LayoutValue::Px(ROOM_HORIZONTAL_PADDING),
                     right: LayoutValue::Auto,
@@ -12981,6 +13037,8 @@ mod tests {
                         label_node.bounds.width
                     );
                     assert_eq!(label_node.text_align, TextAlign::Center);
+                    let scale_delta = f32::from(text_scale) / 100.0 - 1.0;
+                    assert_eq!(label_node.bounds.height, 32.0 + 12.0 * scale_delta);
                     assert!(
                         (label_node.bounds.y + label_node.bounds.height / 2.0 - 32.0).abs()
                             < f32::EPSILON
@@ -13004,7 +13062,10 @@ mod tests {
                     let glyph = node_by_id(root, id).unwrap();
                     assert_eq!(
                         (border.bounds.width, border.bounds.height),
-                        (KEYCAP_MIN_WIDTH, KEYCAP_HEIGHT)
+                        (
+                            KEYCAP_MIN_WIDTH,
+                            KEYCAP_HEIGHT + 8.0 * (f32::from(text_scale) / 100.0 - 1.0)
+                        )
                     );
                     assert!(
                         (glyph.bounds.x + glyph.bounds.width / 2.0

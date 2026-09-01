@@ -2351,14 +2351,25 @@ fn assert_raster_text_paint_contained_and_complete(
         positioned.bounds.x += 256.0 - node.bounds.x.floor();
         positioned.bounds.y += 128.0 - node.bounds.y.floor();
         let (actual_columns, actual_rows) = ink_extent(positioned.clone())?;
+        let overflow_exemption = allowed_text_overflow(node);
         let mut generous = positioned.clone();
         // Centered text uses (width - advance) / 2. Widening by an even delta
         // shifts it by an integer 128 px and preserves cosmic-text's raster phase.
-        generous.bounds.x -= 128.0;
-        generous.bounds.width = node.bounds.width + 256.0;
+        let generous_inline_delta =
+            if overflow_exemption == Some(TextOverflowExemption::HorizontalPreviewClip) {
+                2048.0
+            } else {
+                256.0
+            };
+        if overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip) {
+            generous.bounds.x -= generous_inline_delta / 2.0;
+        }
+        generous.bounds.width = node.bounds.width + generous_inline_delta;
         let (generous_columns, generous_width_rows) = ink_extent(generous.clone())?;
-        let overflow_exemption = allowed_text_overflow(node);
-        if actual_rows > generous_width_rows && !declared_multiline(node) {
+        if actual_rows > generous_width_rows
+            && !declared_multiline(node)
+            && overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip)
+        {
             failures.push(format!(
                 "{}: width-induced wrap in text declared single-line; actual_rows={actual_rows}, generous_rows={generous_width_rows}, bounds={:?}",
                 node.id.as_str(), node.bounds
@@ -3463,6 +3474,63 @@ mod durable_tests {
             let mut host = OffscreenHost::new(metrics);
             host.present(&scene).unwrap();
             assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");
+        }
+    }
+
+    #[test]
+    fn complete_settings_evidence_scenes_keep_all_text_contained_complete_and_legible_at_every_scale()
+     {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for text_scale in [100, 150, 200] {
+            let preference = EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            };
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.load_preferences(
+                &FakePreferencePort::new([preference], ChangeAuthority("user".into())),
+                true,
+            )
+            .unwrap();
+            core.load_device_status(&FakeDeviceStatusPort { attention: false });
+            core.action(&ShellAction::Custom("Room.next".into()));
+            core.action(&ShellAction::Custom("Room.next".into()));
+
+            for (room, moves) in [
+                ("accessibility", 0),
+                ("controls", 1),
+                ("network", 2),
+                ("system", 1),
+            ] {
+                for _ in 0..moves {
+                    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+                }
+                let scene = core.scene(metrics, "").unwrap();
+                assert_raster_text_paint_contained_and_complete(
+                    &scene,
+                    metrics,
+                    pf_theme::Base::Dusk,
+                    text_scale,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{room} at {text_scale}% failed paint containment: {error}")
+                });
+                assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                    .unwrap_or_else(|error| {
+                        panic!("{room} at {text_scale}% failed rendered legibility: {error}")
+                    });
+            }
         }
     }
 

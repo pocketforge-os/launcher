@@ -15,6 +15,26 @@ fn render_offscreen() -> (tempfile::TempDir, String) {
 }
 
 #[test]
+fn two_fresh_process_offscreen_runs_are_byte_identical() {
+    let (first, _) = render_offscreen();
+    let (second, _) = render_offscreen();
+    for entry in std::fs::read_dir(first.path()).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "png")
+        {
+            let name = entry.file_name();
+            assert_eq!(
+                std::fs::read(entry.path()).unwrap(),
+                std::fs::read(second.path().join(name)).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn every_presented_evidence_route_has_action_labels_and_rasterized_text_ink() {
     for extra_args in [Vec::<&str>::new(), vec!["--settings-evidence"]] {
         let out = tempfile::tempdir().unwrap();

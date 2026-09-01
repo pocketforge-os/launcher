@@ -4913,7 +4913,10 @@ exec="./launch"
         };
         let boot_scene = core.scene(metrics, "").unwrap();
         assert!(boot_scene.root().children.iter().any(|node| {
-            node.id.as_str() == "status-cluster" && node.accessible_label.contains('!')
+            (node.id.as_str() == "status-cluster" && node.accessible_label.contains('!'))
+                || node.children.iter().any(|child| {
+                    child.id.as_str() == "status-cluster" && child.accessible_label.contains('!')
+                })
         }));
         assert!(
             !boot_scene

@@ -3464,7 +3464,7 @@ mod durable_tests {
                 .expect("shared prompt row")
                 .clone();
             let expected_height = 32.0 * f32::from(core.text_scale()) / 100.0;
-            assert_eq!(prompt.bounds.height, expected_height);
+            assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
             assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
             let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
             let root = Node::new(

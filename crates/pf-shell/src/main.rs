@@ -2248,31 +2248,30 @@ fn assert_raster_text_paint_contained_and_complete(
         root
     }
 
-    fn allowed_text_overflow(node: &Node) -> Option<&'static str> {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TextOverflowExemption {
+        HorizontalPreviewClip,
+        SingleFringeRow,
+    }
+
+    fn allowed_text_overflow(node: &Node) -> Option<TextOverflowExemption> {
         match node.id.as_str() {
             // The unavailable-card caption uses a fixed 20px footer line box. Its
             // glyph body is complete, but one anti-aliased fringe row is clipped
             // deliberately to preserve the ratcheted card composition.
             "home-card-reason-steam-link" | "library-card-reason-steam-link" => {
-                Some("fixed unavailable-card footer clips one anti-aliased fringe row")
+                Some(TextOverflowExemption::SingleFringeRow)
             }
-            // The disabled Safe Return row deliberately presents the device's
-            // potentially long binding as a clipped trailing-control preview; the
-            // complete binding remains available in the row's accessible label.
-            "settings-row-controls-safe-return-control" => {
-                Some("fixed-width trailing-control preview; full binding is on the parent row")
+            // These compact trailing controls are deliberately horizontal previews:
+            // Safe Return shows a potentially long binding, SSIDs are unbounded
+            // external strings, and the device/storage descriptor mirrors explanatory
+            // parent-row content. Each complete value remains in its parent row's
+            // accessible label; only horizontal clipping is exempted here.
+            "settings-row-controls-safe-return-control"
+            | "settings-row-network-ssid-control"
+            | "settings-row-system-device-control" => {
+                Some(TextOverflowExemption::HorizontalPreviewClip)
             }
-            // SSIDs are unbounded external strings. The row intentionally shows a
-            // clipped trailing preview while retaining the complete SSID in the
-            // parent row's accessible label.
-            "settings-row-network-ssid-control" => {
-                Some("fixed-width trailing-control preview; full SSID is on the parent row")
-            }
-            // The device/storage descriptor is explanatory parent-row content,
-            // mirrored into the compact trailing-control slot as a preview.
-            "settings-row-system-device-control" => Some(
-                "fixed-width trailing-control preview; full device descriptor is on the parent row",
-            ),
             _ => None,
         }
     }
@@ -2357,18 +2356,16 @@ fn assert_raster_text_paint_contained_and_complete(
         // shifts it by an integer 128 px and preserves cosmic-text's raster phase.
         generous.bounds.x -= 128.0;
         generous.bounds.width = node.bounds.width + 256.0;
-        let (generous_columns, generous_width_rows) = ink_extent(generous)?;
-        if actual_rows > generous_width_rows
-            && !declared_multiline(node)
-            && allowed_text_overflow(node).is_none()
-        {
+        let (generous_columns, generous_width_rows) = ink_extent(generous.clone())?;
+        let overflow_exemption = allowed_text_overflow(node);
+        if actual_rows > generous_width_rows && !declared_multiline(node) {
             failures.push(format!(
                 "{}: width-induced wrap in text declared single-line; actual_rows={actual_rows}, generous_rows={generous_width_rows}, bounds={:?}",
                 node.id.as_str(), node.bounds
             ));
         } else if actual_rows <= generous_width_rows
             && actual_columns != generous_columns
-            && allowed_text_overflow(node).is_none()
+            && overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip)
         {
             failures.push(format!(
                 "{}: incomplete painted ink columns; actual={actual_columns}, generous={generous_columns}, bounds={:?}",
@@ -2379,13 +2376,27 @@ fn assert_raster_text_paint_contained_and_complete(
         // Removing the bottom clip is represented by a generous-height paired
         // render. The even delta keeps centered text on an integral raster phase;
         // row-count parity is translation-invariant and exposes hidden wraps.
-        let mut generous_height = positioned;
+        // A horizontal-preview exemption must not turn the preview's intentional
+        // narrow-width wrapping into a vertical exemption. Test its height on the
+        // same widened, phase-stable box used by the width reference, so only the
+        // vertical dimension differs between the paired renders.
+        let (height_actual_rows, mut generous_height) =
+            if overflow_exemption == Some(TextOverflowExemption::HorizontalPreviewClip) {
+                (generous_width_rows, generous)
+            } else {
+                (actual_rows, positioned)
+            };
         generous_height.bounds.y -= 128.0;
         generous_height.bounds.height = node.bounds.height + 256.0;
         let generous_rows = ink_extent(generous_height)?.1;
-        if actual_rows != generous_rows && allowed_text_overflow(node).is_none() {
+        let height_difference_allowed = matches!(
+            overflow_exemption,
+            Some(TextOverflowExemption::SingleFringeRow)
+        ) && generous_rows >= height_actual_rows
+            && generous_rows - height_actual_rows <= 1;
+        if height_actual_rows != generous_rows && !height_difference_allowed {
             failures.push(format!(
-                "{}: painted ink escaped the bottom clip; actual_rows={actual_rows}, generous_rows={generous_rows}, bounds={:?}",
+                "{}: painted ink escaped the bottom clip; actual_rows={height_actual_rows}, generous_rows={generous_rows}, bounds={:?}",
                 node.id.as_str(), node.bounds
             ));
         }
@@ -3201,6 +3212,37 @@ mod durable_tests {
             pf_scene::Bounds::new(20.0, 20.0, 72.0, 32.0),
         );
         assert!(failure.contains("runtime-r4-inset-less-label"), "{failure}");
+    }
+
+    #[test]
+    fn horizontal_preview_exemption_does_not_hide_bottom_clip() {
+        let failure = paint_containment_failure(
+            "settings-row-network-ssid-control",
+            "PocketForge workshop network",
+            pf_scene::Bounds::new(20.0, 20.0, 120.0, 10.0),
+        );
+        assert!(
+            failure.contains("settings-row-network-ssid-control"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains("painted ink escaped the bottom clip"),
+            "horizontal preview exemption must not suppress height containment: {failure}"
+        );
+    }
+
+    #[test]
+    fn single_fringe_row_exemption_rejects_larger_bottom_clip() {
+        let failure = paint_containment_failure(
+            "home-card-reason-steam-link",
+            "Steam Link unavailable",
+            pf_scene::Bounds::new(20.0, 20.0, 180.0, 1.0),
+        );
+        assert!(failure.contains("home-card-reason-steam-link"), "{failure}");
+        assert!(
+            failure.contains("painted ink escaped the bottom clip"),
+            "single-fringe exemption must reject divergence beyond one row: {failure}"
+        );
     }
 
     #[test]

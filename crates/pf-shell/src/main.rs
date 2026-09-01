@@ -2277,6 +2277,14 @@ fn assert_raster_text_paint_contained_and_complete(
         }
     }
 
+    fn declared_multiline(node: &Node) -> bool {
+        // Absolute-positioned shell text does not participate in layout, so this
+        // otherwise-unused constraint is a scene-carried declaration rather than
+        // an inference from the node id, geometry, or current copy. The shell-core
+        // constructor helper documents each deliberate use at its declaration.
+        node.layout.is_none() && node.bounds.max_height == Some(f32::INFINITY)
+    }
+
     // Keep one rasterizer for the whole blanket pass so cosmic-text's font and
     // glyph caches survive across node probes.
     let mut rasterizer = Rasterizer::new();
@@ -2350,9 +2358,15 @@ fn assert_raster_text_paint_contained_and_complete(
         generous.bounds.x -= 128.0;
         generous.bounds.width = node.bounds.width + 256.0;
         let (generous_columns, generous_width_rows) = ink_extent(generous)?;
-        // A deliberately multiline node changes column occupancy when widened;
-        // its completeness is governed by the height comparison below instead.
-        if actual_rows <= generous_width_rows
+        if actual_rows > generous_width_rows
+            && !declared_multiline(node)
+            && allowed_text_overflow(node).is_none()
+        {
+            failures.push(format!(
+                "{}: width-induced wrap in text declared single-line; actual_rows={actual_rows}, generous_rows={generous_width_rows}, bounds={:?}",
+                node.id.as_str(), node.bounds
+            ));
+        } else if actual_rows <= generous_width_rows
             && actual_columns != generous_columns
             && allowed_text_overflow(node).is_none()
         {
@@ -3098,6 +3112,14 @@ mod durable_tests {
     }
 
     fn paint_containment_failure(id: &str, label: &str, bounds: pf_scene::Bounds) -> String {
+        paint_containment_result(id, label, bounds).unwrap_err()
+    }
+
+    fn paint_containment_result(
+        id: &str,
+        label: &str,
+        bounds: pf_scene::Bounds,
+    ) -> Result<(), String> {
         let root_id = pf_scene::NodeId::new("paint-containment-fixture").unwrap();
         let root = Node::new(
             root_id.clone(),
@@ -3125,7 +3147,6 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         };
         assert_raster_text_paint_contained_and_complete(&scene, metrics, pf_theme::Base::Dusk, 100)
-            .unwrap_err()
     }
 
     #[test]
@@ -3146,6 +3167,30 @@ mod durable_tests {
             pf_scene::Bounds::new(20.0, 20.0, 120.0, 18.0),
         );
         assert!(failure.contains("chrome-r1-wrapped-label"), "{failure}");
+    }
+
+    #[test]
+    fn blanket_paint_guard_rejects_visible_width_wrap_unless_declared_multiline() {
+        let bounds = pf_scene::Bounds::new(20.0, 20.0, 120.0, 80.0);
+        let failure = paint_containment_failure(
+            "single-line-intent-wrapped-label",
+            "Accessibility and controller settings",
+            bounds,
+        );
+        assert!(
+            failure.contains("single-line-intent-wrapped-label"),
+            "{failure}"
+        );
+        assert!(failure.contains("width-induced wrap"), "{failure}");
+
+        let mut multiline_bounds = bounds;
+        multiline_bounds.max_height = Some(f32::INFINITY);
+        paint_containment_result(
+            "declared-multiline-label",
+            "Accessibility and controller settings",
+            multiline_bounds,
+        )
+        .unwrap();
     }
 
     #[test]

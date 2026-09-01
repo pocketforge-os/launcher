@@ -5181,7 +5181,7 @@ impl ShellCore {
                 COLOR_STATUS_ATTENTION_TOKEN,
             ));
         }
-        out.push(node(
+        out.push(declared_multiline(node(
             "quick-truth",
             Role::Text,
             "Nothing is running now. Quick shows only what applies right here.",
@@ -5190,7 +5190,7 @@ impl ShellCore {
             352.0,
             60.0,
             COLOR_SURFACE_SCRIM_TOKEN,
-        ));
+        )));
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
         out.push(node(
@@ -6009,6 +6009,16 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+/// Declares that wrapping is intentional for this absolute-positioned text node.
+///
+/// Absolute nodes never consume layout constraints, so infinity is a pixel-neutral
+/// scene marker that the blanket raster guard can distinguish from accidental wrap.
+fn declared_multiline(mut node: Node) -> Node {
+    debug_assert!(node.layout.is_none());
+    node.bounds.max_height = Some(f32::INFINITY);
+    node
 }
 
 #[cfg(test)]

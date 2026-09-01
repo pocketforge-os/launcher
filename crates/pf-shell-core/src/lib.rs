@@ -2992,9 +2992,9 @@ impl ShellCore {
         )
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
-            prompt_node.children = home_prompt_nodes(&footer, w, h);
+            prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
         } else if self.route == Route::Library {
-            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h);
+            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
         wrap_system_layout(&mut children, w);
@@ -6383,19 +6383,19 @@ fn rooms_layout(
     anchor
 }
 
-fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
-    fn binding_width(binding: &str) -> f32 {
+fn home_prompt_nodes(
+    footer: &str,
+    surface_width: f32,
+    surface_height: f32,
+    text_scale: u16,
+) -> Vec<Node> {
+    fn binding_width(binding: &str, scale: f32) -> f32 {
         let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 9.6;
         let delta = (measured - KEYCAP_MIN_WIDTH).max(0.0).ceil();
-        KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0
+        (KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0) * scale
     }
 
-    fn outline(prefix: &str, x: f32, y: f32, width: f32, wide: bool) -> Node {
-        let radius = if wide {
-            RADIUS_S.min(KEYCAP_HEIGHT / 2.0)
-        } else {
-            KEYCAP_HEIGHT / 2.0
-        };
+    fn outline(prefix: &str, x: f32, y: f32, width: f32, height: f32) -> Node {
         node(
             &format!("{prefix}-border"),
             Role::Group,
@@ -6403,10 +6403,10 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
             x,
             y,
             width,
-            KEYCAP_HEIGHT,
+            height,
             SCENE_TRANSPARENT_TOKEN,
         )
-        .with_corner_radius(radius)
+        .with_corner_radius(height / 2.0)
         .with_border(COLOR_BORDER_STRONG_TOKEN, KEYCAP_BORDER_WIDTH)
     }
 
@@ -6418,7 +6418,11 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
         }
     }
 
-    let y = surface_height - PROMPTS_AREA_HEIGHT + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+    let scale = f32::from(text_scale) / 100.0;
+    let keycap_height = KEYCAP_HEIGHT * scale;
+    let row_height = scaled_text_box_height(32.0, text_scale);
+    let prompt_area_height = PROMPTS_AREA_HEIGHT.max(row_height);
+    let y = surface_height - prompt_area_height + (prompt_area_height - keycap_height) / 2.0;
     let mut x = 0.0;
     let mut nodes = Vec::new();
     for (index, prompt) in footer.split(" · ").enumerate() {
@@ -6427,17 +6431,11 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
         };
         let verb = verb.trim_start();
         if index > 0 {
-            x += SPACE_5;
+            x += SPACE_5 * scale;
         }
-        let binding_width = binding_width(binding);
+        let binding_width = binding_width(binding, scale);
         let prefix = format!("home-prompt-keycap-{index}");
-        nodes.push(outline(
-            &prefix,
-            x,
-            y,
-            binding_width,
-            binding.chars().count() > 1,
-        ));
+        nodes.push(outline(&prefix, x, y, binding_width, keycap_height));
         nodes.push(
             node(
                 &prefix,
@@ -6446,15 +6444,15 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                 x,
                 y,
                 binding_width,
-                KEYCAP_HEIGHT,
+                keycap_height,
                 SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Caption)
             .with_text_align(TextAlign::Center)
             .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         );
-        x += binding_width + SPACE_2;
-        let verb_width = text_node_box_width(library_prompt_verb_width(verb));
+        x += binding_width + SPACE_2 * scale;
+        let verb_width = text_node_box_width(library_prompt_verb_width(verb)) * scale;
         nodes.push(
             node(
                 &format!("home-prompt-verb-{index}"),
@@ -6463,7 +6461,7 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
                 x,
                 y,
                 verb_width,
-                KEYCAP_HEIGHT,
+                keycap_height,
                 SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Label)
@@ -6471,14 +6469,19 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
         );
         x += verb_width;
     }
-    let offset = surface_width - SPACE_7 - x;
+    let offset = surface_width - SPACE_7 * scale - x;
     for node in &mut nodes {
         translate(node, offset, 0.0);
     }
     nodes
 }
 
-fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> Vec<Node> {
+fn right_aligned_prompt_nodes(
+    footer: &str,
+    surface_width: f32,
+    surface_height: f32,
+    text_scale: u16,
+) -> Vec<Node> {
     fn translate(node: &mut Node, dx: f32, dy: f32) {
         node.bounds.x += dx;
         node.bounds.y += dy;
@@ -6487,9 +6490,12 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         }
     }
     let normalized = footer.replace("     ", " · ");
-    let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height);
-    let prompt_top = surface_height - PROMPTS_AREA_HEIGHT;
-    let centered_y = prompt_top + (PROMPTS_AREA_HEIGHT - KEYCAP_HEIGHT) / 2.0;
+    let scale = f32::from(text_scale) / 100.0;
+    let keycap_height = KEYCAP_HEIGHT * scale;
+    let prompt_area_height = PROMPTS_AREA_HEIGHT.max(scaled_text_box_height(32.0, text_scale));
+    let mut nodes = home_prompt_nodes(&normalized, surface_width, surface_height, text_scale);
+    let prompt_top = surface_height - prompt_area_height;
+    let centered_y = prompt_top + (prompt_area_height - keycap_height) / 2.0;
     for node in &mut nodes {
         let id = node.id.as_str();
         let suffix = id
@@ -6501,7 +6507,11 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         else {
             continue;
         };
-        translate(node, -(index as f32 * SPACE_2), centered_y - node.bounds.y);
+        translate(
+            node,
+            -(index as f32 * SPACE_2 * scale),
+            centered_y - node.bounds.y,
+        );
     }
     let prompt_count = nodes
         .iter()
@@ -6534,15 +6544,16 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
         }) {
             translate(node, x - keycap_x, 0.0);
         }
-        x += keycap_width + SPACE_2;
+        x += keycap_width + SPACE_2 * scale;
 
         let verb = nodes
             .iter_mut()
             .find(|node| node.id.as_str() == format!("home-prompt-verb-{index}"))
             .expect("prompt verb");
         verb.bounds.x = x;
-        verb.bounds.width = text_node_box_width(library_prompt_verb_width(&verb.accessible_label));
-        x += verb.bounds.width + SPACE_5;
+        verb.bounds.width =
+            text_node_box_width(library_prompt_verb_width(&verb.accessible_label)) * scale;
+        x += verb.bounds.width + SPACE_5 * scale;
     }
     let right = nodes
         .iter()
@@ -6559,7 +6570,7 @@ fn right_aligned_prompt_nodes(footer: &str, surface_width: f32, surface_height: 
                 "Details" => 7.0,
                 _ => 0.0,
             });
-    let offset = surface_width - LIBRARY_SIDE_MARGIN + last_verb_ink_inset - right;
+    let offset = surface_width - LIBRARY_SIDE_MARGIN * scale + last_verb_ink_inset * scale - right;
     for node in &mut nodes {
         translate(node, offset, 0.0);
     }

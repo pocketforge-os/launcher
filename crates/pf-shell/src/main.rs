@@ -3463,9 +3463,27 @@ mod durable_tests {
             let prompt = find_prompt(scene.root())
                 .expect("shared prompt row")
                 .clone();
-            let expected_height = 32.0 * f32::from(core.text_scale()) / 100.0;
+            let scale = f32::from(core.text_scale()) / 100.0;
+            let expected_height = 32.0 * scale;
             assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
             assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
+            for keycap in prompt.children.iter().filter(|node| {
+                let id = node.id.as_str();
+                id.starts_with("home-prompt-keycap-") && !id.ends_with("-border")
+            }) {
+                let border_id = format!("{}-border", keycap.id.as_str());
+                let border = prompt
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == border_id)
+                    .expect("each prompt keycap label has a border");
+                let expected_keycap_height = 24.0 * scale;
+                assert!((border.bounds.height - expected_keycap_height).abs() < f32::EPSILON);
+                assert!((keycap.bounds.x - border.bounds.x).abs() < f32::EPSILON);
+                assert!((keycap.bounds.y - border.bounds.y).abs() < f32::EPSILON);
+                assert!((keycap.bounds.width - border.bounds.width).abs() < f32::EPSILON);
+                assert!((keycap.bounds.height - border.bounds.height).abs() < f32::EPSILON);
+            }
             let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
             let root = Node::new(
                 root_id.clone(),
@@ -3529,6 +3547,13 @@ mod durable_tests {
             });
             assert_prompt_guard(&core, metrics);
         }
+
+        assert_eq!(core.text_scale(), 200);
+        core.action(&ShellAction::Back);
+        core.action(&ShellAction::Custom("Room.prev".into()));
+        assert_prompt_guard(&core, metrics);
+        core.action(&ShellAction::Custom("Room.prev".into()));
+        assert_prompt_guard(&core, metrics);
     }
 
     #[test]

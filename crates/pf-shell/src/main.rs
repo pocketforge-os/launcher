@@ -2226,7 +2226,6 @@ fn raster_guard_record(
 const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
 const UNDERLAY_ROLE_MARKER: &str = "--scene-underlay-role";
 
-#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn text_ink_intersects(
     earlier_ink: Option<pf_scene::Bounds>,
     later_ink: Option<pf_scene::Bounds>,
@@ -2236,105 +2235,199 @@ fn text_ink_intersects(
     })
 }
 
+struct OcclusionPaintedNode<'a> {
+    node: &'a Node,
+    ancestors: Vec<&'a str>,
+}
+
+fn collect_occlusion_nodes<'a>(
+    node: &'a Node,
+    ancestors: &mut Vec<&'a str>,
+    out: &mut Vec<OcclusionPaintedNode<'a>>,
+) {
+    out.push(OcclusionPaintedNode {
+        node,
+        ancestors: ancestors.clone(),
+    });
+    ancestors.push(node.id.as_str());
+    for child in &node.children {
+        collect_occlusion_nodes(child, ancestors, out);
+    }
+    ancestors.pop();
+}
+
+fn occlusion_nodes_related(a: &OcclusionPaintedNode<'_>, b: &OcclusionPaintedNode<'_>) -> bool {
+    a.ancestors.contains(&b.node.id.as_str())
+        || b.ancestors.contains(&a.node.id.as_str())
+        // A shared component owns the geometry of all its descendants. The
+        // scene root is only a paint-order container, not shared ownership.
+        || a.ancestors
+            .iter()
+            .skip(1)
+            .any(|ancestor| b.ancestors.contains(ancestor))
+}
+
+fn occlusion_node_is_text(node: &Node) -> bool {
+    matches!(node.role, Role::Text | Role::Heading) && !node.accessible_label.trim().is_empty()
+}
+
+fn occlusion_node_is_content(node: &Node) -> bool {
+    occlusion_node_is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. })
+}
+
+fn occlusion_node_declares_overlay(node: &Node) -> bool {
+    node.ink_token.as_deref() == Some(OVERLAY_ROLE_MARKER)
+}
+
+fn occlusion_node_declares_underlay(node: &Node) -> bool {
+    node.ink_token.as_deref() == Some(UNDERLAY_ROLE_MARKER)
+}
+
+fn occlusion_node_has_opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
+    if occlusion_node_is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. }) {
+        return false;
+    }
+    let theme = pf_theme::flagship();
+    let Ok(value) = theme.resolve(base, &node.style_token) else {
+        return false;
+    };
+    let value = value.trim();
+    if value == "transparent" {
+        return false;
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
+    }
+    !value.starts_with("rgba(") && !value.contains("gradient")
+}
+
+fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
+    if node.ink_token.as_deref() != Some(OVERLAY_ROLE_MARKER) {
+        return Err("library-grid-footer-fade: missing explicit overlay marker".into());
+    }
+    let pf_scene::NodeContent::Image { source, .. } = &node.content else {
+        return Err("library-grid-footer-fade: overlay must remain an image gradient".into());
+    };
+    let decoder = png::Decoder::new(std::io::Cursor::new(source.bytes.as_ref()));
+    let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut pixels)
+        .map_err(|error| error.to_string())?;
+    let bytes = &pixels[..info.buffer_size()];
+    let alphas = bytes.chunks_exact(4).map(|pixel| pixel[3]);
+    let min = alphas.clone().min().unwrap_or(255);
+    let max = alphas.max().unwrap_or(255);
+    if min == 255 || min == max {
+        return Err(format!(
+            "library-grid-footer-fade: overlay must be non-opaque and gradient; alpha={min}..{max}"
+        ));
+    }
+    Ok(())
+}
+
+// Render surfaces are far smaller than f32's exact-integer range.
+#[allow(clippy::cast_precision_loss)]
+fn occlusion_text_ink_bounds(
+    scene: &pf_scene::Scene,
+    rasterizer: &mut Rasterizer,
+    metrics: SurfaceMetrics,
+    node: &Node,
+) -> Result<Option<pf_scene::Bounds>, String> {
+    let mut root = scene.root().clone();
+    root.role = Role::Group;
+    root.accessible_label.clear();
+    root.children = vec![node.clone()];
+    let root_id = root.id.clone();
+    let painted_scene =
+        pf_scene::Scene::new(root.clone(), root_id.clone()).map_err(|error| error.to_string())?;
+    let mut blank = node.clone();
+    blank.role = Role::Group;
+    root.children = vec![blank];
+    let blank_scene = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
+    let painted = rasterizer
+        .render(&painted_scene, metrics)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let blank = rasterizer
+        .render(&blank_scene, metrics)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let width = painted.width as usize;
+    let mut extent: Option<(usize, usize, usize, usize)> = None;
+    for (pixel, (ink, background)) in painted
+        .rgba
+        .chunks_exact(4)
+        .zip(blank.rgba.chunks_exact(4))
+        .enumerate()
+    {
+        if ink == background {
+            continue;
+        }
+        let (x, y) = (pixel % width, pixel / width);
+        extent = Some(extent.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
+            (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+        }));
+    }
+    Ok(extent.map(|(min_x, min_y, max_x, max_y)| {
+        pf_scene::Bounds::new(
+            min_x as f32,
+            min_y as f32,
+            (max_x - min_x + 1) as f32,
+            (max_y - min_y + 1) as f32,
+        )
+    }))
+}
+
+fn evaluate_occlusion_pair(
+    earlier: &OcclusionPaintedNode<'_>,
+    later: &OcclusionPaintedNode<'_>,
+    ink_bounds_by_id: &BTreeMap<&str, Option<pf_scene::Bounds>>,
+    base: pf_theme::Base,
+    failures: &mut Vec<String>,
+) {
+    if occlusion_nodes_related(earlier, later) {
+        return;
+    }
+    if occlusion_node_is_content(earlier.node)
+        && intersects_bounds(earlier.node.bounds, later.node.bounds)
+        && !occlusion_node_declares_underlay(earlier.node)
+        && occlusion_node_has_opaque_fill(later.node, base)
+        && !occlusion_node_declares_overlay(later.node)
+    {
+        failures.push(format!(
+            "opaque fill {} paints over foreign content {}",
+            later.node.id.as_str(),
+            earlier.node.id.as_str()
+        ));
+    }
+    if occlusion_node_is_text(earlier.node)
+        && occlusion_node_is_text(later.node)
+        && !occlusion_node_declares_overlay(earlier.node)
+        && !occlusion_node_declares_overlay(later.node)
+        && text_ink_intersects(
+            ink_bounds_by_id[earlier.node.id.as_str()],
+            ink_bounds_by_id[later.node.id.as_str()],
+        )
+    {
+        failures.push(format!(
+            "text {} intersects foreign text {}",
+            earlier.node.id.as_str(),
+            later.node.id.as_str()
+        ));
+    }
+}
+
+fn intersects_bounds(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+}
+
 fn assert_scene_occlusion_safe(
     scene: &pf_scene::Scene,
     metrics: SurfaceMetrics,
     base: pf_theme::Base,
     text_scale: u16,
 ) -> Result<(), String> {
-    struct PaintedNode<'a> {
-        node: &'a Node,
-        ancestors: Vec<&'a str>,
-    }
-
-    fn walk<'a>(node: &'a Node, ancestors: &mut Vec<&'a str>, out: &mut Vec<PaintedNode<'a>>) {
-        out.push(PaintedNode {
-            node,
-            ancestors: ancestors.clone(),
-        });
-        ancestors.push(node.id.as_str());
-        for child in &node.children {
-            walk(child, ancestors, out);
-        }
-        ancestors.pop();
-    }
-
-    fn intersects(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
-        a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
-    }
-
-    fn related(a: &PaintedNode<'_>, b: &PaintedNode<'_>) -> bool {
-        a.ancestors.contains(&b.node.id.as_str())
-            || b.ancestors.contains(&a.node.id.as_str())
-            // A shared component owns the geometry of all its descendants. The
-            // scene root is only a paint-order container, not shared ownership.
-            || a.ancestors
-                .iter()
-                .skip(1)
-                .any(|ancestor| b.ancestors.contains(ancestor))
-    }
-
-    fn is_text(node: &Node) -> bool {
-        matches!(node.role, Role::Text | Role::Heading) && !node.accessible_label.trim().is_empty()
-    }
-
-    fn is_content(node: &Node) -> bool {
-        is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. })
-    }
-
-    fn declares_overlay(node: &Node) -> bool {
-        node.ink_token.as_deref() == Some(OVERLAY_ROLE_MARKER)
-    }
-
-    fn declares_underlay(node: &Node) -> bool {
-        node.ink_token.as_deref() == Some(UNDERLAY_ROLE_MARKER)
-    }
-
-    fn opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
-        if is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. }) {
-            return false;
-        }
-        let theme = pf_theme::flagship();
-        let Ok(value) = theme.resolve(base, &node.style_token) else {
-            return false;
-        };
-        let value = value.trim();
-        if value == "transparent" {
-            return false;
-        }
-        if let Some(hex) = value.strip_prefix('#') {
-            return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
-        }
-        !value.starts_with("rgba(") && !value.contains("gradient")
-    }
-
-    fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
-        if node.ink_token.as_deref() != Some(OVERLAY_ROLE_MARKER) {
-            return Err("library-grid-footer-fade: missing explicit overlay marker".into());
-        }
-        let pf_scene::NodeContent::Image { source, .. } = &node.content else {
-            return Err("library-grid-footer-fade: overlay must remain an image gradient".into());
-        };
-        let decoder = png::Decoder::new(std::io::Cursor::new(source.bytes.as_ref()));
-        let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
-        let mut pixels = vec![0; reader.output_buffer_size()];
-        let info = reader
-            .next_frame(&mut pixels)
-            .map_err(|error| error.to_string())?;
-        let bytes = &pixels[..info.buffer_size()];
-        let alphas = bytes.chunks_exact(4).map(|pixel| pixel[3]);
-        let min = alphas.clone().min().unwrap_or(255);
-        let max = alphas.max().unwrap_or(255);
-        if min == 255 || min == max {
-            return Err(format!(
-                "library-grid-footer-fade: overlay must be non-opaque and gradient; alpha={min}..{max}"
-            ));
-        }
-        Ok(())
-    }
-
     let mut nodes = Vec::new();
-    walk(scene.root(), &mut Vec::new(), &mut nodes);
+    collect_occlusion_nodes(scene.root(), &mut Vec::new(), &mut nodes);
     if let Some(fade) = nodes
         .iter()
         .find(|entry| entry.node.id.as_str() == "library-grid-footer-fade")
@@ -2349,89 +2442,19 @@ fn assert_scene_occlusion_safe(
     rasterizer
         .set_text_scale(f32::from(text_scale) / 100.0)
         .map_err(|error| format!("render: {error:?}"))?;
-    let mut text_ink_bounds = |node: &Node| -> Result<Option<pf_scene::Bounds>, String> {
-        let mut root = scene.root().clone();
-        root.role = Role::Group;
-        root.accessible_label.clear();
-        root.children = vec![node.clone()];
-        let root_id = root.id.clone();
-        let painted_scene = pf_scene::Scene::new(root.clone(), root_id.clone())
-            .map_err(|error| error.to_string())?;
-        let mut blank = node.clone();
-        blank.role = Role::Group;
-        root.children = vec![blank];
-        let blank_scene = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
-        let painted = rasterizer
-            .render(&painted_scene, metrics)
-            .map_err(|error| format!("render: {error:?}"))?;
-        let blank = rasterizer
-            .render(&blank_scene, metrics)
-            .map_err(|error| format!("render: {error:?}"))?;
-        let width = painted.width as usize;
-        let mut extent: Option<(usize, usize, usize, usize)> = None;
-        for (pixel, (ink, background)) in painted
-            .rgba
-            .chunks_exact(4)
-            .zip(blank.rgba.chunks_exact(4))
-            .enumerate()
-        {
-            if ink == background {
-                continue;
-            }
-            let (x, y) = (pixel % width, pixel / width);
-            extent = Some(extent.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
-                (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
-            }));
-        }
-        Ok(extent.map(|(min_x, min_y, max_x, max_y)| {
-            pf_scene::Bounds::new(
-                min_x as f32,
-                min_y as f32,
-                (max_x - min_x + 1) as f32,
-                (max_y - min_y + 1) as f32,
-            )
-        }))
-    };
-
     let mut ink_bounds_by_id = BTreeMap::new();
     for entry in &nodes {
-        if is_text(entry.node) {
-            ink_bounds_by_id.insert(entry.node.id.as_str(), text_ink_bounds(entry.node)?);
+        if occlusion_node_is_text(entry.node) {
+            ink_bounds_by_id.insert(
+                entry.node.id.as_str(),
+                occlusion_text_ink_bounds(scene, &mut rasterizer, metrics, entry.node)?,
+            );
         }
     }
     let mut failures = Vec::new();
     for (later_index, later) in nodes.iter().enumerate() {
         for earlier in &nodes[..later_index] {
-            if related(earlier, later) {
-                continue;
-            }
-            if is_content(earlier.node)
-                && intersects(earlier.node.bounds, later.node.bounds)
-                && !declares_underlay(earlier.node)
-                && opaque_fill(later.node, base)
-                && !declares_overlay(later.node)
-            {
-                failures.push(format!(
-                    "opaque fill {} paints over foreign content {}",
-                    later.node.id.as_str(),
-                    earlier.node.id.as_str()
-                ));
-            }
-            if is_text(earlier.node)
-                && is_text(later.node)
-                && !declares_overlay(earlier.node)
-                && !declares_overlay(later.node)
-                && text_ink_intersects(
-                    ink_bounds_by_id[earlier.node.id.as_str()],
-                    ink_bounds_by_id[later.node.id.as_str()],
-                )
-            {
-                failures.push(format!(
-                    "text {} intersects foreign text {}",
-                    earlier.node.id.as_str(),
-                    later.node.id.as_str()
-                ));
-            }
+            evaluate_occlusion_pair(earlier, later, &ink_bounds_by_id, base, &mut failures);
         }
     }
     if failures.is_empty() {

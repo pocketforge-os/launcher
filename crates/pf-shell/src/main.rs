@@ -4722,7 +4722,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     #[test]
-    fn keyboard_mapping_table_only_exposes_effective_actions() {
+    fn wayland_keyboard_mapping_table_only_exposes_effective_actions() {
         let map = effective_map();
         let cases = [
             (Key::Up, 0xff52, ShellAction::Move(pf_scene::AxisMove::Up)),
@@ -4816,7 +4816,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     #[test]
-    fn repeat_scheduler_uses_fake_time_and_only_repeats_focus_moves() {
+    fn wayland_repeat_scheduler_uses_fake_time_and_only_repeats_focus_moves() {
         let mut scheduler = KeyRepeatScheduler::default();
         scheduler.transition(
             1,
@@ -4918,7 +4918,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     #[test]
-    fn closed_wayland_host_yields_closed() {
+    fn wayland_closed_host_yields_closed() {
         let mut input = WaylandInteractiveInput::new(effective_map());
         let mut host = TestWaylandHost {
             closed: true,
@@ -4959,7 +4959,7 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     #[test]
-    fn synthetic_release_clears_wayland_direction_repeat() {
+    fn wayland_synthetic_release_clears_direction_repeat() {
         let info = RepeatInfo {
             rate: 10,
             delay_ms: 300,

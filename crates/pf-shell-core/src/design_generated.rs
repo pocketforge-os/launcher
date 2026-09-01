@@ -147,6 +147,13 @@ pub const TYPE_TITLE_WEIGHT: f32 = 800.0;
 
 // Mechanically extracted component values from shell.css.
 pub const STATUS_BAR_HEIGHT: f32 = 64.0;
+pub const STATUS_BAR_HORIZONTAL_PADDING: f32 = 48.0;
+pub const STATUS_BAR_SIDE_WIDTH: f32 = 200.0;
+pub const ROOM_STRIP_GAP: f32 = 24.0;
+pub const ROOM_HORIZONTAL_PADDING: f32 = 2.0;
+pub const KEYCAP_HEIGHT: f32 = 24.0;
+pub const KEYCAP_MIN_WIDTH: f32 = 24.0;
+pub const KEYCAP_BORDER_WIDTH: f32 = 1.0;
 pub const PROMPTS_AREA_HEIGHT: f32 = 60.0;
 pub const LIB_HEAD_TOP: f32 = 76.0;
 pub const LIB_TOOLBAR_HEIGHT: f32 = 44.0;
@@ -158,5 +165,4 @@ pub const CHIP_HEIGHT: f32 = 44.0;
 pub const CHIP_BORDER_WIDTH: f32 = 1.0;
 pub const CHIP_HORIZONTAL_PADDING: f32 = 16.0;
 pub const SEGMENT_DIVIDER_WIDTH: f32 = 1.0;
-pub const KEYCAP_HEIGHT: f32 = 24.0;
 pub const CARD_ART_ASPECT: f32 = CARD_ART_WIDTH / CARD_ART_HEIGHT;

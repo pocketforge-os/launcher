@@ -6,11 +6,11 @@ const HEIGHT: u32 = 720;
 // Keep every design-match ratchet in this one reviewable table. The PR checklist
 // explicitly forbids lowering these values; improvements should raise them.
 const SCREENS: [(&str, &str, f64); 5] = [
-    ("home", "boot-home.png", 0.938_694),
+    ("home", "boot-home.png", 0.938_874_005_707_607),
     ("library", "library.png", 0.976_248_729_121_278),
-    ("detail", "details.png", 0.940_459),
-    ("settings", "settings.png", 0.959_066),
-    ("high-contrast", "high-contrast.png", 0.911_423),
+    ("detail", "details.png", 0.940_459_872_288_036),
+    ("settings", "settings.png", 0.959_066_767_939_815),
+    ("high-contrast", "high-contrast.png", 0.911_737_872_753_268),
 ];
 
 #[test]

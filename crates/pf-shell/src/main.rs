@@ -2351,14 +2351,25 @@ fn assert_raster_text_paint_contained_and_complete(
         positioned.bounds.x += 256.0 - node.bounds.x.floor();
         positioned.bounds.y += 128.0 - node.bounds.y.floor();
         let (actual_columns, actual_rows) = ink_extent(positioned.clone())?;
+        let overflow_exemption = allowed_text_overflow(node);
         let mut generous = positioned.clone();
         // Centered text uses (width - advance) / 2. Widening by an even delta
         // shifts it by an integer 128 px and preserves cosmic-text's raster phase.
-        generous.bounds.x -= 128.0;
-        generous.bounds.width = node.bounds.width + 256.0;
+        let generous_inline_delta =
+            if overflow_exemption == Some(TextOverflowExemption::HorizontalPreviewClip) {
+                2048.0
+            } else {
+                256.0
+            };
+        if overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip) {
+            generous.bounds.x -= generous_inline_delta / 2.0;
+        }
+        generous.bounds.width = node.bounds.width + generous_inline_delta;
         let (generous_columns, generous_width_rows) = ink_extent(generous.clone())?;
-        let overflow_exemption = allowed_text_overflow(node);
-        if actual_rows > generous_width_rows && !declared_multiline(node) {
+        if actual_rows > generous_width_rows
+            && !declared_multiline(node)
+            && overflow_exemption != Some(TextOverflowExemption::HorizontalPreviewClip)
+        {
             failures.push(format!(
                 "{}: width-induced wrap in text declared single-line; actual_rows={actual_rows}, generous_rows={generous_width_rows}, bounds={:?}",
                 node.id.as_str(), node.bounds
@@ -3463,6 +3474,145 @@ mod durable_tests {
             let mut host = OffscreenHost::new(metrics);
             host.present(&scene).unwrap();
             assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn complete_settings_evidence_scenes_keep_all_text_contained_complete_and_legible_at_every_scale()
+     {
+        fn collect_settings_nav_count(node: &Node) -> usize {
+            usize::from(
+                node.id.as_str().starts_with("settings-nav-")
+                    && !node.id.as_str().ends_with("-label"),
+            ) + node
+                .children
+                .iter()
+                .map(collect_settings_nav_count)
+                .sum::<usize>()
+        }
+
+        fn find_node<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find_node(child, id)))
+        }
+
+        fn assert_toggle_geometry(node: &Node, text_scale: u16) {
+            fn collect<'a>(node: &'a Node, states: &mut Vec<&'a Node>) {
+                if node.id.as_str().starts_with("settings-toggle-")
+                    && node.id.as_str().ends_with("-state")
+                {
+                    states.push(node);
+                }
+                for child in &node.children {
+                    collect(child, states);
+                }
+            }
+            let mut toggle_states = Vec::new();
+            collect(node, &mut toggle_states);
+            for state in toggle_states {
+                let prefix = state.id.as_str().strip_suffix("-state").unwrap();
+                let track = find_node(node, &format!("{prefix}-track")).unwrap();
+                let knob = find_node(node, &format!("{prefix}-knob")).unwrap();
+                let center = |part: &Node| part.bounds.y + part.bounds.height / 2.0;
+                assert!(
+                    (center(state) - center(track)).abs() <= 1.0
+                        && (center(track) - center(knob)).abs() <= 1.0,
+                    "{} at {text_scale}% must share a vertical centerline with its track and knob",
+                    state.id.as_str()
+                );
+                let scale = f32::from(text_scale) / 100.0;
+                assert_eq!(
+                    (track.bounds.width, track.bounds.height),
+                    (58.0 * scale, 28.0 * scale)
+                );
+                assert_eq!(
+                    (knob.bounds.width, knob.bounds.height),
+                    (20.0 * scale, 20.0 * scale)
+                );
+            }
+        }
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for text_scale in [100, 150, 200] {
+            let preference = EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            };
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.load_preferences(
+                &FakePreferencePort::new([preference], ChangeAuthority("user".into())),
+                true,
+            )
+            .unwrap();
+            core.load_device_status(&FakeDeviceStatusPort { attention: false });
+            core.action(&ShellAction::Custom("Room.next".into()));
+            core.action(&ShellAction::Custom("Room.next".into()));
+
+            let initial_scene = core.scene(metrics, "").unwrap();
+            let settings_room_count = collect_settings_nav_count(initial_scene.root());
+            let mut visited_rooms = std::collections::BTreeSet::new();
+            for room_index in 0..settings_room_count {
+                let scene = core.scene(metrics, "").unwrap();
+                let room = find_node(scene.root(), "settings-section-title")
+                    .expect("every Settings room has a section title")
+                    .accessible_label
+                    .clone();
+                assert!(
+                    visited_rooms.insert(room.clone()),
+                    "visited Settings room {room} twice"
+                );
+                assert_raster_text_paint_contained_and_complete(
+                    &scene,
+                    metrics,
+                    pf_theme::Base::Dusk,
+                    text_scale,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{room} at {text_scale}% failed paint containment: {error}")
+                });
+                assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                    .unwrap_or_else(|error| {
+                        panic!("{room} at {text_scale}% failed rendered legibility: {error}")
+                    });
+                assert_toggle_geometry(scene.root(), text_scale);
+                if room_index + 1 < settings_room_count {
+                    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+                }
+            }
+            assert_eq!(
+                visited_rooms.len(),
+                settings_room_count,
+                "the enforcing guard must visit every room exposed by the Settings nav model"
+            );
+
+            core.reset_first_run();
+            let scene = core.scene(metrics, "").unwrap();
+            assert_raster_text_paint_contained_and_complete(
+                &scene,
+                metrics,
+                pf_theme::Base::Dusk,
+                text_scale,
+            )
+            .unwrap_or_else(|error| {
+                panic!("first-run at {text_scale}% failed paint containment: {error}")
+            });
+            assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                .unwrap_or_else(|error| {
+                    panic!("first-run at {text_scale}% failed rendered legibility: {error}")
+                });
         }
     }
 

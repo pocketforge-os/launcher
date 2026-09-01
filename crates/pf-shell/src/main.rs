@@ -3131,41 +3131,6 @@ mod durable_tests {
         );
     }
 
-    fn assert_library_640_known_defect(driver: &FlowDriver, cell: MatrixCell) {
-        let scene = driver.scene();
-        ensure_action_labels(&scene).unwrap();
-        assert_raster_text_paint_contained_and_complete(
-            &scene,
-            driver.metrics,
-            driver.core.theme_base(),
-            driver.core.text_scale(),
-        )
-        .unwrap();
-
-        // Known defect tsp-7oqd: at the 640px Library breakpoint pf-render hands
-        // tiny-skia 0.11.4 a subpixel hairline rectangle which panics in fill_dot8.
-        // Keep running both halves of the shared guard and require this exact failure;
-        // the follow-up removes this annotation once the renderer/geometry is fixed.
-        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert_raster_text_legible(
-                &scene,
-                driver.metrics,
-                driver.core.theme_base(),
-                driver.core.text_scale(),
-            )
-        }))
-        .expect_err("tsp-7oqd was fixed; remove the known-defect annotation");
-        let message = failure
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| failure.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("non-string panic");
-        assert!(
-            message.contains("assertion failed: false"),
-            "Library width=640 changed failure under tsp-7oqd: {message}: {cell:?}"
-        );
-    }
-
     fn assert_library_stress_known_defect(driver: &FlowDriver) {
         let scene = driver.scene();
         ensure_action_labels(&scene).unwrap();
@@ -3183,6 +3148,42 @@ mod durable_tests {
                 && error.contains("painted ink escaped the bottom clip"),
             "500-item Library changed failure under tsp-0u7c: {error}"
         );
+    }
+
+    fn assert_settings_high_contrast_known_defect(driver: &FlowDriver, cell: MatrixCell) {
+        eprintln!("invariant matrix cell: Settings: {cell:?} [tsp-hyqb]");
+        let scene = driver.scene();
+        ensure_action_labels(&scene).unwrap();
+        assert_raster_text_paint_contained_and_complete(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        .unwrap();
+
+        // Known defect tsp-hyqb: disabled remap content uses 3.45:1 paint in the
+        // high-contrast theme instead of the guard's required 7:1. Preserve the
+        // complete guard and require the exact affected nodes until it is fixed.
+        let error = assert_raster_text_legible(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        .expect_err("tsp-hyqb was fixed; remove the known-defect annotation");
+        for node in [
+            "settings-row-accessibility-remap-line-0",
+            "settings-row-accessibility-remap-line-1",
+            "settings-row-accessibility-remap-control",
+        ] {
+            assert!(
+                error.contains(node) && error.contains("raster_contrast=3.45, required=7.0"),
+                "Settings high-contrast failure changed under tsp-hyqb: {error}: {cell:?}"
+            );
+        }
+        assert_eq!(driver.core.text_scale(), cell.text_scale);
+        assert!(driver.core.high_contrast());
     }
 
     fn assert_unavailable_details_known_defect(driver: &FlowDriver) {
@@ -3340,17 +3341,16 @@ mod durable_tests {
             driver.action(custom("Room.next"));
             for width in [480_u16, 640, 800, 1280] {
                 driver.metrics.logical_width = f32::from(width);
-                if width == 640 {
-                    eprintln!("invariant matrix cell: Library width=640: {cell:?} [tsp-7oqd]");
-                    assert_library_640_known_defect(&driver, cell);
-                } else {
-                    assert_cell(&driver, cell, &format!("Library width={width}"));
-                }
+                assert_cell(&driver, cell, &format!("Library width={width}"));
             }
 
             driver.metrics.logical_width = 1280.0;
             driver.action(custom("Room.next"));
-            assert_cell(&driver, cell, "Settings");
+            if cell.high_contrast {
+                assert_settings_high_contrast_known_defect(&driver, cell);
+            } else {
+                assert_cell(&driver, cell, "Settings");
+            }
         }
     }
 

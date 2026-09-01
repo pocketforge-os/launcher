@@ -6269,14 +6269,13 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
         KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn outline(prefix: &str, x: f32, y: f32, width: f32, wide: bool) -> Node {
         let radius = if wide {
             RADIUS_S.min(KEYCAP_HEIGHT / 2.0)
         } else {
             KEYCAP_HEIGHT / 2.0
         };
-        let mut border = node(
+        node(
             &format!("{prefix}-border"),
             Role::Group,
             "",
@@ -6285,42 +6284,9 @@ fn home_prompt_nodes(footer: &str, surface_width: f32, surface_height: f32) -> V
             width,
             KEYCAP_HEIGHT,
             SCENE_TRANSPARENT_TOKEN,
-        );
-        // The scene protocol has no stroke primitive. Trace the rounded perimeter as
-        // adjacent one-pixel rows; unlike the former four-edge approximation, every
-        // corner sample meets its neighbours and therefore paints one continuous ring.
-        for row in 0..KEYCAP_HEIGHT as usize {
-            let row_center = row as f32 + 0.5;
-            let from_end = row_center.min(KEYCAP_HEIGHT - row_center);
-            let inset = if from_end < radius {
-                (radius - (radius * radius - (radius - from_end).powi(2)).sqrt()).round()
-            } else {
-                0.0
-            };
-            let (left_width, right_x) = if row == 0 || row + 1 == KEYCAP_HEIGHT as usize {
-                (width - 2.0 * inset, x + inset)
-            } else {
-                (1.0, x + width - inset - 1.0)
-            };
-            let edges = if row == 0 || row + 1 == KEYCAP_HEIGHT as usize {
-                vec![("span", x + inset, left_width)]
-            } else {
-                vec![("left", x + inset, 1.0), ("right", right_x, 1.0)]
-            };
-            for (side, edge_x, edge_width) in edges {
-                border.children.push(node(
-                    &format!("{prefix}-border-row-{row}-{side}"),
-                    Role::Group,
-                    "",
-                    edge_x,
-                    y + row as f32,
-                    edge_width,
-                    1.0,
-                    COLOR_BORDER_STRONG_TOKEN,
-                ));
-            }
-        }
-        border
+        )
+        .with_corner_radius(radius)
+        .with_border(COLOR_BORDER_STRONG_TOKEN, KEYCAP_BORDER_WIDTH)
     }
 
     fn translate(node: &mut Node, dx: f32, dy: f32) {
@@ -11035,22 +11001,15 @@ mod tests {
                     border.bounds.height / 2.0
                 };
                 assert_eq!(border.corner_radius, expected_radius);
-                assert!(
-                    !border.children.is_empty()
-                        && border.children.iter().all(|edge| {
-                            edge.style_token == COLOR_BORDER_STRONG_TOKEN
-                                && edge.accessible_label.is_empty()
-                        }),
-                    "keycap outline must carry only the border-strong paint token"
+                assert_eq!(
+                    border.border_token.as_deref(),
+                    Some(COLOR_BORDER_STRONG_TOKEN)
                 );
-                assert!(border.children.iter().all(|edge| {
-                    edge.bounds.x >= border.bounds.x
-                        && edge.bounds.x + edge.bounds.width
-                            <= border.bounds.x + border.bounds.width
-                        && edge.bounds.y >= border.bounds.y
-                        && edge.bounds.y + edge.bounds.height
-                            <= border.bounds.y + border.bounds.height
-                }));
+                assert_eq!(border.border_width, KEYCAP_BORDER_WIDTH);
+                assert!(
+                    border.children.is_empty(),
+                    "runtime border node must replace scanline outline children"
+                );
 
                 let metrics = SurfaceMetrics {
                     logical_width: 1280.0,

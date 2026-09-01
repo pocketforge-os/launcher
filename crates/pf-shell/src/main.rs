@@ -3433,6 +3433,26 @@ mod durable_tests {
 
     #[test]
     fn home_text_paint_is_complete_at_supported_scales() {
+        fn find_node<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find_node(child, id)))
+        }
+
+        fn assert_predecessor_gap(scene: &pf_scene::Scene, before: &str, after: &str, gap: f32) {
+            let before = find_node(scene.root(), before).unwrap();
+            let after = find_node(scene.root(), after).unwrap();
+            assert!(
+                (after.bounds.y - (before.bounds.y + before.bounds.height) - gap).abs()
+                    < f32::EPSILON,
+                "{} {:?} must precede {} {:?} by {gap}px",
+                before.id.as_str(),
+                before.bounds,
+                after.id.as_str(),
+                after.bounds
+            );
+        }
+
         for text_scale in [100, 150, 200] {
             let mut driver = FlowDriver::new();
             driver.core.preference_changed(&EffectivePreference {
@@ -3442,6 +3462,14 @@ mod durable_tests {
                 applied: true,
             });
             let scene = driver.scene();
+            assert_predecessor_gap(&scene, "hero-title", "hero-status", 8.0);
+            assert_predecessor_gap(&scene, "home-shelf-label", "item-ridgeline", 16.0);
+            assert_predecessor_gap(
+                &scene,
+                "home-card-title-steam-link",
+                "home-card-reason-steam-link",
+                2.0,
+            );
             assert_raster_text_paint_contained_and_complete(
                 &scene,
                 driver.metrics,

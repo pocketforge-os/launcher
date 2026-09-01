@@ -3178,6 +3178,7 @@ impl ShellCore {
                     .map_or(String::new(), |fact| format!(" · {fact}"))
             );
             let hero_title_height = scaled_text_box_height(72.0, self.text_scale);
+            let hero_status_y = 144.0 + hero_title_height + 8.0;
             let hero_status_width = if self.text_scale == 100 {
                 480.0
             } else {
@@ -3219,7 +3220,7 @@ impl ShellCore {
                     Role::Text,
                     &hero_status,
                     48.0,
-                    224.0,
+                    hero_status_y,
                     hero_status_width,
                     hero_status_height,
                     SCENE_TRANSPARENT_TOKEN,
@@ -3333,6 +3334,8 @@ impl ShellCore {
                 .take(HOME_SHELF_LIMIT)
                 .collect::<Vec<_>>();
             let ready_count = ready_items.len();
+            let shelf_label_height = scaled_text_box_height(28.0, self.text_scale);
+            let card_row_y = 344.0 + shelf_label_height + 16.0;
             content.push(
                 node(
                     "home-shelf-label",
@@ -3341,7 +3344,7 @@ impl ShellCore {
                     48.0,
                     344.0,
                     220.0,
-                    scaled_text_box_height(28.0, self.text_scale),
+                    shelf_label_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Eyebrow),
@@ -3380,7 +3383,7 @@ impl ShellCore {
                     Role::ListItem,
                     &item.title,
                     x,
-                    388.0,
+                    card_row_y,
                     card_width,
                     CARD_ART_HEIGHT
                         + CARD_LABEL_GAP
@@ -3395,7 +3398,7 @@ impl ShellCore {
                     item,
                     "home-card",
                     x,
-                    388.0,
+                    card_row_y,
                     card_width,
                     CARD_ART_HEIGHT,
                     i == self.focus,
@@ -3407,7 +3410,7 @@ impl ShellCore {
                     availability,
                     "home-card",
                     x,
-                    388.0,
+                    card_row_y,
                     card_width,
                     CARD_ART_HEIGHT,
                     Some(h - PROMPTS_AREA_HEIGHT),
@@ -3417,7 +3420,7 @@ impl ShellCore {
                     let (pin_width, pin_height) =
                         scaled_centered_text_box(20.0, 20.0, self.text_scale);
                     let pin_center_x = x + card_width - 18.0;
-                    let pin_center_y = 408.0;
+                    let pin_center_y = card_row_y + 20.0;
                     n.children.push(
                         node(
                             &format!("favorite-pin-{}", item.id),
@@ -5941,6 +5944,13 @@ fn add_unavailable_card_cues(
     text_scale: u16,
 ) {
     let home = context == "home-card";
+    let title_y = y + art_height + CARD_LABEL_GAP;
+    let title_height = if home {
+        scaled_text_box_height(28.0, text_scale)
+    } else {
+        28.0
+    };
+    let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
         if home && text_scale != 100 {
             (
@@ -5984,7 +5994,7 @@ fn add_unavailable_card_cues(
                 Role::Text,
                 &reason,
                 x,
-                y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP,
+                reason_y,
                 width,
                 reason_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
@@ -6053,7 +6063,6 @@ fn add_unavailable_card_cues(
         "⊘ {}",
         availability_text(availability, &Presentation::Ready)
     );
-    let reason_y = y + art_height + CARD_LABEL_GAP + 28.0 + CARD_CAPTION_GAP;
     let max_lines = footer_top.map(|footer_top| {
         let available_height = footer_top - reason_y;
         let mut lines = 1;

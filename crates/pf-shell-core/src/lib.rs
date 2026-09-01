@@ -74,6 +74,12 @@ const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
+const HOME_STACK_BUDGET: f32 = 664.0;
+const HOME_STACK_HARD_LIMIT: f32 = 720.0;
+const HOME_TOP_SPACER: f32 = 144.0;
+const HOME_TOP_SPACER_FLOOR: f32 = 96.0;
+const HOME_AIR_SPACER: f32 = 88.0;
+const HOME_AIR_SPACER_FLOOR: f32 = 24.0;
 // Start-aligned labels are painted into this inset content box by pf-render.
 // Keep node sizing expressed in terms of the per-edge paint contract so callers
 // cannot accidentally confuse a shaped advance with the containing box width.
@@ -128,6 +134,61 @@ fn text_node_box_width(content_advance: f32) -> f32 {
 
 fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
     measured_text_advance(base_height, text_scale)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HomeVerticalLayout {
+    title_y: f32,
+    status_y: f32,
+    shelf_label_y: f32,
+    card_row_y: f32,
+    card_height: f32,
+    show_card_caption: bool,
+}
+
+fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
+    let title_height = scaled_text_box_height(72.0, text_scale);
+    let status_height = scaled_text_box_height(32.0, text_scale);
+    let shelf_label_height = scaled_text_box_height(28.0, text_scale);
+    let card_primary_height =
+        CARD_ART_HEIGHT + CARD_LABEL_GAP + scaled_text_box_height(34.0, text_scale);
+    let card_caption_height = CARD_CAPTION_GAP + scaled_text_box_height(14.0, text_scale);
+
+    let fixed_height = title_height
+        + 8.0
+        + status_height
+        + shelf_label_height
+        + 16.0
+        + card_primary_height
+        + card_caption_height;
+    let overflow = (HOME_TOP_SPACER + HOME_AIR_SPACER + fixed_height - HOME_STACK_BUDGET).max(0.0);
+    let top_slack = HOME_TOP_SPACER - HOME_TOP_SPACER_FLOOR;
+    let air_slack = HOME_AIR_SPACER - HOME_AIR_SPACER_FLOOR;
+    let total_slack = top_slack + air_slack;
+    let shrink = overflow.min(total_slack);
+    let top_spacer = HOME_TOP_SPACER - shrink * top_slack / total_slack;
+    let air_spacer = HOME_AIR_SPACER - shrink * air_slack / total_slack;
+    let bottom_with_caption = top_spacer + air_spacer + fixed_height;
+    let show_card_caption = bottom_with_caption <= HOME_STACK_HARD_LIMIT;
+    let card_height = card_primary_height
+        + if show_card_caption {
+            card_caption_height
+        } else {
+            0.0
+        };
+    let title_y = top_spacer;
+    let status_y = title_y + title_height + 8.0;
+    let shelf_label_y = status_y + status_height + air_spacer;
+    let card_row_y = shelf_label_y + shelf_label_height + 16.0;
+
+    HomeVerticalLayout {
+        title_y,
+        status_y,
+        shelf_label_y,
+        card_row_y,
+        card_height,
+        show_card_caption,
+    }
 }
 
 fn scaled_centered_text_box(base_width: f32, base_height: f32, text_scale: u16) -> (f32, f32) {
@@ -3177,8 +3238,8 @@ impl ShellCore {
                     .and_then(|item| item.playtime_fact.as_deref())
                     .map_or(String::new(), |fact| format!(" · {fact}"))
             );
+            let vertical = home_vertical_layout(self.text_scale);
             let hero_title_height = scaled_text_box_height(72.0, self.text_scale);
-            let hero_status_y = 144.0 + hero_title_height + 8.0;
             let hero_status_width = if self.text_scale == 100 {
                 480.0
             } else {
@@ -3207,7 +3268,7 @@ impl ShellCore {
                     Role::Heading,
                     focused.map_or("Nothing ready", |item| item.title.as_str()),
                     48.0,
-                    144.0,
+                    vertical.title_y,
                     w - 96.0,
                     hero_title_height,
                     SCENE_TRANSPARENT_TOKEN,
@@ -3220,7 +3281,7 @@ impl ShellCore {
                     Role::Text,
                     &hero_status,
                     48.0,
-                    hero_status_y,
+                    vertical.status_y,
                     hero_status_width,
                     hero_status_height,
                     SCENE_TRANSPARENT_TOKEN,
@@ -3335,14 +3396,13 @@ impl ShellCore {
                 .collect::<Vec<_>>();
             let ready_count = ready_items.len();
             let shelf_label_height = scaled_text_box_height(28.0, self.text_scale);
-            let card_row_y = 344.0 + shelf_label_height + 16.0;
             content.push(
                 node(
                     "home-shelf-label",
                     Role::Heading,
                     &format!("READY NOW · {ready_count}"),
                     48.0,
-                    344.0,
+                    vertical.shelf_label_y,
                     220.0,
                     shelf_label_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
@@ -3383,13 +3443,9 @@ impl ShellCore {
                     Role::ListItem,
                     &item.title,
                     x,
-                    card_row_y,
+                    vertical.card_row_y,
                     card_width,
-                    CARD_ART_HEIGHT
-                        + CARD_LABEL_GAP
-                        + scaled_text_box_height(34.0, self.text_scale)
-                        + CARD_CAPTION_GAP
-                        + scaled_text_box_height(14.0, self.text_scale),
+                    vertical.card_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 n.action = Some(NodeAction::Activate);
@@ -3398,7 +3454,7 @@ impl ShellCore {
                     item,
                     "home-card",
                     x,
-                    card_row_y,
+                    vertical.card_row_y,
                     card_width,
                     CARD_ART_HEIGHT,
                     i == self.focus,
@@ -3410,17 +3466,18 @@ impl ShellCore {
                     availability,
                     "home-card",
                     x,
-                    card_row_y,
+                    vertical.card_row_y,
                     card_width,
                     CARD_ART_HEIGHT,
                     Some(h - PROMPTS_AREA_HEIGHT),
                     self.text_scale,
+                    vertical.show_card_caption,
                 );
                 if item.favorite {
                     let (pin_width, pin_height) =
                         scaled_centered_text_box(20.0, 20.0, self.text_scale);
                     let pin_center_x = x + card_width - 18.0;
-                    let pin_center_y = card_row_y + 20.0;
+                    let pin_center_y = vertical.card_row_y + 20.0;
                     n.children.push(
                         node(
                             &format!("favorite-pin-{}", item.id),
@@ -3700,6 +3757,7 @@ impl ShellCore {
                     LIB_CARD_ART_HEIGHT,
                     None,
                     self.text_scale,
+                    true,
                 );
                 card.children.retain(|child| {
                     !child.id.as_str().contains("-title-")
@@ -5942,6 +6000,7 @@ fn add_unavailable_card_cues(
     art_height: f32,
     footer_top: Option<f32>,
     text_scale: u16,
+    show_reason: bool,
 ) {
     let home = context == "home-card";
     let title_y = y + art_height + CARD_LABEL_GAP;
@@ -5986,21 +6045,23 @@ fn add_unavailable_card_cues(
             )
             .with_type_role(TypeRole::Caption),
         );
-        let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
-        let (_, reason_height) = cue_box(&reason, width, 20.0);
-        nodes.push(
-            node(
-                &format!("{context}-reason-{}", item.id),
-                Role::Text,
-                &reason,
-                x,
-                reason_y,
-                width,
-                reason_height,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            )
-            .with_type_role(TypeRole::Caption),
-        );
+        if show_reason {
+            let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
+            let (_, reason_height) = cue_box(&reason, width, 20.0);
+            nodes.push(
+                node(
+                    &format!("{context}-reason-{}", item.id),
+                    Role::Text,
+                    &reason,
+                    x,
+                    reason_y,
+                    width,
+                    reason_height,
+                    COLOR_SURFACE_CANVAS_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption),
+            );
+        }
     }
     if matches!(availability, Availability::IncompatibleRuntime { .. }) {
         let badge = scale_aware_single_line("◉ Update", width - 20.0, text_scale);
@@ -6059,6 +6120,9 @@ fn add_unavailable_card_cues(
         )
         .with_type_role(TypeRole::Caption),
     );
+    if !show_reason {
+        return;
+    }
     let full_reason = format!(
         "⊘ {}",
         availability_text(availability, &Presentation::Ready)
@@ -12676,6 +12740,123 @@ mod tests {
                 .iter()
                 .all(|node| node.id.as_str() != "favorites-label")
         );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // Exact identity at 100% is part of the layout contract.
+    fn home_vertical_budget_keeps_the_full_chain_and_prompts_disjoint() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        fn collect_matching<'a>(
+            node: &'a Node,
+            predicate: &impl Fn(&str) -> bool,
+            matches: &mut Vec<&'a Node>,
+        ) {
+            if predicate(node.id.as_str()) {
+                matches.push(node);
+            }
+            for child in &node.children {
+                collect_matching(child, predicate, matches);
+            }
+        }
+
+        let mut ready = variant("stream", "network-game", Availability::Ready);
+        ready.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let network_game = item("network-game", "Network Game", vec![ready]);
+        let mut core = fixture_core(vec![network_game]);
+        core.items[0].favorite = true;
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        for text_scale in [100, 150, 200] {
+            core.text_scale = text_scale;
+            let scene = core.scene(metrics, "A Open · X Details").unwrap();
+            let title = node_by_id(scene.root(), "hero-title").unwrap();
+            let status = node_by_id(scene.root(), "hero-status").unwrap();
+            let shelf = node_by_id(scene.root(), "home-shelf-label").unwrap();
+            let card = node_by_id(scene.root(), "item-network-game").unwrap();
+            let layout = home_vertical_layout(text_scale);
+
+            for (before, after) in [(title, status), (status, shelf), (shelf, card)] {
+                assert!(
+                    before.bounds.y + before.bounds.height <= after.bounds.y,
+                    "{} {:?} overlaps {} {:?} at {text_scale}%",
+                    before.id.as_str(),
+                    before.bounds,
+                    after.id.as_str(),
+                    after.bounds
+                );
+            }
+            let card_bottom = card.bounds.y + card.bounds.height;
+            assert!(card_bottom <= HOME_STACK_HARD_LIMIT);
+            if text_scale <= 150 {
+                assert!(card_bottom <= HOME_STACK_BUDGET);
+            }
+
+            let mut card_text = Vec::new();
+            collect_matching(
+                card,
+                &|id| id.starts_with("home-card-") || id.starts_with("favorite-pin-"),
+                &mut card_text,
+            );
+            card_text.retain(|node| node.role == Role::Text);
+            let mut prompt_nodes = Vec::new();
+            collect_matching(
+                scene.root(),
+                &|id| id.starts_with("home-prompt-keycap-") || id.starts_with("home-prompt-verb-"),
+                &mut prompt_nodes,
+            );
+            for text in &card_text {
+                for prompt in &prompt_nodes {
+                    assert!(
+                        !intersects(text.bounds, prompt.bounds),
+                        "card text {} {:?} overlaps prompt {} {:?} at {text_scale}%",
+                        text.id.as_str(),
+                        text.bounds,
+                        prompt.id.as_str(),
+                        prompt.bounds
+                    );
+                }
+            }
+
+            if text_scale == 100 {
+                assert_eq!(layout.title_y, 144.0);
+                assert_eq!(
+                    layout.shelf_label_y - status.bounds.y - status.bounds.height,
+                    88.0
+                );
+                assert_eq!(title.bounds.y, 144.0);
+                assert_eq!(shelf.bounds.y, 344.0);
+            }
+        }
+
+        for (text_scale, expected_top, expected_air) in
+            [(150, 107.142_86, 38.857_14), (200, 96.0, 24.0)]
+        {
+            let layout = home_vertical_layout(text_scale);
+            let status_height = scaled_text_box_height(32.0, text_scale);
+            assert!((layout.title_y - expected_top).abs() < 0.000_1);
+            assert!(
+                (layout.shelf_label_y - layout.status_y - status_height - expected_air).abs()
+                    < 0.000_1
+            );
+        }
+        core.text_scale = 200;
+        let scene = core.scene(metrics, "A Open · X Details").unwrap();
+        assert!(node_by_id(scene.root(), "home-card-reason-network-game").is_none());
     }
 
     #[test]

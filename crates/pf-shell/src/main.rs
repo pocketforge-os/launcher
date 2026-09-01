@@ -3464,12 +3464,16 @@ mod durable_tests {
             let scene = driver.scene();
             assert_predecessor_gap(&scene, "hero-title", "hero-status", 8.0);
             assert_predecessor_gap(&scene, "home-shelf-label", "item-ridgeline", 16.0);
-            assert_predecessor_gap(
-                &scene,
-                "home-card-title-steam-link",
-                "home-card-reason-steam-link",
-                2.0,
-            );
+            if text_scale < 200 {
+                assert_predecessor_gap(
+                    &scene,
+                    "home-card-title-steam-link",
+                    "home-card-reason-steam-link",
+                    2.0,
+                );
+            } else {
+                assert!(find_node(scene.root(), "home-card-reason-steam-link").is_none());
+            }
             assert_raster_text_paint_contained_and_complete(
                 &scene,
                 driver.metrics,

@@ -3432,6 +3432,29 @@ mod durable_tests {
     }
 
     #[test]
+    fn home_text_paint_is_complete_at_supported_scales() {
+        for text_scale in [100, 150, 200] {
+            let mut driver = FlowDriver::new();
+            driver.core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            });
+            let scene = driver.scene();
+            assert_raster_text_paint_contained_and_complete(
+                &scene,
+                driver.metrics,
+                driver.core.theme_base(),
+                text_scale,
+            )
+            .unwrap_or_else(|error| {
+                panic!("Home at {text_scale}% failed paint containment: {error}")
+            });
+        }
+    }
+
+    #[test]
     fn blanket_paint_guard_catches_wrap_into_bottom_clip() {
         let failure = paint_containment_failure(
             "chrome-r1-wrapped-label",

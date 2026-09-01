@@ -3451,6 +3451,127 @@ mod durable_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn prompt_row_reflows_when_text_scale_changes_through_shell_actions() {
+        fn assert_prompt_guard(core: &ShellCore, metrics: SurfaceMetrics) {
+            fn find_prompt(node: &Node) -> Option<&Node> {
+                (node.id.as_str() == "prompts")
+                    .then_some(node)
+                    .or_else(|| node.children.iter().find_map(find_prompt))
+            }
+
+            let scene = core.scene(metrics, "B Back").unwrap();
+            let prompt = find_prompt(scene.root())
+                .expect("shared prompt row")
+                .clone();
+            let scale = f32::from(core.text_scale()) / 100.0;
+            let expected_height = 32.0 * scale;
+            assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
+            assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
+            let mut saw_single_letter_keycap = false;
+            let mut saw_wide_keycap = false;
+            for keycap in prompt.children.iter().filter(|node| {
+                let id = node.id.as_str();
+                id.starts_with("home-prompt-keycap-") && !id.ends_with("-border")
+            }) {
+                let border_id = format!("{}-border", keycap.id.as_str());
+                let border = prompt
+                    .children
+                    .iter()
+                    .find(|node| node.id.as_str() == border_id)
+                    .expect("each prompt keycap label has a border");
+                let expected_keycap_height = 24.0 * scale;
+                assert!((border.bounds.height - expected_keycap_height).abs() < f32::EPSILON);
+                let expected_radius = if keycap.accessible_label.chars().count() > 1 {
+                    saw_wide_keycap = true;
+                    6.0 * scale
+                } else {
+                    saw_single_letter_keycap = true;
+                    expected_keycap_height / 2.0
+                };
+                assert!((border.corner_radius - expected_radius).abs() < f32::EPSILON);
+                assert!((keycap.bounds.x - border.bounds.x).abs() < f32::EPSILON);
+                assert!((keycap.bounds.y - border.bounds.y).abs() < f32::EPSILON);
+                assert!((keycap.bounds.width - border.bounds.width).abs() < f32::EPSILON);
+                assert!((keycap.bounds.height - border.bounds.height).abs() < f32::EPSILON);
+            }
+            if !prompt.children.is_empty() {
+                assert!(saw_single_letter_keycap);
+                assert!(saw_wide_keycap);
+            }
+            let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
+            let root = Node::new(
+                root_id.clone(),
+                Role::Group,
+                "",
+                pf_scene::Bounds::new(0.0, 0.0, metrics.logical_width, metrics.logical_height),
+                "--color-surface-canvas",
+            )
+            .with_children(vec![prompt]);
+            let prompt_scene = pf_scene::Scene::new(root, root_id).unwrap();
+            raster_guard_record(
+                &prompt_scene,
+                metrics,
+                core.theme_base(),
+                core.text_scale(),
+                false,
+            )
+            .unwrap();
+        }
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(
+            &FakePreferencePort::new(
+                [EffectivePreference {
+                    key: PreferenceKey("textScale".into()),
+                    effective: PreferenceValue::Text("100%".into()),
+                    stored: PreferenceValue::Text("100%".into()),
+                    applied: true,
+                }],
+                ChangeAuthority("user".into()),
+            ),
+            true,
+        )
+        .unwrap();
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Activate);
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        assert_prompt_guard(&core, metrics);
+
+        for expected in ["150%", "200%"] {
+            let Some(Effect::ChangePreference(change)) = core.action(&ShellAction::Activate) else {
+                panic!("text-scale control must emit a preference change")
+            };
+            assert_eq!(change.key.0, "textScale");
+            assert_eq!(change.value, PreferenceValue::Text(expected.into()));
+            core.preference_changed(&EffectivePreference {
+                key: change.key,
+                effective: change.value.clone(),
+                stored: change.value,
+                applied: true,
+            });
+            assert_prompt_guard(&core, metrics);
+        }
+
+        assert_eq!(core.text_scale(), 200);
+        core.action(&ShellAction::Back);
+        core.action(&ShellAction::Custom("Room.prev".into()));
+        assert_prompt_guard(&core, metrics);
+        core.action(&ShellAction::Custom("Room.prev".into()));
+        assert_prompt_guard(&core, metrics);
+    }
+
+    #[test]
     fn library_and_settings_evidence_routes_render_without_notes() {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();

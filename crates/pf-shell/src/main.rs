@@ -2960,8 +2960,19 @@ mod durable_tests {
         fn in_state_dir(state_dir: tempfile::TempDir) -> Self {
             let snapshot: CatalogSnapshot =
                 serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+            Self::with_snapshot_in_state_dir(state_dir, &snapshot)
+        }
+
+        fn with_snapshot(snapshot: &CatalogSnapshot) -> Self {
+            Self::with_snapshot_in_state_dir(tempfile::tempdir().unwrap(), snapshot)
+        }
+
+        fn with_snapshot_in_state_dir(
+            state_dir: tempfile::TempDir,
+            snapshot: &CatalogSnapshot,
+        ) -> Self {
             let preferences = DurablePreferences::open(state_dir.path()).unwrap();
-            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            let mut core = fixture_core(snapshot, &pf_theme::flagship(), false);
             let contract =
                 DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
             let glyphs = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
@@ -2992,6 +3003,26 @@ mod durable_tests {
                     safe_insets: Insets::default(),
                     orientation: Orientation::Landscape,
                 },
+            }
+        }
+
+        fn apply_matrix_cell(&mut self, cell: MatrixCell) {
+            self.metrics.safe_insets = cell.safe_insets;
+            for preference in [
+                EffectivePreference {
+                    key: PreferenceKey("textScale".into()),
+                    effective: PreferenceValue::Text(format!("{}%", cell.text_scale)),
+                    stored: PreferenceValue::Text(format!("{}%", cell.text_scale)),
+                    applied: true,
+                },
+                EffectivePreference {
+                    key: PreferenceKey("highContrast".into()),
+                    effective: PreferenceValue::Bool(cell.high_contrast),
+                    stored: PreferenceValue::Bool(cell.high_contrast),
+                    applied: true,
+                },
+            ] {
+                self.core.preference_changed(&preference);
             }
         }
 
@@ -3054,6 +3085,131 @@ mod durable_tests {
 
     fn movement(direction: pf_scene::AxisMove) -> ShellAction {
         ShellAction::Move(direction)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct MatrixCell {
+        text_scale: u16,
+        high_contrast: bool,
+        safe_insets: Insets,
+    }
+
+    fn invariant_matrix() -> impl Iterator<Item = MatrixCell> {
+        [100, 150, 200].into_iter().flat_map(|text_scale| {
+            [false, true].into_iter().flat_map(move |high_contrast| {
+                [
+                    Insets::default(),
+                    Insets {
+                        top: 32.0,
+                        left: 24.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                    },
+                ]
+                .into_iter()
+                .map(move |safe_insets| MatrixCell {
+                    text_scale,
+                    high_contrast,
+                    safe_insets,
+                })
+            })
+        })
+    }
+
+    fn assert_cell(driver: &FlowDriver, cell: MatrixCell, scenario: &str) {
+        eprintln!("invariant matrix cell: {scenario}: {cell:?}");
+        driver.assert_scene_invariants();
+        assert_eq!(
+            driver.core.text_scale(),
+            cell.text_scale,
+            "{scenario}: {cell:?}"
+        );
+        assert_eq!(
+            driver.core.high_contrast(),
+            cell.high_contrast,
+            "{scenario}: {cell:?}"
+        );
+    }
+
+    fn assert_library_640_known_defect(driver: &FlowDriver, cell: MatrixCell) {
+        let scene = driver.scene();
+        ensure_action_labels(&scene).unwrap();
+        assert_raster_text_paint_contained_and_complete(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        .unwrap();
+
+        // Known defect tsp-7oqd: at the 640px Library breakpoint pf-render hands
+        // tiny-skia 0.11.4 a subpixel hairline rectangle which panics in fill_dot8.
+        // Keep running both halves of the shared guard and require this exact failure;
+        // the follow-up removes this annotation once the renderer/geometry is fixed.
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_raster_text_legible(
+                &scene,
+                driver.metrics,
+                driver.core.theme_base(),
+                driver.core.text_scale(),
+            )
+        }))
+        .expect_err("tsp-7oqd was fixed; remove the known-defect annotation");
+        let message = failure
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| failure.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic");
+        assert!(
+            message.contains("assertion failed: false"),
+            "Library width=640 changed failure under tsp-7oqd: {message}: {cell:?}"
+        );
+    }
+
+    fn assert_library_stress_known_defect(driver: &FlowDriver) {
+        let scene = driver.scene();
+        ensure_action_labels(&scene).unwrap();
+        let error = assert_raster_text_paint_contained_and_complete(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        // Known defect tsp-0u7c: the 500-item Library count has a one-row and
+        // bottom-clip overflow in the full-scene paint-containment guard.
+        .expect_err("tsp-0u7c was fixed; remove the known-defect annotation");
+        assert!(
+            error.contains("library-filter-2-count")
+                && error.contains("painted ink escaped the bottom clip"),
+            "500-item Library changed failure under tsp-0u7c: {error}"
+        );
+    }
+
+    fn assert_unavailable_details_known_defect(driver: &FlowDriver) {
+        let scene = driver.scene();
+        ensure_action_labels(&scene).unwrap();
+        assert_raster_text_paint_contained_and_complete(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        .unwrap();
+        // Known defect tsp-tzlg: the unavailable reason has zero measured
+        // contrast and its disabled action paints no ink.
+        let error = assert_raster_text_legible(
+            &scene,
+            driver.metrics,
+            driver.core.theme_base(),
+            driver.core.text_scale(),
+        )
+        .expect_err("tsp-tzlg was fixed; remove the known-defect annotation");
+        assert!(
+            error.contains("detail-availability-reason")
+                && error.contains("detail-unavailable")
+                && error.contains("ink_pixels=0"),
+            "unavailable Details changed failure under tsp-tzlg: {error}"
+        );
     }
 
     struct Flow<'a> {
@@ -3169,6 +3325,101 @@ mod durable_tests {
 
         let state_dir = driver.into_state_dir();
         let mut reopened = FlowDriver::in_state_dir(state_dir);
+        assert_eq!(reopened.core.text_scale(), 200);
+        reopened.actions([custom("Room.next"), custom("Room.next")]);
+        reopened.assert_scene_invariants();
+    }
+
+    #[test]
+    fn paint_and_flow_guards_cover_accessibility_and_safe_inset_matrix() {
+        for cell in invariant_matrix() {
+            let mut driver = FlowDriver::new();
+            driver.apply_matrix_cell(cell);
+            assert_cell(&driver, cell, "Home");
+
+            driver.action(custom("Room.next"));
+            for width in [480_u16, 640, 800, 1280] {
+                driver.metrics.logical_width = f32::from(width);
+                if width == 640 {
+                    eprintln!("invariant matrix cell: Library width=640: {cell:?} [tsp-7oqd]");
+                    assert_library_640_known_defect(&driver, cell);
+                } else {
+                    assert_cell(&driver, cell, &format!("Library width={width}"));
+                }
+            }
+
+            driver.metrics.logical_width = 1280.0;
+            driver.action(custom("Room.next"));
+            assert_cell(&driver, cell, "Settings");
+        }
+    }
+
+    #[test]
+    fn high_value_flow_scenarios_keep_full_scene_invariants() {
+        let notch = Insets {
+            top: 32.0,
+            left: 24.0,
+            right: 0.0,
+            bottom: 0.0,
+        };
+
+        let mut settings = FlowDriver::new();
+        let settings_cell = MatrixCell {
+            text_scale: 200,
+            high_contrast: true,
+            safe_insets: notch,
+        };
+        settings.apply_matrix_cell(settings_cell);
+        settings.actions([custom("Room.next"), custom("Room.next")]);
+        assert_eq!(settings.core.route(), pf_shell_core::Route::Settings);
+        assert_cell(&settings, settings_cell, "200% high-contrast Settings");
+
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let template = snapshot.items[0].clone();
+        snapshot.items = (0..500)
+            .map(|index| {
+                let mut item = template.clone();
+                item.id = format!("stress-{index:03}");
+                item.title = format!("Stress Item {index:03}");
+                for variant in &mut item.variants {
+                    variant.id = format!("stress-variant-{index:03}");
+                    variant.launch_target.app_id = item.id.clone();
+                }
+                item
+            })
+            .collect();
+        let mut library = FlowDriver::with_snapshot(&snapshot);
+        library.metrics.safe_insets = notch;
+        library.action(custom("Room.next"));
+        assert_eq!(snapshot.items.len(), 500);
+        eprintln!("high-value flow scenario: 500-item Library [tsp-0u7c]");
+        assert_library_stress_known_defect(&library);
+
+        snapshot.items[0].variants.clear();
+        let mut details = FlowDriver::with_snapshot(&snapshot);
+        details.metrics.safe_insets = notch;
+        details.action(custom("Search"));
+        details.core.set_search_query("Stress Item 000");
+        details.action(ShellAction::Activate);
+        assert_eq!(details.core.route(), pf_shell_core::Route::Details);
+        assert!(format!("{:?}", details.scene()).contains("catalog item has no variants"));
+        eprintln!("high-value flow scenario: no-usable-variant Details [tsp-tzlg]");
+        assert_unavailable_details_known_defect(&details);
+
+        let mut round_trip = FlowDriver::new();
+        round_trip.metrics.safe_insets = notch;
+        round_trip.actions([
+            custom("Room.next"),
+            custom("Room.next"),
+            movement(pf_scene::AxisMove::Right),
+            ShellAction::Activate,
+            ShellAction::Activate,
+        ]);
+        assert_eq!(round_trip.core.text_scale(), 200);
+        let state_dir = round_trip.into_state_dir();
+        let mut reopened = FlowDriver::in_state_dir(state_dir);
+        reopened.metrics.safe_insets = notch;
         assert_eq!(reopened.core.text_scale(), 200);
         reopened.actions([custom("Room.next"), custom("Room.next")]);
         reopened.assert_scene_invariants();

@@ -2283,6 +2283,50 @@ fn occlusion_node_declares_underlay(node: &Node) -> bool {
     node.ink_token.as_deref() == Some(UNDERLAY_ROLE_MARKER)
 }
 
+fn occlusion_fill_value_is_opaque(value: &str) -> bool {
+    let value = value.trim();
+    if value == "transparent" {
+        return false;
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
+    }
+    if let Some(rgba) = value.strip_prefix("rgba(") {
+        let Some(rgba) = rgba.strip_suffix(')') else {
+            return true;
+        };
+        let mut components = rgba.split(',').map(str::trim);
+        let parsed = match (
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+        ) {
+            (Some(red), Some(green), Some(blue), Some(alpha), None) => match (
+                red.parse::<f32>(),
+                green.parse::<f32>(),
+                blue.parse::<f32>(),
+                alpha.parse::<f32>(),
+            ) {
+                (Ok(red), Ok(green), Ok(blue), Ok(alpha)) => Some([red, green, blue, alpha]),
+                _ => None,
+            },
+            _ => None,
+        };
+        return parsed.is_none_or(|components| {
+            let [red, green, blue, alpha] = components;
+            !components.iter().all(|component| component.is_finite())
+                || !(0.0..=255.0).contains(&red)
+                || !(0.0..=255.0).contains(&green)
+                || !(0.0..=255.0).contains(&blue)
+                || !(0.0..=1.0).contains(&alpha)
+                || alpha >= 1.0
+        });
+    }
+    !value.contains("gradient")
+}
+
 fn occlusion_node_has_opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
     if occlusion_node_is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. }) {
         return false;
@@ -2291,14 +2335,7 @@ fn occlusion_node_has_opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
     let Ok(value) = theme.resolve(base, &node.style_token) else {
         return false;
     };
-    let value = value.trim();
-    if value == "transparent" {
-        return false;
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
-    }
-    !value.starts_with("rgba(") && !value.contains("gradient")
+    occlusion_fill_value_is_opaque(value)
 }
 
 fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
@@ -3936,6 +3973,21 @@ mod durable_tests {
                 && failure.contains("opaque fill"),
             "unexpected guard verdict: {failure}"
         );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_classifies_fully_opaque_rgba_panel_fill() {
+        assert!(occlusion_fill_value_is_opaque("rgba(16, 15, 13, 1)"));
+        assert!(occlusion_fill_value_is_opaque(" rgba(16, 15, 13, 1.0) "));
+        assert!(occlusion_fill_value_is_opaque("rgba(16, nope, 13, 0.55)"));
+        assert!(occlusion_fill_value_is_opaque(
+            "rgba(16, 15, 13, 0.55) malformed gradient"
+        ));
+    }
+
+    #[test]
+    fn scene_occlusion_guard_keeps_translucent_rgba_panel_fill_non_opaque() {
+        assert!(!occlusion_fill_value_is_opaque("rgba(23, 21, 18, 0.55)"));
     }
 
     #[test]

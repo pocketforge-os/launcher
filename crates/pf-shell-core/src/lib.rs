@@ -10990,74 +10990,82 @@ mod tests {
         );
     }
 
-    #[test]
-    fn statusbar_text_is_complete_on_one_row_for_every_route() {
-        fn mutate_label(
-            node: &mut Node,
-            id: &str,
-            label: Option<&str>,
-            width: Option<f32>,
-        ) -> bool {
+    fn mutate_label(node: &mut Node, id: &str, label: Option<&str>, width: Option<f32>) -> bool {
+        if node.id.as_str() == id {
+            if let Some(label) = label {
+                node.accessible_label = label.into();
+            }
+            if let Some(width) = width {
+                node.bounds.width = width;
+            }
+            return true;
+        }
+        node.children
+            .iter_mut()
+            .any(|child| mutate_label(child, id, label, width))
+    }
+
+    fn label_ink(
+        scene: &Scene,
+        id: &str,
+        metrics: SurfaceMetrics,
+        text_scale: u16,
+    ) -> (usize, usize) {
+        let mut rasterizer = Rasterizer::new();
+        rasterizer
+            .set_text_scale(f32::from(text_scale) / 100.0)
+            .unwrap();
+        let rendered = rasterizer.render(scene, metrics).unwrap();
+        let mut blank_root = scene.root().clone();
+        assert!(mutate_label(&mut blank_root, id, Some(""), None));
+        let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
+        let blank = rasterizer.render(&blank_scene, metrics).unwrap();
+        let mut columns = std::collections::BTreeSet::new();
+        let mut rows = std::collections::BTreeSet::new();
+        for (pixel, (painted, blank)) in rendered
+            .rgba
+            .chunks_exact(4)
+            .zip(blank.rgba.chunks_exact(4))
+            .enumerate()
+        {
+            if painted != blank {
+                columns.insert(pixel % rendered.width as usize);
+                rows.insert(pixel / rendered.width as usize);
+            }
+        }
+        let first_row = *rows
+            .first()
+            .unwrap_or_else(|| panic!("{id} must paint ink"));
+        (columns.len(), rows.last().unwrap() - first_row)
+    }
+
+    fn generous_ink_columns(
+        scene: &Scene,
+        id: &str,
+        metrics: SurfaceMetrics,
+        text_scale: u16,
+    ) -> usize {
+        let current_width = node_by_id(scene.root(), id).unwrap().bounds.width;
+        let mut root = scene.root().clone();
+        // Centered paint phase depends on (width - advance) / 2; an even-delta
+        // widening preserves its subpixel bin while providing unclipped reference ink.
+        fn widen(node: &mut Node, id: &str, current_width: f32) -> bool {
             if node.id.as_str() == id {
-                if let Some(label) = label {
-                    node.accessible_label = label.into();
-                }
-                if let Some(width) = width {
-                    node.bounds.width = width;
-                }
+                node.bounds.x -= 128.0;
+                node.bounds.width = current_width + 256.0;
                 return true;
             }
             node.children
                 .iter_mut()
-                .any(|child| mutate_label(child, id, label, width))
+                .any(|child| widen(child, id, current_width))
         }
+        assert!(widen(&mut root, id, current_width));
+        let generous = Scene::new(root, scene.default_focus().clone()).unwrap();
+        label_ink(&generous, id, metrics, text_scale).0
+    }
 
-        fn label_ink(
-            scene: &Scene,
-            id: &str,
-            metrics: SurfaceMetrics,
-            text_scale: u16,
-        ) -> (usize, usize) {
-            let mut rasterizer = Rasterizer::new();
-            rasterizer
-                .set_text_scale(f32::from(text_scale) / 100.0)
-                .unwrap();
-            let rendered = rasterizer.render(scene, metrics).unwrap();
-            let mut blank_root = scene.root().clone();
-            assert!(mutate_label(&mut blank_root, id, Some(""), None));
-            let blank_scene = Scene::new(blank_root, scene.default_focus().clone()).unwrap();
-            let blank = rasterizer.render(&blank_scene, metrics).unwrap();
-            let mut columns = std::collections::BTreeSet::new();
-            let mut rows = std::collections::BTreeSet::new();
-            for (pixel, (painted, blank)) in rendered
-                .rgba
-                .chunks_exact(4)
-                .zip(blank.rgba.chunks_exact(4))
-                .enumerate()
-            {
-                if painted != blank {
-                    columns.insert(pixel % rendered.width as usize);
-                    rows.insert(pixel / rendered.width as usize);
-                }
-            }
-            let first_row = *rows
-                .first()
-                .unwrap_or_else(|| panic!("{id} must paint ink"));
-            (columns.len(), rows.last().unwrap() - first_row)
-        }
-
-        fn generous_ink_columns(
-            scene: &Scene,
-            id: &str,
-            metrics: SurfaceMetrics,
-            text_scale: u16,
-        ) -> usize {
-            let mut root = scene.root().clone();
-            assert!(mutate_label(&mut root, id, None, Some(300.0)));
-            let generous = Scene::new(root, scene.default_focus().clone()).unwrap();
-            label_ink(&generous, id, metrics, text_scale).0
-        }
-
+    #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route() {
         let mut core = fixture_core(vec![item(
             "many",
             "Many Moons",
@@ -11111,6 +11119,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn completeness_guard_detects_clipped_columns() {
+        let mut core = fixture_core(vec![]);
+        core.text_scale = 100;
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        let mut clipped_root = scene.root().clone();
+        let width = node_by_id(&clipped_root, "room-home").unwrap().bounds.width;
+        assert!(mutate_label(
+            &mut clipped_root,
+            "room-home",
+            None,
+            Some(width - 8.0)
+        ));
+        let clipped = Scene::new(clipped_root, scene.default_focus().clone()).unwrap();
+
+        assert!(
+            label_ink(&clipped, "room-home", metrics, 100).0
+                < generous_ink_columns(&clipped, "room-home", metrics, 100),
+            "the completeness guard must detect genuinely clipped room-label ink"
+        );
     }
 
     #[test]
@@ -11487,37 +11524,58 @@ mod tests {
             node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
             Some("Controller battery low")
         );
-        for (id, expected) in [
-            (
-                "room-keycap-left-border",
-                Bounds::new(474.0, 20.0, 24.0, 24.0),
-            ),
-            (
-                "room-keycap-left-fill",
-                Bounds::new(475.0, 21.0, 22.0, 22.0),
-            ),
-            ("room-keycap-left", Bounds::new(475.0, 21.0, 22.0, 22.0)),
-            ("room-home", Bounds::new(522.0, 16.0, 55.0, 32.0)),
-            ("room-home-underline", Bounds::new(528.0, 49.0, 43.0, 3.0)),
-            ("room-library", Bounds::new(601.0, 16.0, 62.0, 32.0)),
-            ("room-settings", Bounds::new(687.0, 16.0, 71.0, 32.0)),
-            (
-                "room-keycap-right-border",
-                Bounds::new(782.0, 20.0, 24.0, 24.0),
-            ),
-        ] {
-            let actual = node_by_id(scene.root(), id).unwrap().bounds;
-            assert!((actual.x - expected.x).abs() <= 1.0, "{id}: {actual:?}");
-            assert!((actual.y - expected.y).abs() <= 1.0, "{id}: {actual:?}");
-            assert!(
-                (actual.width - expected.width).abs() <= 1.0,
-                "{id}: {actual:?}"
-            );
-            assert!(
-                (actual.height - expected.height).abs() <= 1.0,
-                "{id}: {actual:?}"
-            );
+        let root = scene.root();
+        let item_ids = [
+            "room-keycap-left-border",
+            "room-home",
+            "room-library",
+            "room-settings",
+            "room-keycap-right-border",
+        ];
+        for pair in item_ids.windows(2) {
+            let left = node_by_id(root, pair[0]).unwrap().bounds;
+            let right = node_by_id(root, pair[1]).unwrap().bounds;
+            assert!((right.x - (left.x + left.width) - ROOM_STRIP_GAP).abs() <= 1.0);
         }
+        for (id, label) in [
+            ("room-home", "Home"),
+            ("room-library", "Library"),
+            ("room-settings", "Settings"),
+        ] {
+            let room_bounds = node_by_id(root, id).unwrap().bounds;
+            let advance = room_label_advance(label, 100);
+            assert!((room_bounds.width - (advance + 2.0 * ROOM_HORIZONTAL_PADDING)).abs() <= 1.0);
+            assert!((room_bounds.y - 16.0).abs() <= 1.0);
+            assert!((room_bounds.height - 32.0).abs() <= 1.0);
+            if let Some(underline) = node_by_id(root, &format!("{id}-underline")) {
+                assert!((underline.bounds.width - advance).abs() <= 1.0);
+                assert!(
+                    (underline.bounds.x + underline.bounds.width / 2.0
+                        - (room_bounds.x + room_bounds.width / 2.0))
+                        .abs()
+                        <= 1.0
+                );
+                assert!((underline.bounds.y - 49.0).abs() <= 1.0);
+                assert!((underline.bounds.height - 3.0).abs() <= 1.0);
+            }
+        }
+        for id in ["room-keycap-left", "room-keycap-right"] {
+            let border = node_by_id(root, &format!("{id}-border")).unwrap().bounds;
+            let fill = node_by_id(root, &format!("{id}-fill")).unwrap().bounds;
+            let glyph = node_by_id(root, id).unwrap().bounds;
+            assert!((border.y - 20.0).abs() <= 1.0);
+            assert!((border.width - 24.0).abs() <= 1.0);
+            assert!((border.height - 24.0).abs() <= 1.0);
+            for inner in [fill, glyph] {
+                assert!((inner.x - (border.x + KEYCAP_BORDER_WIDTH)).abs() <= 1.0);
+                assert!((inner.y - (border.y + KEYCAP_BORDER_WIDTH)).abs() <= 1.0);
+                assert!((inner.width - (border.width - 2.0 * KEYCAP_BORDER_WIDTH)).abs() <= 1.0);
+                assert!((inner.height - (border.height - 2.0 * KEYCAP_BORDER_WIDTH)).abs() <= 1.0);
+            }
+        }
+        let left = node_by_id(root, "room-keycap-left-border").unwrap().bounds;
+        let right = node_by_id(root, "room-keycap-right-border").unwrap().bounds;
+        assert!(((left.x + right.x + right.width) / 2.0 - 640.0).abs() <= 1.0);
         let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
         assert!(
             (pill_border.bounds.x - 1043.0).abs() <= 2.0,

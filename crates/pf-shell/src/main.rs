@@ -2226,13 +2226,25 @@ fn raster_guard_record(
 const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
 const UNDERLAY_ROLE_MARKER: &str = "--scene-underlay-role";
 
-fn text_ink_intersects(
-    earlier_ink: Option<pf_scene::Bounds>,
-    later_ink: Option<pf_scene::Bounds>,
-) -> bool {
-    earlier_ink.zip(later_ink).is_some_and(|(a, b)| {
-        a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
-    })
+struct OcclusionTextInk {
+    bounds: Option<pf_scene::Bounds>,
+    /// One bit per full-resolution surface pixel. Keeping the common surface
+    /// coordinate space makes pair checks a cheap word-wise AND.
+    mask: Vec<u64>,
+}
+
+fn text_ink_intersects(earlier: &OcclusionTextInk, later: &OcclusionTextInk) -> bool {
+    // Bounds are only a prefilter: sparse and multi-line text can leave large
+    // unpainted holes inside its ink rectangle.
+    earlier
+        .bounds
+        .zip(later.bounds)
+        .is_some_and(|(a, b)| intersects_bounds(a, b))
+        && earlier
+            .mask
+            .iter()
+            .zip(&later.mask)
+            .any(|(a, b)| a & b != 0)
 }
 
 struct OcclusionPaintedNode<'a> {
@@ -2387,12 +2399,12 @@ fn occlusion_isolate_node_path(current: &Node, replacement: &Node) -> Option<Nod
 
 // Render surfaces are far smaller than f32's exact-integer range.
 #[allow(clippy::cast_precision_loss)]
-fn occlusion_text_ink_bounds(
+fn occlusion_text_ink(
     scene: &pf_scene::Scene,
     rasterizer: &mut Rasterizer,
     metrics: SurfaceMetrics,
     node: &Node,
-) -> Result<Option<pf_scene::Bounds>, String> {
+) -> Result<OcclusionTextInk, String> {
     let mut root = occlusion_isolate_node_path(scene.root(), node)
         .ok_or_else(|| format!("{}: missing from scene tree", node.id.as_str()))?;
     let root_id = root.id.clone();
@@ -2412,6 +2424,8 @@ fn occlusion_text_ink_bounds(
         .render(&blank_scene, metrics)
         .map_err(|error| format!("render: {error:?}"))?;
     let width = painted.width as usize;
+    let pixel_count = painted.rgba.len() / 4;
+    let mut mask = vec![0_u64; pixel_count.div_ceil(64)];
     let mut extent: Option<(usize, usize, usize, usize)> = None;
     for (pixel, (ink, background)) in painted
         .rgba
@@ -2422,25 +2436,27 @@ fn occlusion_text_ink_bounds(
         if ink == background {
             continue;
         }
+        mask[pixel / 64] |= 1_u64 << (pixel % 64);
         let (x, y) = (pixel % width, pixel / width);
         extent = Some(extent.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
             (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
         }));
     }
-    Ok(extent.map(|(min_x, min_y, max_x, max_y)| {
+    let bounds = extent.map(|(min_x, min_y, max_x, max_y)| {
         pf_scene::Bounds::new(
             min_x as f32,
             min_y as f32,
             (max_x - min_x + 1) as f32,
             (max_y - min_y + 1) as f32,
         )
-    }))
+    });
+    Ok(OcclusionTextInk { bounds, mask })
 }
 
 fn evaluate_occlusion_pair(
     earlier: &OcclusionPaintedNode<'_>,
     later: &OcclusionPaintedNode<'_>,
-    ink_bounds_by_id: &BTreeMap<&str, Option<pf_scene::Bounds>>,
+    ink_by_id: &BTreeMap<&str, OcclusionTextInk>,
     base: pf_theme::Base,
     failures: &mut Vec<String>,
 ) {
@@ -2464,8 +2480,8 @@ fn evaluate_occlusion_pair(
         && !occlusion_node_declares_overlay(earlier.node)
         && !occlusion_node_declares_overlay(later.node)
         && text_ink_intersects(
-            ink_bounds_by_id[earlier.node.id.as_str()],
-            ink_bounds_by_id[later.node.id.as_str()],
+            &ink_by_id[earlier.node.id.as_str()],
+            &ink_by_id[later.node.id.as_str()],
         )
     {
         failures.push(format!(
@@ -2502,19 +2518,19 @@ fn assert_scene_occlusion_safe(
     rasterizer
         .set_text_scale(f32::from(text_scale) / 100.0)
         .map_err(|error| format!("render: {error:?}"))?;
-    let mut ink_bounds_by_id = BTreeMap::new();
+    let mut ink_by_id = BTreeMap::new();
     for entry in &nodes {
         if occlusion_node_is_text(entry.node) {
-            ink_bounds_by_id.insert(
+            ink_by_id.insert(
                 entry.node.id.as_str(),
-                occlusion_text_ink_bounds(scene, &mut rasterizer, metrics, entry.node)?,
+                occlusion_text_ink(scene, &mut rasterizer, metrics, entry.node)?,
             );
         }
     }
     let mut failures = Vec::new();
     for (later_index, later) in nodes.iter().enumerate() {
         for earlier in &nodes[..later_index] {
-            evaluate_occlusion_pair(earlier, later, &ink_bounds_by_id, base, &mut failures);
+            evaluate_occlusion_pair(earlier, later, &ink_by_id, base, &mut failures);
         }
     }
     if failures.is_empty() {
@@ -4119,10 +4135,69 @@ mod durable_tests {
         assert!(title_bounds.y + title_bounds.height <= status_bounds.y);
         let grown_title_ink = pf_scene::Bounds::new(26.0, 28.0, 215.0, 36.0);
         let fixed_status_ink = pf_scene::Bounds::new(27.0, 58.0, 43.0, 15.0);
+        let mut grown_mask = vec![0_u64; 2];
+        let mut status_mask = vec![0_u64; 2];
+        grown_mask[1] = 1 << 7;
+        status_mask[1] = 1 << 7;
         assert!(text_ink_intersects(
-            Some(grown_title_ink),
-            Some(fixed_status_ink)
+            &OcclusionTextInk {
+                bounds: Some(grown_title_ink),
+                mask: grown_mask,
+            },
+            &OcclusionTextInk {
+                bounds: Some(fixed_status_ink),
+                mask: status_mask,
+            }
         ));
+    }
+
+    #[test]
+    fn scene_occlusion_guard_accepts_text_nested_in_multiline_whitespace() {
+        let root_id = pf_scene::NodeId::new("text-whitespace-probe").unwrap();
+        let multiline = Node::new(
+            pf_scene::NodeId::new("multiline-label").unwrap(),
+            Role::Text,
+            "A deliberately wide first line\nX",
+            pf_scene::Bounds::new(20.0, 20.0, 220.0, 72.0),
+            "--color-transparent",
+        );
+        let nested = Node::new(
+            pf_scene::NodeId::new("gap-label").unwrap(),
+            Role::Text,
+            "Gap",
+            pf_scene::Bounds::new(100.0, 47.0, 80.0, 24.0),
+            "--color-transparent",
+        );
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 280.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![multiline, nested]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 280.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let mut rasterizer = Rasterizer::new();
+        rasterizer.set_theme_base(pf_theme::Base::Dusk);
+        let first = occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[0])
+            .unwrap();
+        let second =
+            occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[1])
+                .unwrap();
+        assert!(intersects_bounds(
+            first.bounds.unwrap(),
+            second.bounds.unwrap()
+        ));
+        assert!(!text_ink_intersects(&first, &second));
+        assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap();
     }
 
     #[test]

@@ -2943,6 +2943,255 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    // Input-flow convention: every new route or transition adds a scenario row here. Flows
+    // start at Home and drive ShellCore::action(); key-to-action translation has its own seam.
+    struct FlowDriver {
+        state_dir: tempfile::TempDir,
+        preferences: DurablePreferences,
+        core: ShellCore,
+        metrics: SurfaceMetrics,
+    }
+
+    impl FlowDriver {
+        fn new() -> Self {
+            Self::in_state_dir(tempfile::tempdir().unwrap())
+        }
+
+        fn in_state_dir(state_dir: tempfile::TempDir) -> Self {
+            let snapshot: CatalogSnapshot =
+                serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+            let preferences = DurablePreferences::open(state_dir.path()).unwrap();
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            let contract =
+                DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+            let glyphs = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+            core.set_control_bindings(control_bindings(&glyphs));
+            core.authority_snapshot(false);
+            core.load_preferences(&preferences, true).unwrap();
+
+            let power = FakePowerPort::new(
+                vec![PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                }],
+                IdlePolicy::default(),
+            );
+            core.load_power(&power);
+            let (mut network, time, transfer) = fixture_device_ports();
+            core.load_network(&mut network);
+            core.load_system(&time, &transfer);
+
+            Self {
+                state_dir,
+                preferences,
+                core,
+                metrics: SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                },
+            }
+        }
+
+        fn action(&mut self, action: ShellAction) -> Option<Effect> {
+            let effect = self.core.action(&action);
+            if let Some(Effect::ChangePreference(change)) = effect.as_ref() {
+                assert_eq!(
+                    self.preferences.submit_change(change.clone()).unwrap(),
+                    PreferenceChangeResult::Accepted
+                );
+                self.core.drive_preferences(&mut self.preferences).unwrap();
+            }
+            drop(action);
+            effect
+        }
+
+        fn actions(&mut self, actions: impl IntoIterator<Item = ShellAction>) {
+            for action in actions {
+                self.action(action);
+            }
+        }
+
+        fn scene(&self) -> pf_scene::Scene {
+            self.core.scene(self.metrics, "A Open").unwrap()
+        }
+
+        fn focused_node_id(&self) -> String {
+            fn find(node: &Node) -> Option<&str> {
+                node.state
+                    .focused
+                    .then(|| node.id.as_str())
+                    .or_else(|| node.children.iter().find_map(find))
+            }
+            find(self.scene().root())
+                .expect("flow scene must expose one focused node")
+                .to_owned()
+        }
+
+        fn assert_scene_invariants(&self) {
+            let scene = self.scene();
+            ensure_action_labels(&scene).unwrap();
+            assert_raster_text_legible(
+                &scene,
+                self.metrics,
+                self.core.theme_base(),
+                self.core.text_scale(),
+            )
+            .unwrap();
+        }
+
+        fn into_state_dir(self) -> tempfile::TempDir {
+            self.state_dir
+        }
+    }
+
+    fn custom(name: &str) -> ShellAction {
+        ShellAction::Custom(name.into())
+    }
+
+    fn movement(direction: pf_scene::AxisMove) -> ShellAction {
+        ShellAction::Move(direction)
+    }
+
+    struct Flow<'a> {
+        name: &'a str,
+        actions: Vec<ShellAction>,
+        route: pf_shell_core::Route,
+        focused_id: &'a str,
+    }
+
+    fn flow(case: Flow<'_>) {
+        let mut driver = FlowDriver::new();
+        driver.actions(case.actions);
+        assert_eq!(driver.core.route(), case.route, "{} route", case.name);
+        assert_eq!(
+            driver.focused_node_id(),
+            case.focused_id,
+            "{} focus",
+            case.name
+        );
+    }
+
+    #[test]
+    fn input_flows_cover_rooms_wraparound_quick_and_safe_return() {
+        use pf_scene::AxisMove::Down;
+        for case in [
+            Flow {
+                name: "rooms wrap forward",
+                actions: vec![
+                    custom("Room.next"),
+                    custom("Room.next"),
+                    custom("Room.next"),
+                ],
+                route: pf_shell_core::Route::Home,
+                focused_id: "item-ridgeline",
+            },
+            Flow {
+                name: "rooms wrap backward",
+                actions: vec![custom("Room.previous")],
+                route: pf_shell_core::Route::Settings,
+                focused_id: "settings-nav-accessibility",
+            },
+            Flow {
+                name: "quick returns to prior home focus",
+                actions: vec![movement(Down), custom("Quick"), ShellAction::Back],
+                route: pf_shell_core::Route::Home,
+                focused_id: "item-hollow-tides",
+            },
+            Flow {
+                name: "library search is reachable",
+                actions: vec![custom("Room.next")],
+                route: pf_shell_core::Route::Library,
+                focused_id: "library-search",
+            },
+        ] {
+            flow(case);
+        }
+
+        let mut driver = FlowDriver::new();
+        assert_eq!(
+            driver.action(custom("SafeReturn")),
+            Some(Effect::SafeReturn)
+        );
+    }
+
+    #[test]
+    fn input_flow_traverses_library_grid_edges_details_and_unavailable_card() {
+        use pf_scene::AxisMove::{Down, Left, Right, Up};
+        let mut driver = FlowDriver::new();
+        driver.action(custom("Room.next"));
+        driver.action(movement(Down));
+        assert_eq!(driver.focused_node_id(), "library-item-ridgeline");
+        driver.action(movement(Left));
+        assert_eq!(
+            driver.focused_node_id(),
+            "library-item-ridgeline",
+            "hard left edge"
+        );
+        driver.action(movement(Right));
+        assert_eq!(driver.focused_node_id(), "library-item-hollow-tides");
+        driver.action(movement(Down));
+        assert_eq!(driver.focused_node_id(), "library-item-low-orbit");
+        assert!(format!("{:?}", driver.scene()).contains("library-card-badge-low-orbit"));
+        assert_eq!(driver.action(ShellAction::Activate), None);
+        assert_eq!(driver.core.route(), pf_shell_core::Route::Details);
+        for action in [movement(Down), movement(Right), ShellAction::Activate] {
+            assert!(
+                !matches!(driver.action(action), Some(Effect::Launch(_))),
+                "real traversal must not expose an unavailable launch control"
+            );
+        }
+        driver.action(ShellAction::Back);
+        driver.action(movement(Up));
+        assert_eq!(driver.focused_node_id(), "library-item-hollow-tides");
+        assert!(format!("{:?}", driver.scene()).contains("A Details"));
+        assert_eq!(driver.action(ShellAction::Activate), None);
+        assert_eq!(driver.core.route(), pf_shell_core::Route::Details);
+    }
+
+    #[test]
+    fn input_flow_text_size_round_trips_and_painted_scene_is_complete_at_two_hundred_percent() {
+        use pf_scene::AxisMove::Right;
+        let mut driver = FlowDriver::new();
+        driver.actions([
+            custom("Room.next"),
+            custom("Room.next"),
+            movement(Right),
+            ShellAction::Activate,
+            ShellAction::Activate,
+        ]);
+        assert_eq!(driver.core.text_scale(), 200);
+        let persisted = fs::read_to_string(driver.preferences.state_file.clone()).unwrap();
+        assert!(persisted.contains("200%"));
+
+        let state_dir = driver.into_state_dir();
+        let mut reopened = FlowDriver::in_state_dir(state_dir);
+        assert_eq!(reopened.core.text_scale(), 200);
+        reopened.actions([custom("Room.next"), custom("Room.next")]);
+        reopened.assert_scene_invariants();
+    }
+
+    #[test]
+    fn flow_scene_helpers_reject_missing_action_name_ink() {
+        let mut action = Node::new(
+            pf_scene::NodeId::new("broken-action").unwrap(),
+            Role::Button,
+            "Broken",
+            pf_scene::Bounds::new(0.0, 0.0, 100.0, 40.0),
+            "--color-surface-canvas",
+        );
+        action.action = Some(pf_scene::NodeAction::Activate);
+        let scene =
+            pf_scene::Scene::new(action, pf_scene::NodeId::new("broken-action").unwrap()).unwrap();
+        assert!(
+            ensure_action_labels(&scene)
+                .unwrap_err()
+                .contains("name ink")
+        );
+    }
+
     #[test]
     fn guarded_baseline_capture_refuses_to_record_without_raster_guard() {
         let args = vec!["--taffy-baseline".to_owned()];

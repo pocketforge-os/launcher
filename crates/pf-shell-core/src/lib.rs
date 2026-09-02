@@ -4228,7 +4228,7 @@ impl ShellCore {
                 .map(|_| scaled_text_box_height(50.0, self.text_scale));
             if let Some(description) = item.description.as_deref() {
                 out.push(
-                    node(
+                    declared_multiline(node(
                         "detail-description",
                         Role::Text,
                         description,
@@ -4237,7 +4237,7 @@ impl ShellCore {
                         detail_column_width,
                         description_height.unwrap(),
                         COLOR_SURFACE_CANVAS_TOKEN,
-                    )
+                    ))
                     .with_line_height(1.55)
                     .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
                 );

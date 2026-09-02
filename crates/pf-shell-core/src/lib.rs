@@ -138,6 +138,34 @@ fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
     measured_text_advance(base_height, text_scale)
 }
 
+fn chrome_row_bottom(safe_top: f32, text_scale: u16) -> f32 {
+    safe_top + STATUS_BAR_HEIGHT.max(16.0 + scaled_text_box_height(32.0, text_scale))
+}
+
+fn system_status_group_left(
+    surface_width: f32,
+    text_scale: u16,
+    status_width: Option<f32>,
+    has_wifi: bool,
+    has_battery: bool,
+) -> Option<f32> {
+    let mut left = status_width.map(|width| {
+        let right = if text_scale == 100 { -16.0 } else { 0.0 };
+        surface_width - right - width.max(152.0)
+    });
+    if has_wifi {
+        left = Some(left.map_or(surface_width - 200.0, |value| {
+            value.min(surface_width - 200.0)
+        }));
+    }
+    if has_battery {
+        left = Some(left.map_or(surface_width - 168.0, |value| {
+            value.min(surface_width - 168.0)
+        }));
+    }
+    left
+}
+
 #[derive(Clone, Copy, Debug)]
 struct HomeVerticalLayout {
     title_y: f32,
@@ -233,6 +261,14 @@ fn settings_scaled_box_width(base_width: f32, text: &str, text_scale: u16) -> f3
 
 fn room_label_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * ROOM_HORIZONTAL_PADDING
+}
+
+fn room_strip_width(text_scale: u16) -> f32 {
+    KEYCAP_MIN_WIDTH * 2.0
+        + room_label_box_width(room_label_advance("Home", text_scale))
+        + room_label_box_width(room_label_advance("Library", text_scale))
+        + room_label_box_width(room_label_advance("Settings", text_scale))
+        + ROOM_STRIP_GAP * 4.0
 }
 
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
@@ -2767,16 +2803,41 @@ impl ShellCore {
         self.library_surface_width.set(w);
         let mut children = Vec::new();
         let battery_x = w - 168.0;
-        let room_left = w / 2.0 - 220.0;
-        let room_right = room_left + 416.0;
-        let clears_room_strip =
-            |left: f32, width: f32| left + width <= room_left || left >= room_right;
-        if self
+        let room_width = room_strip_width(self.text_scale);
+        let room_left = (w - room_width) / 2.0;
+        let room_right = room_left + room_width;
+        let has_wifi = self
             .network_state
             .as_ref()
-            .is_ok_and(|state| state.connected_ssid.is_some())
-            && clears_room_strip(w - 200.0, 20.0)
-        {
+            .is_ok_and(|state| state.connected_ssid.is_some());
+        let has_battery = self.battery_percent.is_some();
+        let mut status_parts = Vec::new();
+        if let Some(percent) = self.battery_percent {
+            status_parts.push(percent.to_string());
+        }
+        if self.authority_unavailable() {
+            status_parts.push("!".into());
+        }
+        if let Ok(state) = &self.time_state {
+            let seconds = state
+                .wall_clock
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                % 86_400;
+            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
+        }
+        let status_text = (!status_parts.is_empty()).then(|| status_parts.join("     "));
+        let status_width = status_text
+            .as_ref()
+            .map(|text| text_node_box_width(caption_text_width(text, self.text_scale)));
+        // Wi-Fi, battery, and status are one right-aligned chrome group. Measure the
+        // final, scale-aware extent used by the layout seam and admit every available
+        // member together only when the complete group clears the room strip.
+        let status_group_fits =
+            system_status_group_left(w, self.text_scale, status_width, has_wifi, has_battery)
+                .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
+        if status_group_fits && has_wifi {
             children.push(
                 node(
                     "wifi-glyph",
@@ -2791,10 +2852,7 @@ impl ShellCore {
                 .with_image(wifi_glyph_source(), ImageFit::Contain),
             );
         }
-        if let Some(battery_percent) = self
-            .battery_percent
-            .filter(|_| clears_room_strip(battery_x, 26.0))
-        {
+        if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
             children.extend([
                 node(
                     "battery-outline",
@@ -2838,34 +2896,9 @@ impl ShellCore {
                 ),
             ]);
         }
-        let mut status_parts = Vec::new();
-        if let Some(percent) = self.battery_percent {
-            status_parts.push(percent.to_string());
-        }
-        if self.authority_unavailable() {
-            status_parts.push("!".into());
-        }
-        if let Ok(state) = &self.time_state {
-            let seconds = state
-                .wall_clock
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                % 86_400;
-            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
-        }
-        // On compact surfaces the room switcher consumes the full status row. Keep
-        // that primary navigation unobscured whenever the measured status box would
-        // intersect the room strip plus its standard gap; the same status data
-        // remains available once the geometry provides enough horizontal room.
-        if !status_parts.is_empty() {
-            let status_text = status_parts.join("     ");
-            let status_left = battery_x + 32.0;
-            let status_width =
-                text_node_box_width(caption_text_width(&status_text, self.text_scale));
-            let status_clears_room = status_left + status_width <= room_left - ROOM_STRIP_GAP
-                || status_left >= room_right + ROOM_STRIP_GAP;
-            if status_clears_room {
+        if status_group_fits {
+            if let (Some(status_text), Some(status_width)) = (status_text, status_width) {
+                let status_left = battery_x + 32.0;
                 let mut status = node(
                     "status-cluster",
                     Role::Text,
@@ -3564,8 +3597,7 @@ impl ShellCore {
             // The chrome row can grow past its nominal 64 px anchor when status text
             // is enlarged. Start the opaque Home content region at that derived
             // bottom so it cannot repaint scaled chrome; this is identical at 100%.
-            let chrome_bottom = metrics.safe_insets.top
-                + STATUS_BAR_HEIGHT.max(16.0 + scaled_text_box_height(32.0, self.text_scale));
+            let chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, self.text_scale);
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
                 Role::Group,
@@ -3581,10 +3613,10 @@ impl ShellCore {
             out.extend(content);
         } else if self.route == Route::Library {
             let geometry = library_geometry(w);
-            // The chrome row is laid out inside the safe area, so its bottom moves
-            // with the top inset. Derive every Library row from that shifted edge;
-            // the subtractions preserve the existing zero-inset gaps exactly.
-            let chrome_bottom = metrics.safe_insets.top + STATUS_BAR_HEIGHT;
+            // The chrome row is laid out inside the safe area and grows with status
+            // text. Derive every Library row from that scaled edge; the subtractions
+            // preserve the existing 100%/zero-inset geometry exactly.
+            let chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, self.text_scale);
             let library_head_top = chrome_bottom + (LIB_HEAD_TOP - STATUS_BAR_HEIGHT);
             let compact_toolbar_top =
                 chrome_bottom + (COMPACT_LIBRARY_TOOLBAR_TOP - STATUS_BAR_HEIGHT);
@@ -6721,11 +6753,7 @@ fn rooms_layout(
     );
     assert!(nodes.is_empty(), "rooms subtree contains unexpected nodes");
 
-    let rooms_width = KEYCAP_MIN_WIDTH * 2.0
-        + room_label_box_width(room_label_advance("Home", text_scale))
-        + room_label_box_width(room_label_advance("Library", text_scale))
-        + room_label_box_width(room_label_advance("Settings", text_scale))
-        + ROOM_STRIP_GAP * 4.0;
+    let rooms_width = room_strip_width(text_scale);
     rooms.layout = Some(LayoutStyle {
         position: Position::Absolute,
         flex_direction: FlexDirection::Row,
@@ -11564,6 +11592,30 @@ mod tests {
     }
 
     #[test]
+    fn two_hundred_percent_library_search_starts_below_scaled_chrome() {
+        let mut core = fixture_core(vec![]);
+        core.go(Route::Library);
+        core.text_scale = 200;
+        let metrics = SurfaceMetrics {
+            logical_width: 800.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let scaled_chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, core.text_scale);
+        let standard_gap = LIB_HEAD_TOP - STATUS_BAR_HEIGHT;
+
+        assert!(
+            search.bounds.y >= scaled_chrome_bottom + standard_gap,
+            "Library search top {} must clear scaled chrome bottom {scaled_chrome_bottom} plus gap {standard_gap}",
+            search.bounds.y
+        );
+    }
+
+    #[test]
     fn desktop_library_footer_matches_promptbar_css_without_separators() {
         let mut core = fixture_core(vec![item(
             "item-0",
@@ -12052,11 +12104,18 @@ mod tests {
     }
 
     #[test]
-    fn status_cluster_yields_to_room_strip_only_when_geometry_intersects() {
+    fn status_group_is_atomic_and_yields_when_scaled_extent_cannot_clear_room_strip() {
         let mut core = fixture_core(vec![]);
-        core.text_scale = 100;
+        core.text_scale = 200;
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
 
-        for (logical_width, expected_status) in [(480.0, false), (800.0, true), (1280.0, true)] {
+        for (logical_width, expected_group) in [(640.0, false), (800.0, false), (1280.0, true)] {
             let scene = core
                 .scene(
                     SurfaceMetrics {
@@ -12069,11 +12128,20 @@ mod tests {
                     "",
                 )
                 .unwrap();
-            assert_eq!(
-                node_by_id(scene.root(), "status-cluster").is_some(),
-                expected_status,
-                "status visibility must follow measured room-strip clearance at {logical_width}px"
-            );
+            for id in [
+                "wifi-glyph",
+                "battery-outline",
+                "battery-cavity",
+                "battery-level",
+                "battery-terminal",
+                "status-cluster",
+            ] {
+                assert_eq!(
+                    node_by_id(scene.root(), id).is_some(),
+                    expected_group,
+                    "the status group must be admitted atomically from its 200%-scale extent at {logical_width}px ({id})"
+                );
+            }
         }
     }
 

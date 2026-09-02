@@ -3279,6 +3279,15 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {
+        if node.state.focused {
+            focused.push(node);
+        }
+        for child in &node.children {
+            collect_focused(child, focused);
+        }
+    }
+
     // Input-flow convention: every new route or transition adds a scenario row here. Flows
     // start at Home and drive ShellCore::action(); key-to-action translation has its own seam.
     struct FlowDriver {
@@ -4865,8 +4874,9 @@ mod durable_tests {
             assert!(search_box.corner_radius > 0.0);
             assert_eq!(
                 search_box.border_token.as_deref(),
-                Some("--state-focused-ring")
+                Some("--color-border-hairline")
             );
+            assert!(!search_box.state.focused);
             let hint = find(root, "search-hint").unwrap();
             assert_eq!(hint.type_role, pf_scene::TypeRole::Caption);
             assert_eq!(hint.ink_token.as_deref(), Some("--color-text-muted"));
@@ -4905,6 +4915,10 @@ mod durable_tests {
                 Some("--state-focused-ring")
             );
             assert!((rows[0].border_width - 2.0).abs() < f32::EPSILON);
+            let mut focused = Vec::new();
+            collect_focused(root, &mut focused);
+            assert_eq!(focused.len(), 1);
+            assert_eq!(focused[0].id, rows[0].id);
             assert!(find(root, "home-prompt-keycap-0-border").is_some());
 
             assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)

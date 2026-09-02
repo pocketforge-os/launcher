@@ -190,10 +190,9 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
-        // Home prompt rows intentionally rebaseline from the scanline approximation
-        // to the runtime's smooth inside-aligned border. Routes without a shared Home
-        // prompt row remain byte-identical.
-        "5a5ec4670bb0b45791947a666546ae675866d3f84217e96c3aa16202c08aad1d  ",
+        // Home intentionally rebaselines for the corrected attention-pill dot geometry.
+        // Every route without the attention pill remains byte-identical.
+        "6816cf2307fd3c2846936da0f24d14578996128ca2fb4e9e7b2b5eb8bf49f4dc  ",
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
         "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
@@ -284,6 +283,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("0cf66cd3409966436e39374838b07b8b4286bdea40359165e668bba9ae91ce7b  ")
+        transcript.contains("1ecb87506153a869ee37ae77764e087e06b3e6044d4c183bda14f333cdd9fe44  ")
     );
 }

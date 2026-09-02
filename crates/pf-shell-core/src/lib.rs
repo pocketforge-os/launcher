@@ -5843,17 +5843,20 @@ impl ShellCore {
             }),
         );
         out.push(screenshot);
+        let mut note_y = screenshot_y + row_height + SPACE_3;
         if let Some(status) = &self.power_status {
+            let status_height = scaled_text_box_height(32.0, self.text_scale);
             out.push(node(
                 "quick-power-status",
                 Role::Text,
                 status,
                 content_left,
-                panel_bottom - SPACE_5 - scaled_text_box_height(64.0, self.text_scale),
+                note_y,
                 content_width,
-                32.0,
+                status_height,
                 COLOR_STATUS_ATTENTION_TOKEN,
             ));
+            note_y += status_height + SPACE_3;
         }
         out.push(declared_multiline(
             node(
@@ -5861,7 +5864,7 @@ impl ShellCore {
                 Role::Text,
                 "Nothing is running now. Quick shows only what applies right here.",
                 content_left,
-                panel_bottom - SPACE_5 - scaled_text_box_height(40.0, self.text_scale),
+                note_y,
                 content_width,
                 scaled_text_box_height(40.0, self.text_scale),
                 SCENE_TRANSPARENT_TOKEN,
@@ -15023,6 +15026,76 @@ mod tests {
                 .children
                 .iter()
                 .any(|node| node.id.as_str() == "quick-power-sleep")
+        );
+    }
+
+    fn assert_quick_vertical_flow(scene: &Scene, ids: &[&str]) {
+        let nodes: Vec<_> = ids
+            .iter()
+            .map(|id| node_by_id(scene.root(), id).unwrap_or_else(|| panic!("missing {id}")))
+            .collect();
+        for pair in nodes.windows(2) {
+            let before = pair[0];
+            let after = pair[1];
+            assert!(
+                before.bounds.y + before.bounds.height <= after.bounds.y,
+                "{} {:?} overlaps {} {:?}",
+                before.id.as_str(),
+                before.bounds,
+                after.id.as_str(),
+                after.bounds
+            );
+        }
+    }
+
+    #[test]
+    fn quick_notes_follow_scaled_sleep_auto_sleep_and_capture_rows() {
+        let mut core = core();
+        core.text_scale = 200;
+        core.load_power(&FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        ));
+        core.go(Route::Quick);
+
+        assert_quick_vertical_flow(
+            &quick_scene(&core),
+            &[
+                "quick-power-sleep",
+                "quick-power-idle",
+                "quick-capture-screenshot",
+                "quick-truth",
+            ],
+        );
+    }
+
+    #[test]
+    fn quick_power_status_flows_between_capture_row_and_truth() {
+        let mut core = core();
+        core.text_scale = 100;
+        core.power_status = Some("Power actions are unavailable".into());
+        core.go(Route::Quick);
+
+        assert_quick_vertical_flow(
+            &quick_scene(&core),
+            &[
+                "quick-capture-screenshot",
+                "quick-power-status",
+                "quick-truth",
+            ],
         );
     }
 

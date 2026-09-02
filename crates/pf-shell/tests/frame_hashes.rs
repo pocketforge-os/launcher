@@ -198,8 +198,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
         "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
-        // Quick rebaselines for the raised-sheet row grammar and keycap footer.
-        "d98d8d7cddecd11e4a349a2980386704fe684469190788408e7454471f798616  ",
+        // Quick intentionally rebaselines after flowing its notes below the action rows.
+        "cbe491df596ca152b0f850e9f241e34958ac2ab207735adf7f4463d1f620cbcb  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "b47565735bcca17ad020e3f92bcfa7c305f1291aa717aaa1ba7df102bc62287d  ",

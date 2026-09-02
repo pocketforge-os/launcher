@@ -4225,7 +4225,7 @@ impl ShellCore {
             let description_height = item
                 .description
                 .as_ref()
-                .map(|_| scaled_text_box_height(42.0, self.text_scale));
+                .map(|_| scaled_text_box_height(50.0, self.text_scale));
             if let Some(description) = item.description.as_deref() {
                 out.push(
                     node(
@@ -10543,7 +10543,7 @@ mod tests {
         let (plain_availability_bottom, plain_ways_top) = ways_offset(without_description);
         let (_, described_ways_top) = ways_offset(with_description);
         assert!((plain_ways_top - (plain_availability_bottom + 4.0)).abs() < f32::EPSILON);
-        assert!((described_ways_top - (plain_ways_top + 42.0)).abs() < f32::EPSILON);
+        assert!((described_ways_top - (plain_ways_top + 50.0)).abs() < f32::EPSILON);
     }
 
     #[test]

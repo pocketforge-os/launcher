@@ -5622,7 +5622,7 @@ impl ShellCore {
         let content_left = panel_left + SPACE_5;
         let content_width = panel_width - 2.0 * SPACE_5;
         let row_height = scaled_text_box_height(40.0, self.text_scale).min(52.0);
-        let row_gap = SPACE_3;
+        let preferred_gap = SPACE_3;
         let mut panel = node(
             "quick-panel-surface",
             Role::Group,
@@ -5685,30 +5685,6 @@ impl ShellCore {
             out.push(row);
         };
 
-        // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
-        for (i, label) in ["Open focused item", "Browse the library"]
-            .iter()
-            .enumerate()
-        {
-            push_row(
-                &format!("quick-{i}"),
-                i,
-                label,
-                panel_top + SPACE_5 + i as f32 * (row_height + row_gap),
-                true,
-            );
-        }
-        out.push(node(
-            "quick-section-divider",
-            Role::Group,
-            "",
-            content_left,
-            panel_top + SPACE_5 + 2.0 * (row_height + row_gap),
-            content_width,
-            1.0,
-            COLOR_BORDER_HAIRLINE_TOKEN,
-        ));
-        let system_top = panel_top + SPACE_5 + 2.0 * (row_height + row_gap) + SPACE_3;
         let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
         if let Some(index) = self.sleep_row() {
             rows.push((index, "sleep", "Sleep"));
@@ -5726,6 +5702,49 @@ impl ShellCore {
         if let Some(label) = &idle_label {
             rows.push((self.idle_row(), "idle", label));
         }
+
+        // Quick is a fixed-height transient sheet. Preserve its preferred rhythm when
+        // possible, then yield spacing uniformly before dropping reassurance copy.
+        let status_height = self
+            .power_status
+            .as_ref()
+            .map(|_| scaled_text_box_height(32.0, self.text_scale));
+        let truth_height = scaled_text_box_height(40.0, self.text_scale);
+        let row_count = rows.len() as f32 + 3.0; // two contextual rows + screenshot
+        let gap_count = rows.len() as f32 + 4.0 + f32::from(status_height.is_some());
+        let fixed_height = row_count * row_height + status_height.unwrap_or(0.0) + truth_height;
+        let stack_top = panel_top + SPACE_5;
+        let budget_bottom = panel_bottom - SPACE_5;
+        let preferred_bottom = stack_top + fixed_height + gap_count * preferred_gap;
+        let gap_floor = preferred_gap / 2.0;
+        let gap = (preferred_gap - (preferred_bottom - budget_bottom).max(0.0) / gap_count)
+            .max(gap_floor);
+        let show_truth = stack_top + fixed_height + gap_count * gap <= budget_bottom;
+
+        // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
+        for (i, label) in ["Open focused item", "Browse the library"]
+            .iter()
+            .enumerate()
+        {
+            push_row(
+                &format!("quick-{i}"),
+                i,
+                label,
+                panel_top + SPACE_5 + i as f32 * (row_height + gap),
+                true,
+            );
+        }
+        out.push(node(
+            "quick-section-divider",
+            Role::Group,
+            "",
+            content_left,
+            panel_top + SPACE_5 + 2.0 * (row_height + gap),
+            content_width,
+            1.0,
+            COLOR_BORDER_HAIRLINE_TOKEN,
+        ));
+        let system_top = panel_top + SPACE_5 + 2.0 * (row_height + gap) + gap;
         let mut system_position = 0_usize;
         for (index, id, label) in rows {
             let enabled = match index {
@@ -5733,7 +5752,7 @@ impl ShellCore {
                 3 => self.supports_power(PowerAction::Restart),
                 _ => true,
             };
-            let y = system_top + system_position as f32 * (row_height + row_gap);
+            let y = system_top + system_position as f32 * (row_height + gap);
             let mut row = node(
                 &format!("quick-power-{id}"),
                 Role::Button,
@@ -5803,7 +5822,7 @@ impl ShellCore {
             Role::Button,
             "Capture screenshot",
             content_left,
-            system_top + system_position as f32 * (row_height + row_gap),
+            system_top + system_position as f32 * (row_height + gap),
             content_width,
             row_height,
             STATE_REST_SURFACE_TOKEN,
@@ -5822,7 +5841,7 @@ impl ShellCore {
         );
         screenshot.state.focused = screenshot_index == self.focus;
         screenshot.action = Some(NodeAction::Activate);
-        let screenshot_y = system_top + system_position as f32 * (row_height + row_gap);
+        let screenshot_y = system_top + system_position as f32 * (row_height + gap);
         let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
         screenshot.children.push(
             node(
@@ -5843,9 +5862,9 @@ impl ShellCore {
             }),
         );
         out.push(screenshot);
-        let mut note_y = screenshot_y + row_height + SPACE_3;
+        let mut note_y = screenshot_y + row_height + gap;
         if let Some(status) = &self.power_status {
-            let status_height = scaled_text_box_height(32.0, self.text_scale);
+            let status_height = status_height.expect("power status height must be measured");
             out.push(node(
                 "quick-power-status",
                 Role::Text,
@@ -5856,22 +5875,24 @@ impl ShellCore {
                 status_height,
                 COLOR_STATUS_ATTENTION_TOKEN,
             ));
-            note_y += status_height + SPACE_3;
+            note_y += status_height + gap;
         }
-        out.push(declared_multiline(
-            node(
-                "quick-truth",
-                Role::Text,
-                "Nothing is running now. Quick shows only what applies right here.",
-                content_left,
-                note_y,
-                content_width,
-                scaled_text_box_height(40.0, self.text_scale),
-                SCENE_TRANSPARENT_TOKEN,
-            )
-            .with_type_role(TypeRole::Caption)
-            .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
-        ));
+        if show_truth {
+            out.push(declared_multiline(
+                node(
+                    "quick-truth",
+                    Role::Text,
+                    "Nothing is running now. Quick shows only what applies right here.",
+                    content_left,
+                    note_y,
+                    content_width,
+                    truth_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            ));
+        }
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
         out.push(node(
@@ -15048,8 +15069,84 @@ mod tests {
         }
     }
 
+    fn max_scale_quick_core(power_status: Option<&str>) -> ShellCore {
+        let mut core = core();
+        core.text_scale = 200;
+        core.load_power(&FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        ));
+        core.power_status = power_status.map(str::to_owned);
+        core.go(Route::Quick);
+        core
+    }
+
+    fn assert_quick_content_within_budget(scene: &Scene) {
+        let panel = node_by_id(scene.root(), "quick-panel-surface").unwrap();
+        let budget_bottom = panel.bounds.y + panel.bounds.height - SPACE_5;
+        for node in &scene.root().children {
+            if node.id.as_str().starts_with("quick-") && node.id.as_str() != "quick-panel-surface" {
+                assert!(
+                    node.bounds.y + node.bounds.height <= budget_bottom,
+                    "{} {:?} escapes Quick budget bottom {budget_bottom}",
+                    node.id.as_str(),
+                    node.bounds
+                );
+            }
+        }
+    }
+
     #[test]
-    fn quick_notes_follow_scaled_sleep_auto_sleep_and_capture_rows() {
+    fn quick_max_scale_yields_truth_to_keep_rows_within_panel() {
+        let core = max_scale_quick_core(None);
+        let scene = quick_scene(&core);
+
+        assert_quick_content_within_budget(&scene);
+        assert!(node_by_id(scene.root(), "quick-truth").is_none());
+        assert_quick_vertical_flow(
+            &scene,
+            &[
+                "quick-power-sleep",
+                "quick-power-idle",
+                "quick-capture-screenshot",
+            ],
+        );
+    }
+
+    #[test]
+    fn quick_max_scale_never_drops_or_overflows_power_status() {
+        let core = max_scale_quick_core(Some("Power actions are unavailable"));
+        let scene = quick_scene(&core);
+
+        assert_quick_content_within_budget(&scene);
+        assert!(node_by_id(scene.root(), "quick-power-status").is_some());
+        assert!(node_by_id(scene.root(), "quick-truth").is_none());
+        assert_quick_vertical_flow(&scene, &["quick-capture-screenshot", "quick-power-status"]);
+    }
+
+    #[test]
+    fn quick_default_scale_keeps_truth_note() {
+        let mut core = core();
+        core.go(Route::Quick);
+
+        assert!(node_by_id(quick_scene(&core).root(), "quick-truth").is_some());
+    }
+
+    #[test]
+    fn quick_rows_follow_scaled_sleep_auto_sleep_order() {
         let mut core = core();
         core.text_scale = 200;
         core.load_power(&FakePowerPort::new(
@@ -15077,7 +15174,6 @@ mod tests {
                 "quick-power-sleep",
                 "quick-power-idle",
                 "quick-capture-screenshot",
-                "quick-truth",
             ],
         );
     }

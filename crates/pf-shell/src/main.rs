@@ -4884,12 +4884,18 @@ mod durable_tests {
             let region = find(root, "search-results-scroll-region").unwrap();
             let prompts = find(root, "prompts").unwrap();
             assert!(region.bounds.y + region.bounds.height <= prompts.bounds.y);
-            let rows = root
+            let rows = region
                 .children
                 .iter()
                 .filter(|node| node.id.as_str().starts_with("search-result-"))
                 .collect::<Vec<_>>();
             assert!(!rows.is_empty());
+            assert_eq!(rows.len(), region.children.len());
+            assert!(
+                root.children
+                    .iter()
+                    .all(|node| { !node.id.as_str().starts_with("search-result-") })
+            );
             for row in &rows {
                 assert_eq!(row.type_role, pf_scene::TypeRole::Label);
                 assert!(row.corner_radius > 0.0);

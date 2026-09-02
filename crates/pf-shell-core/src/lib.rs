@@ -4146,7 +4146,7 @@ impl ShellCore {
                 .focus
                 .saturating_sub(capacity.saturating_sub(1))
                 .min(self.search_results.len().saturating_sub(capacity));
-            out.push(node(
+            let mut results_region = node(
                 "search-results-scroll-region",
                 Role::Group,
                 "Search results",
@@ -4155,7 +4155,7 @@ impl ShellCore {
                 column_width,
                 (rows_bottom - rows_top).max(0.0),
                 SCENE_TRANSPARENT_TOKEN,
-            ));
+            );
             for (result, &item_index) in self
                 .search_results
                 .iter()
@@ -4248,8 +4248,9 @@ impl ShellCore {
                     row.border_width = 2.0;
                 }
                 row.action = Some(NodeAction::Activate);
-                out.push(row);
+                results_region.children.push(row);
             }
+            out.push(results_region);
         } else if matches!(self.route, Route::Details | Route::VariantChooser) {
             let Some(item_index) = self.selected_item else {
                 return;
@@ -9454,6 +9455,19 @@ mod tests {
         assert_eq!(
             query.border_token.as_deref(),
             Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        let results_region = node_by_id(populated.root(), "search-results-scroll-region").unwrap();
+        assert_eq!(results_region.children.len(), 1);
+        assert_eq!(
+            results_region.children[0].id.as_str(),
+            "search-result-search-result"
+        );
+        assert!(
+            populated
+                .root()
+                .children
+                .iter()
+                .all(|node| { !node.id.as_str().starts_with("search-result-") })
         );
         let prompts = node_by_id(populated.root(), "prompts").unwrap();
         assert_eq!(prompts.role, Role::Group);

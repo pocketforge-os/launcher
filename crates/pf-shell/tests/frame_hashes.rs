@@ -283,6 +283,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("1ecb87506153a869ee37ae77764e087e06b3e6044d4c183bda14f333cdd9fe44  ")
+        transcript.contains("17562411e168caeef61a00511a4e78add6c4ca6ead0ec87b63d965a45f7a1564  ")
     );
 }

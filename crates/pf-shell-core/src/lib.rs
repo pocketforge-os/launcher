@@ -3396,10 +3396,17 @@ impl ShellCore {
             if let Some(message) = attention {
                 const PILL_RIGHT_MARGIN: f32 = 48.0;
                 const PILL_TOP: f32 = 77.0;
-                const PILL_HEIGHT: f32 = 33.0;
+                // Caption glyph shaping needs the same 22px control box used by the
+                // chrome keycaps; the CSS padding remains outside this line box.
+                const PILL_LABEL_HEIGHT: f32 = 22.0;
+                const PILL_VERTICAL_PADDING: f32 = 8.0;
                 const PILL_HORIZONTAL_PADDING: f32 = 16.0;
                 const PILL_GAP: f32 = 8.0;
                 const DOT_SIZE: f32 = 6.4;
+                let rem_scale = f32::from(self.text_scale) / 100.0;
+                let pill_label_height = PILL_LABEL_HEIGHT * rem_scale;
+                let pill_height = pill_label_height + 2.0 * PILL_VERTICAL_PADDING;
+                let dot_size = DOT_SIZE * rem_scale;
                 let mut pill_border = node(
                     "attention-pill-border",
                     Role::Group,
@@ -3407,21 +3414,26 @@ impl ShellCore {
                     0.0,
                     PILL_TOP,
                     0.0,
-                    PILL_HEIGHT,
+                    pill_height,
                     COLOR_BORDER_HAIRLINE_TOKEN,
                 );
                 pill_border.layout = Some(LayoutStyle {
                     position: Position::Absolute,
                     align_items: Some(AlignItems::Center),
                     gap: (LayoutValue::Px(0.0), LayoutValue::Px(PILL_GAP)),
-                    padding: px_edges(0.0, PILL_HORIZONTAL_PADDING, 0.0, PILL_HORIZONTAL_PADDING),
+                    padding: px_edges(
+                        PILL_VERTICAL_PADDING,
+                        PILL_HORIZONTAL_PADDING,
+                        PILL_VERTICAL_PADDING,
+                        PILL_HORIZONTAL_PADDING,
+                    ),
                     inset: Edges {
                         top: LayoutValue::Px(PILL_TOP),
                         right: LayoutValue::Px(PILL_RIGHT_MARGIN),
                         bottom: LayoutValue::Auto,
                         left: LayoutValue::Auto,
                     },
-                    height: LayoutValue::Px(PILL_HEIGHT),
+                    height: LayoutValue::Px(pill_height),
                     ..LayoutStyle::default()
                 });
                 let mut pill_fill = node(
@@ -3445,11 +3457,11 @@ impl ShellCore {
                     "",
                     0.0,
                     0.0,
-                    DOT_SIZE,
-                    DOT_SIZE,
+                    dot_size,
+                    dot_size,
                     COLOR_STATUS_ATTENTION_TOKEN,
                 );
-                dot.layout = Some(fixed_layout(DOT_SIZE, DOT_SIZE));
+                dot.layout = Some(fixed_layout(dot_size, dot_size));
                 let mut text = node(
                     "attention",
                     Role::Text,
@@ -3457,19 +3469,17 @@ impl ShellCore {
                     0.0,
                     0.0,
                     0.0,
-                    PILL_HEIGHT,
+                    pill_label_height,
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Caption)
                 .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN);
                 text.layout = Some(LayoutStyle {
-                    height: LayoutValue::Px(PILL_HEIGHT),
+                    height: LayoutValue::Px(pill_label_height),
                     // Production shaping owns intrinsic measurement. Preserve the legacy
                     // caption reserve as a minimum so the seam cannot move the anchored
                     // capsule's left cap by a subpixel on this conversion.
-                    min_width: LayoutValue::Px(
-                        message.chars().count() as f32 * CAPTION_GLYPH_ADVANCE,
-                    ),
+                    min_width: LayoutValue::Px(caption_text_width(message, self.text_scale)),
                     flex_shrink: 0.0,
                     ..LayoutStyle::default()
                 });
@@ -12608,7 +12618,7 @@ mod tests {
         );
         assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
         assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
-        assert!((pill_border.bounds.height - 33.0).abs() < f32::EPSILON);
+        assert!((pill_border.bounds.height - 38.0).abs() < f32::EPSILON);
         assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
         assert_eq!(pill_border.style_token, COLOR_BORDER_HAIRLINE_TOKEN);
         assert_eq!(
@@ -12674,6 +12684,57 @@ mod tests {
                 COLOR_SURFACE_RAISED_TOKEN,
                 "keycaps retain their designed raised fill"
             );
+        }
+    }
+
+    #[test]
+    fn attention_pill_internal_geometry_matches_tokens_at_every_text_scale() {
+        struct Status;
+        impl DeviceStatusPort for Status {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 50,
+                    attention_message: Some("Controller battery low".to_owned()),
+                })
+            }
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = core();
+        core.load_device_status(&Status);
+
+        for text_scale in [100, 150, 200] {
+            core.text_scale = text_scale;
+            let scene = core.scene(metrics, "").unwrap();
+            let border = node_by_id(scene.root(), "attention-pill-border")
+                .expect("attention pill border")
+                .bounds;
+            let dot_node = node_by_id(scene.root(), "attention-dot").expect("attention dot");
+            let dot = dot_node.bounds;
+            let label = node_by_id(scene.root(), "attention")
+                .expect("attention label")
+                .bounds;
+            let rem_scale = f32::from(text_scale) / 100.0;
+
+            assert!((dot.width - 6.4 * rem_scale).abs() <= 0.01);
+            assert!((dot.height - 6.4 * rem_scale).abs() <= 0.01);
+            assert_eq!(dot_node.style_token, COLOR_STATUS_ATTENTION_TOKEN);
+            assert!((dot_node.corner_radius - dot.width / 2.0).abs() <= 0.01);
+            assert!((label.x - (dot.x + dot.width) - 8.0).abs() <= 0.01);
+            assert!(
+                (dot.y + dot.height / 2.0 - (label.y + label.height / 2.0)).abs() <= 0.01,
+                "dot and its sibling label must share a center at {text_scale}%: dot={dot:?} label={label:?}"
+            );
+            assert!((dot.x - border.x - 16.0).abs() <= 0.01);
+            assert!((border.x + border.width - label.x - label.width - 16.0).abs() <= 0.01);
+            assert!((label.y - border.y - 8.0).abs() <= 0.01);
+            assert!((border.y + border.height - label.y - label.height - 8.0).abs() <= 0.01);
         }
     }
 

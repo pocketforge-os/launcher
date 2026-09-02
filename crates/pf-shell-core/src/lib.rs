@@ -2359,7 +2359,9 @@ impl ShellCore {
             let ready = self.ready_variants(item);
             return match ready.len() {
                 0 => None,
-                1 => self.launch_variant(item, ready[0]),
+                1 => self
+                    .active_ready_variant(item)
+                    .and_then(|variant| self.launch_variant(item, variant)),
                 _ => {
                     self.go(Route::VariantChooser);
                     self.focus = 0;
@@ -2407,6 +2409,13 @@ impl ShellCore {
             .filter(|(_, variant)| matches!(variant.availability, Availability::Ready))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn active_ready_variant(&self, item: usize) -> Option<usize> {
+        self.items[item]
+            .variants
+            .iter()
+            .position(|variant| matches!(variant.availability, Availability::Ready))
     }
 
     fn detail_focusable_variants(&self) -> Vec<usize> {
@@ -4228,6 +4237,7 @@ impl ShellCore {
                 .with_type_role(TypeRole::Eyebrow),
             );
             let ready = self.ready_variants(item_index);
+            let active_ready_variant = self.active_ready_variant(item_index);
             let variant_row_height = 66.0;
             let variant_row_gap = 7.0;
             let variant_rows_top = ways_heading_top + ways_heading_height + 4.0;
@@ -4305,7 +4315,7 @@ impl ShellCore {
                     variant_node.state.focused = focused;
                     variant_node.state.unavailable =
                         !matches!(variant.availability, Availability::Ready);
-                    let selected = variant_index == 0;
+                    let selected = Some(variant_index) == active_ready_variant;
                     variant_node.state.selected = selected;
                     variant_node = variant_node.with_border(
                         if focused || selected {
@@ -10361,6 +10371,59 @@ mod tests {
 
         core.action(&ShellAction::Move(AxisMove::Left));
         assert_eq!(core.focus(), 1);
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "game-native".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn details_selection_focus_and_play_follow_the_launchable_variant() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![
+                variant(
+                    "cloud",
+                    "game-cloud",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                ),
+                variant("native", "game-native", Availability::Ready),
+            ],
+        )]);
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+
+        assert_eq!(
+            core.focus(),
+            0,
+            "the launchable variant row has default focus"
+        );
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let unavailable = node_by_id(scene.root(), "detail-variant-0").unwrap();
+        let launchable = node_by_id(scene.root(), "detail-variant-1").unwrap();
+        assert!(!unavailable.state.selected);
+        assert!(!unavailable.state.focused);
+        assert!(launchable.state.selected);
+        assert!(launchable.state.focused);
+        assert!(node_by_id(scene.root(), "detail-variant-1-selection-mark").is_some());
+
+        core.action(&ShellAction::Move(AxisMove::Down));
         assert_eq!(
             core.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {

@@ -3604,7 +3604,7 @@ impl ShellCore {
                 .with_type_role(TypeRole::Label),
             );
             out.push(search);
-            for (index, (label, count, filter)) in filters.into_iter().enumerate() {
+            for (index, (full_label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
                     LIBRARY_SIDE_MARGIN
                 } else {
@@ -3653,15 +3653,19 @@ impl ShellCore {
                     - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_box_width))
                 .max(0.0);
                 let label_width = if self.text_scale == 100 {
-                    label_text_width(&label) + 20.0
+                    label_text_width(&full_label) + 20.0
                 } else {
                     available_label_width
                 };
-                let label = scale_aware_single_line(&label, available_label_width, self.text_scale);
+                let painted_label =
+                    scale_aware_single_line(&full_label, available_label_width, self.text_scale);
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
-                    &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
+                    &count.map_or_else(
+                        || full_label.clone(),
+                        |count| format!("{full_label} · {count}"),
+                    ),
                     chip_x,
                     toolbar_top + chip_row as f32 * (chip_height + chip_row_gap),
                     chip_width,
@@ -3718,7 +3722,7 @@ impl ShellCore {
                     let mut label_node = node(
                         &format!("library-filter-{index}-label"),
                         Role::Text,
-                        &label,
+                        &painted_label,
                         chip.bounds.x + chip_padding,
                         chip.bounds.y + 5.0,
                         label_width,
@@ -8842,6 +8846,35 @@ mod tests {
                 label.bounds.width
             );
         }
+    }
+
+    #[test]
+    fn compact_scaled_library_filter_keeps_full_accessible_name_when_paint_is_ellipsized() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.text_scale = 200;
+        core.go(Route::Library);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-3").unwrap();
+        let painted_label = node_by_id(chip, "library-filter-3-label").unwrap();
+
+        assert_eq!(chip.accessible_label, "Everything else · 0");
+        assert_eq!(painted_label.accessible_label, "Everything…");
     }
 
     #[test]

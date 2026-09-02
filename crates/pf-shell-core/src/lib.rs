@@ -3655,8 +3655,9 @@ impl ShellCore {
                     vertical.show_card_caption,
                 );
                 if item.favorite {
-                    let (pin_width, pin_height) =
-                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    // The star is artwork inside the fixed card box, so accessible text
+                    // scaling applies only to the caption/status carrier below the art.
+                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = x + card_width - 18.0;
                     let pin_center_y = vertical.card_row_y + 20.0;
                     n.children.push(
@@ -4032,8 +4033,7 @@ impl ShellCore {
                     art.state.focused = true;
                 }
                 if item.favorite {
-                    let (pin_width, pin_height) =
-                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
                     let pin_center_y = card.bounds.y + 18.0;
                     card.children.push(
@@ -6470,17 +6470,13 @@ fn plate_art_nodes(
     );
     let mut nodes = vec![art];
     let home = context == "home-card";
-    let scale_aware_card = !favorite && !detail;
-    let stack_scale = if scale_aware_card {
-        f32::from(text_scale) / 100.0
-    } else {
-        1.0
-    };
-    let initial_width = (72.0 * stack_scale).min(art_width);
-    let initial_height = 56.0 * stack_scale;
-    let kind_width = (88.0 * stack_scale).min(art_width);
-    let kind_height = 24.0 * stack_scale;
-    let stack_gap = 8.0 * stack_scale;
+    // Identity-plate lettering belongs to the fixed-size artwork, not the accessible
+    // text flow below it. Keep its layout at the authored 100% metrics at every scale.
+    let initial_width = 72.0_f32.min(art_width);
+    let initial_height = 56.0;
+    let kind_width = 88.0_f32.min(art_width);
+    let kind_height = 24.0;
+    let stack_gap = 8.0;
     let stack_top = art_y + (art_height - initial_height - stack_gap - kind_height) / 2.0;
     nodes.push(
         node(
@@ -6640,7 +6636,7 @@ fn add_unavailable_card_cues(
     };
     let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
-        if scale_aware_card && text_scale != 100 {
+        if scale_aware_card && !home && text_scale != 100 {
             (
                 measured_text_advance(base_width, text_scale)
                     .max(text_node_box_width(caption_text_width(text, text_scale)))
@@ -6668,7 +6664,8 @@ fn add_unavailable_card_cues(
                 .any(|requirement| !requirement.optional && requirement.capability == "network")
         })
     {
-        let badge = scale_aware_single_line("⊘ Network", width - 20.0, text_scale);
+        let badge_scale = if home { 100 } else { text_scale };
+        let badge = scale_aware_single_line("⊘ Network", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 92.0, 28.0);
         nodes.push(
             node(
@@ -6702,7 +6699,8 @@ fn add_unavailable_card_cues(
         }
     }
     if matches!(availability, Availability::IncompatibleRuntime { .. }) {
-        let badge = scale_aware_single_line("◉ Update", width - 20.0, text_scale);
+        let badge_scale = if home { 100 } else { text_scale };
+        let badge = scale_aware_single_line("◉ Update", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
         nodes.push(
             node(
@@ -6729,7 +6727,8 @@ fn add_unavailable_card_cues(
         Availability::UnsupportedCapability { .. } => "Unavailable",
         Availability::Ready => return,
     };
-    let badge = scale_aware_single_line(&format!("⊘ {badge}"), width - 20.0, text_scale);
+    let badge_scale = if home { 100 } else { text_scale };
+    let badge = scale_aware_single_line(&format!("⊘ {badge}"), width - 20.0, badge_scale);
     let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
     // Illustrated covers receive a dimming veil. Identity plates already encode their
     // unavailable state with the art badge; veiling the plate would erase its mono/kind identity.
@@ -9925,6 +9924,75 @@ mod tests {
                 && !id.contains("plate-motif")
                 && !id.contains("plate-frame")
         }));
+    }
+
+    #[test]
+    fn on_card_plate_and_badge_bounds_ignore_accessible_text_scale() {
+        let mut ready = variant("stream", "steam-link", Availability::Ready);
+        ready.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let mut plate = item("steam-link", "Steam Link", vec![ready]);
+        plate.kind = AppKind::Stream;
+        plate.tags.push("kind-label:Stream".into());
+        let core = fixture_core(vec![plate]);
+        let plate = &core.items[0];
+
+        let card_nodes = |text_scale| {
+            let mut nodes = plate_art_nodes(
+                plate,
+                "home-card",
+                48.0,
+                388.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+                text_scale,
+            );
+            add_unavailable_card_cues(
+                &mut nodes,
+                plate,
+                &Availability::Ready,
+                "home-card",
+                48.0,
+                388.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+                Some(HOME_PROMPT_BAND_TOP),
+                text_scale,
+                true,
+            );
+            nodes
+        };
+        let at_100 = card_nodes(100);
+        let at_200 = card_nodes(200);
+
+        for id in [
+            "home-card-initial-plate-steam-link",
+            "home-card-plate-kind-steam-link",
+            "home-card-badge-steam-link",
+        ] {
+            let bounds_at = |nodes: &[Node]| {
+                nodes
+                    .iter()
+                    .find(|node| node.id.as_str() == id)
+                    .unwrap()
+                    .bounds
+            };
+            assert_eq!(
+                bounds_at(&at_100),
+                bounds_at(&at_200),
+                "{id} must retain 100% on-card metrics"
+            );
+        }
+        assert_eq!(
+            at_200
+                .iter()
+                .find(|node| node.id.as_str() == "home-card-badge-steam-link")
+                .unwrap()
+                .accessible_label,
+            "⊘ Network"
+        );
     }
 
     #[test]

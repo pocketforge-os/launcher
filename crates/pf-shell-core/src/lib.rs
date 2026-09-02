@@ -5139,7 +5139,7 @@ impl ShellCore {
                         } else {
                             COLOR_BORDER_HAIRLINE_TOKEN
                         },
-                        1.0,
+                        if focused && selected { 2.0 } else { 1.0 },
                     );
                     chip.state.selected = selected;
                     fills.push(chip);
@@ -8507,6 +8507,10 @@ mod tests {
                     } else {
                         COLOR_BORDER_HAIRLINE_TOKEN
                     })
+                );
+                assert_eq!(
+                    chip.border_width,
+                    if value == effective { 2.0 } else { 1.0 }
                 );
                 assert_eq!(chip.state.selected, value == effective);
                 let value_text =

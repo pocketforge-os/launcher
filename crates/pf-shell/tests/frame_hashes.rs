@@ -55,6 +55,11 @@ fn every_presented_evidence_route_has_action_labels_and_rasterized_text_ink() {
                 out.path().join("search.png").is_file(),
                 "the guarded evidence route set must include Search"
             );
+        } else {
+            assert!(
+                out.path().join("settings-edit.png").is_file(),
+                "the guarded Settings evidence set must include value-edit mode"
+            );
         }
     }
 }

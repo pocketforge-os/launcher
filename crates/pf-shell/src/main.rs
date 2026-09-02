@@ -3709,6 +3709,16 @@ mod durable_tests {
             } else {
                 assert_cell(&driver, cell, "Settings");
             }
+
+            // Editing is a distinct painted Settings state: keep it in every
+            // accessibility/safe-inset matrix cell so both the raster-ink and
+            // occlusion guards exercise the value chips, not only the rest row.
+            driver.action(movement(pf_scene::AxisMove::Right));
+            if cell.high_contrast && cell.text_scale == 100 {
+                assert_settings_high_contrast_known_defect(&driver, cell);
+            } else {
+                assert_cell(&driver, cell, "Settings value edit");
+            }
         }
     }
 

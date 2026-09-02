@@ -71,6 +71,8 @@ const HOME_SHELF_LIMIT: usize = 6;
 const HOME_SHELF_GAP: f32 = 47.2;
 const LIBRARY_SIDE_MARGIN: f32 = SPACE_7;
 const LIBRARY_TOOLBAR_GAP: f32 = SPACE_4;
+const COMPACT_LIBRARY_TOOLBAR_TOP: f32 = 180.0;
+const LIBRARY_TOOLBAR_ROW_GAP: f32 = 68.0 - CHIP_HEIGHT;
 const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
@@ -134,6 +136,34 @@ fn text_node_box_width(content_advance: f32) -> f32 {
 
 fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
     measured_text_advance(base_height, text_scale)
+}
+
+fn chrome_row_bottom(safe_top: f32, text_scale: u16) -> f32 {
+    safe_top + STATUS_BAR_HEIGHT.max(16.0 + scaled_text_box_height(32.0, text_scale))
+}
+
+fn system_status_group_left(
+    surface_width: f32,
+    text_scale: u16,
+    status_width: Option<f32>,
+    has_wifi: bool,
+    has_battery: bool,
+) -> Option<f32> {
+    let mut left = status_width.map(|width| {
+        let right = if text_scale == 100 { -16.0 } else { 0.0 };
+        surface_width - right - width.max(152.0)
+    });
+    if has_wifi {
+        left = Some(left.map_or(surface_width - 200.0, |value| {
+            value.min(surface_width - 200.0)
+        }));
+    }
+    if has_battery {
+        left = Some(left.map_or(surface_width - 168.0, |value| {
+            value.min(surface_width - 168.0)
+        }));
+    }
+    left
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,12 +263,37 @@ fn room_label_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * ROOM_HORIZONTAL_PADDING
 }
 
+fn room_strip_width(text_scale: u16) -> f32 {
+    KEYCAP_MIN_WIDTH * 2.0
+        + room_label_box_width(room_label_advance("Home", text_scale))
+        + room_label_box_width(room_label_advance("Library", text_scale))
+        + room_label_box_width(room_label_advance("Settings", text_scale))
+        + ROOM_STRIP_GAP * 4.0
+}
+
 fn library_chip_width(label: &str, count: Option<usize>) -> f32 {
     CHIP_HORIZONTAL_PADDING
         + label_text_width(label)
         + 20.0
         + count.map_or(0.0, |value| {
             CHIP_COUNT_GAP + text_node_box_width(label_text_width(&value.to_string()))
+        })
+        + CHIP_HORIZONTAL_PADDING
+}
+
+fn scaled_library_chip_width(label: &str, count: Option<usize>, text_scale: u16) -> f32 {
+    if text_scale == 100 {
+        return library_chip_width(label, count);
+    }
+
+    CHIP_HORIZONTAL_PADDING
+        + measured_text_advance(label_text_width(label) + 20.0, text_scale)
+        + count.map_or(0.0, |value| {
+            CHIP_COUNT_GAP
+                + text_node_box_width(measured_text_advance(
+                    label_text_width(&value.to_string()),
+                    text_scale,
+                ))
         })
         + CHIP_HORIZONTAL_PADDING
 }
@@ -310,6 +365,21 @@ impl LibraryGeometry {
 
     fn wrapped_toolbar(self) -> bool {
         self.toolbar_rows() > 1
+    }
+
+    fn compact_toolbar_bottom(self, text_scale: u16) -> f32 {
+        let rows = self.toolbar_rows();
+        COMPACT_LIBRARY_TOOLBAR_TOP
+            + rows as f32 * scaled_text_box_height(CHIP_HEIGHT, text_scale)
+            + rows.saturating_sub(1) as f32 * LIBRARY_TOOLBAR_ROW_GAP
+    }
+
+    fn scaled_card_top(self, text_scale: u16) -> f32 {
+        if self.columns == 6 {
+            return self.card_top;
+        }
+        let original_separation = self.card_top - self.compact_toolbar_bottom(100);
+        self.compact_toolbar_bottom(text_scale) + original_separation
     }
 
     fn toolbar_to_grid_column(self, toolbar_column: usize) -> usize {
@@ -2733,11 +2803,41 @@ impl ShellCore {
         self.library_surface_width.set(w);
         let mut children = Vec::new();
         let battery_x = w - 168.0;
-        if self
+        let room_width = room_strip_width(self.text_scale);
+        let room_left = (w - room_width) / 2.0;
+        let room_right = room_left + room_width;
+        let has_wifi = self
             .network_state
             .as_ref()
-            .is_ok_and(|state| state.connected_ssid.is_some())
-        {
+            .is_ok_and(|state| state.connected_ssid.is_some());
+        let has_battery = self.battery_percent.is_some();
+        let mut status_parts = Vec::new();
+        if let Some(percent) = self.battery_percent {
+            status_parts.push(percent.to_string());
+        }
+        if self.authority_unavailable() {
+            status_parts.push("!".into());
+        }
+        if let Ok(state) = &self.time_state {
+            let seconds = state
+                .wall_clock
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                % 86_400;
+            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
+        }
+        let status_text = (!status_parts.is_empty()).then(|| status_parts.join("     "));
+        let status_width = status_text
+            .as_ref()
+            .map(|text| text_node_box_width(caption_text_width(text, self.text_scale)));
+        // Wi-Fi, battery, and status are one right-aligned chrome group. Measure the
+        // final, scale-aware extent used by the layout seam and admit every available
+        // member together only when the complete group clears the room strip.
+        let status_group_fits =
+            system_status_group_left(w, self.text_scale, status_width, has_wifi, has_battery)
+                .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
+        if status_group_fits && has_wifi {
             children.push(
                 node(
                     "wifi-glyph",
@@ -2752,7 +2852,7 @@ impl ShellCore {
                 .with_image(wifi_glyph_source(), ImageFit::Contain),
             );
         }
-        if let Some(battery_percent) = self.battery_percent {
+        if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
             children.extend([
                 node(
                     "battery-outline",
@@ -2796,39 +2896,26 @@ impl ShellCore {
                 ),
             ]);
         }
-        let mut status_parts = Vec::new();
-        if let Some(percent) = self.battery_percent {
-            status_parts.push(percent.to_string());
-        }
-        if self.authority_unavailable() {
-            status_parts.push("!".into());
-        }
-        if let Ok(state) = &self.time_state {
-            let seconds = state
-                .wall_clock
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                % 86_400;
-            status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
-        }
-        if !status_parts.is_empty() {
-            let status_text = status_parts.join("     ");
-            children.push(
-                node(
+        if status_group_fits {
+            if let (Some(status_text), Some(status_width)) = (status_text, status_width) {
+                let status_left = battery_x + 32.0;
+                let mut status = node(
                     "status-cluster",
                     Role::Text,
                     &status_text,
-                    battery_x + 32.0,
+                    status_left,
                     16.0,
-                    text_node_box_width(caption_text_width(&status_text, self.text_scale)),
-                    32.0,
+                    status_width,
+                    scaled_text_box_height(32.0, self.text_scale),
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_type_role(TypeRole::Caption),
-            );
+                .with_type_role(TypeRole::Caption);
+                if self.text_scale > 100 {
+                    status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
+                }
+                children.push(status);
+            }
         }
-        let room_left = w / 2.0 - 220.0;
         let mut room_nodes = Vec::new();
         for (id, label, x, width) in [
             ("room-keycap-left", "L", room_left + 8.0, 32.0),
@@ -2938,7 +3025,7 @@ impl ShellCore {
             Presentation::FirstRun => self.first_run_nodes(&mut children, w),
             Presentation::Crash => self.crash_nodes(&mut children, w, h),
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
-            _ => self.route_nodes(&mut children, w, h),
+            _ => self.route_nodes(&mut children, metrics),
         }
         let supplied_footer = footer.to_owned();
         let footer = match self.route {
@@ -3079,7 +3166,7 @@ impl ShellCore {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
-        wrap_system_layout(&mut children, w);
+        wrap_system_layout(&mut children, w, self.text_scale);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
             add_explicit_action_name(child, self.text_scale);
@@ -3142,7 +3229,8 @@ impl ShellCore {
             .map(|binding| format!("{} {label}", binding.binding))
     }
 
-    fn route_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
+    fn route_nodes(&self, out: &mut Vec<Node>, metrics: SurfaceMetrics) {
+        let (w, h) = (metrics.logical_width, metrics.logical_height);
         let heading = match self.route {
             Route::Home => {
                 if self.just_returned {
@@ -3250,8 +3338,13 @@ impl ShellCore {
                 .min(w - 96.0)
             };
             let hero_status_height = scaled_text_box_height(32.0, self.text_scale);
-            let mut content = vec![
-                node(
+            // At 150% the responsive hero stack rises by 24 px. Keep its eyebrow
+            // immediately above the title; at 200% the chrome consumes that slot,
+            // so omit the decorative eyebrow rather than overlap either region.
+            if self.text_scale == 150 {
+                heading.bounds.y = vertical.title_y - heading.bounds.height - 8.0;
+            }
+            let mut content = vec![node(
                     "hero-wash",
                     Role::Group,
                     "Ridgeline aura: rgba(201,111,87,0.5) to transparent 68%; rgba(58,43,78,0.65) to transparent 70%; layer opacity 0.55",
@@ -3265,8 +3358,11 @@ impl ShellCore {
                 // The wash is the ambient image beneath the whole hero composition,
                 // not foreign foreground content. Keep that role explicit in the
                 // scene graph so paint-order guards never have to infer it by id.
-                .with_ink_token("--scene-underlay-role"),
-                heading,
+                .with_ink_token("--scene-underlay-role")];
+            if self.text_scale < 200 {
+                content.push(heading);
+            }
+            content.extend([
                 node(
                     "hero-title",
                     Role::Heading,
@@ -3292,7 +3388,7 @@ impl ShellCore {
                 )
                 .with_type_role(TypeRole::Label)
                 .with_ink_token(COLOR_STATUS_READY_TOKEN),
-            ];
+            ]);
             let attention = self.attention_message.as_deref().or_else(|| {
                 (self.presentation == Presentation::ForcedClose)
                     .then_some("The previous game didn't close cleanly")
@@ -3498,21 +3594,32 @@ impl ShellCore {
                 }
                 content.push(n);
             }
+            // The chrome row can grow past its nominal 64 px anchor when status text
+            // is enlarged. Start the opaque Home content region at that derived
+            // bottom so it cannot repaint scaled chrome; this is identical at 100%.
+            let chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, self.text_scale);
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
                 Role::Group,
                 "",
                 Bounds::new(
                     0.0,
-                    STATUS_BAR_HEIGHT,
+                    chrome_bottom,
                     w,
-                    h - STATUS_BAR_HEIGHT - PROMPTS_AREA_HEIGHT,
+                    h - chrome_bottom - PROMPTS_AREA_HEIGHT,
                 ),
                 COLOR_SURFACE_CANVAS_TOKEN,
             ));
             out.extend(content);
         } else if self.route == Route::Library {
             let geometry = library_geometry(w);
+            // The chrome row is laid out inside the safe area and grows with status
+            // text. Derive every Library row from that scaled edge; the subtractions
+            // preserve the existing 100%/zero-inset geometry exactly.
+            let chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, self.text_scale);
+            let library_head_top = chrome_bottom + (LIB_HEAD_TOP - STATUS_BAR_HEIGHT);
+            let compact_toolbar_top =
+                chrome_bottom + (COMPACT_LIBRARY_TOOLBAR_TOP - STATUS_BAR_HEIGHT);
             let games = self
                 .items
                 .iter()
@@ -3532,7 +3639,7 @@ impl ShellCore {
             ];
             let chip_widths = filters
                 .iter()
-                .map(|(label, count, _)| library_chip_width(label, *count))
+                .map(|(label, count, _)| scaled_library_chip_width(label, *count, self.text_scale))
                 .collect::<Vec<_>>();
             let required_toolbar_width = chip_widths.iter().sum::<f32>()
                 + (geometry.toolbar_columns - 1) as f32 * LIBRARY_TOOLBAR_GAP;
@@ -3542,14 +3649,15 @@ impl ShellCore {
                 (w - 2.0 * LIBRARY_SIDE_MARGIN - LIBRARY_TOOLBAR_GAP - required_toolbar_width)
                     .max(LIBRARY_SEARCH_MIN_WIDTH)
             };
+            let search_height = scaled_text_box_height(LIB_TOOLBAR_HEIGHT, self.text_scale);
             let mut search = node(
                 "library-search",
                 Role::Button,
                 &format!("⌕  Search {} titles", self.items.len()),
                 LIBRARY_SIDE_MARGIN,
-                LIB_HEAD_TOP,
+                library_head_top,
                 search_width,
-                LIB_TOOLBAR_HEIGHT,
+                search_height,
                 STATE_REST_SURFACE_TOKEN,
             );
             search.state.focused = self.focus == 0;
@@ -3560,21 +3668,25 @@ impl ShellCore {
                     Role::Text,
                     &format!("⌕  Search {} titles", self.items.len()),
                     LIBRARY_SIDE_MARGIN + SPACE_4,
-                    LIB_HEAD_TOP + 8.0,
+                    library_head_top + 8.0,
                     search_width - 32.0,
-                    28.0,
+                    scaled_text_box_height(28.0, self.text_scale),
                     STATE_REST_SURFACE_TOKEN,
                 )
                 .with_type_role(TypeRole::Label),
             );
             out.push(search);
-            for (index, (label, count, filter)) in filters.into_iter().enumerate() {
+            for (index, (full_label, count, filter)) in filters.into_iter().enumerate() {
                 let toolbar_left = if compact_toolbar {
                     LIBRARY_SIDE_MARGIN
                 } else {
                     LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
-                let toolbar_top = if compact_toolbar { 180.0 } else { LIB_HEAD_TOP };
+                let toolbar_top = if compact_toolbar {
+                    compact_toolbar_top
+                } else {
+                    library_head_top
+                };
                 let toolbar_width = if compact_toolbar {
                     w - 2.0 * LIBRARY_SIDE_MARGIN
                 } else {
@@ -3597,14 +3709,37 @@ impl ShellCore {
                 };
                 let focused = self.focus == index + 1;
                 let active = self.library_filter == filter;
-                let chip_height = CHIP_HEIGHT;
-                let count_width = count.map_or(0.0, |value| label_text_width(&value.to_string()));
+                let chip_height = scaled_text_box_height(CHIP_HEIGHT, self.text_scale);
+                let chip_row_gap = LIBRARY_TOOLBAR_ROW_GAP;
+                let chip_padding = if compact_toolbar && self.text_scale == 200 {
+                    0.0
+                } else {
+                    CHIP_HORIZONTAL_PADDING
+                };
+                let count_width = count.map_or(0.0, |value| {
+                    measured_text_advance(label_text_width(&value.to_string()), self.text_scale)
+                });
+                let count_box_width = text_node_box_width(count_width);
+                let available_label_width = (chip_width
+                    - 2.0 * chip_padding
+                    - count.map_or(0.0, |_| CHIP_COUNT_GAP + count_box_width))
+                .max(0.0);
+                let label_width = if self.text_scale == 100 {
+                    label_text_width(&full_label) + 20.0
+                } else {
+                    available_label_width
+                };
+                let painted_label =
+                    scale_aware_single_line(&full_label, available_label_width, self.text_scale);
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
-                    &count.map_or_else(|| label.clone(), |count| format!("{label} · {count}")),
+                    &count.map_or_else(
+                        || full_label.clone(),
+                        |count| format!("{full_label} · {count}"),
+                    ),
                     chip_x,
-                    toolbar_top + chip_row as f32 * 68.0,
+                    toolbar_top + chip_row as f32 * (chip_height + chip_row_gap),
                     chip_width,
                     chip_height,
                     STATE_REST_SURFACE_TOKEN,
@@ -3659,11 +3794,15 @@ impl ShellCore {
                     let mut label_node = node(
                         &format!("library-filter-{index}-label"),
                         Role::Text,
-                        &label,
-                        chip.bounds.x + CHIP_HORIZONTAL_PADDING,
+                        &painted_label,
+                        chip.bounds.x + chip_padding,
                         chip.bounds.y + 5.0,
-                        label_text_width(&label) + 20.0,
-                        26.0,
+                        label_width,
+                        if self.text_scale == 100 {
+                            26.0
+                        } else {
+                            scaled_text_box_height(28.0, self.text_scale)
+                        },
                         chip.style_token.as_str(),
                     )
                     .with_type_role(TypeRole::Label);
@@ -3676,12 +3815,14 @@ impl ShellCore {
                             &format!("library-filter-{index}-count"),
                             Role::Text,
                             &count.to_string(),
-                            chip.bounds.x + chip_width
-                                - CHIP_HORIZONTAL_PADDING
-                                - text_node_box_width(count_width),
+                            chip.bounds.x + chip_width - chip_padding - count_box_width,
                             chip.bounds.y + 5.0,
-                            text_node_box_width(count_width),
-                            26.0,
+                            count_box_width,
+                            if self.text_scale == 100 {
+                                26.0
+                            } else {
+                                scaled_text_box_height(28.0, self.text_scale)
+                            },
                             chip.style_token.as_str(),
                         )
                         .with_type_role(TypeRole::Label);
@@ -3696,20 +3837,53 @@ impl ShellCore {
                         Role::Group,
                         "",
                         chip_x + CHIP_BORDER_WIDTH,
-                        toolbar_top + chip_row as f32 * 68.0 + chip_height - 3.0,
+                        toolbar_top + chip_row as f32 * (chip_height + chip_row_gap) + chip_height
+                            - 3.0,
                         chip_width - 2.0 * CHIP_BORDER_WIDTH,
                         3.0,
                         STATE_SELECTED_ACCENT_TOKEN,
                     ));
                 }
             }
-            let row_height = LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0 + SPACE_5;
-            let card_top = geometry.card_top;
+            let library_title_height = scaled_text_box_height(34.0, self.text_scale);
+            let library_cue_slot_height = if self.text_scale == 100 {
+                0.0
+            } else {
+                scaled_text_box_height(28.0, self.text_scale) + CARD_CAPTION_GAP
+            };
+            let card_top =
+                chrome_bottom + (geometry.scaled_card_top(self.text_scale) - STATUS_BAR_HEIGHT);
+            // Compact enlarged-text cells have less room below the derived toolbar.
+            // Keep the complete label chain above the prompt bar by yielding image
+            // height; the default cell retains the design-token art height exactly.
+            let library_card_art_height = LIB_CARD_ART_HEIGHT.min(
+                (h - PROMPTS_AREA_HEIGHT
+                    - card_top
+                    - CARD_LABEL_GAP
+                    - library_cue_slot_height
+                    - library_title_height)
+                    .max(0.0),
+            );
+            let row_height = library_card_art_height
+                + CARD_LABEL_GAP
+                + library_cue_slot_height
+                + library_title_height
+                + SPACE_5;
             let mut visible_rows: usize = 1;
-            while if geometry.columns == 6 {
+            let card_content_height = library_card_art_height
+                + CARD_LABEL_GAP
+                + library_cue_slot_height
+                + library_title_height;
+            while if geometry.columns == 6
+                && self.text_scale == 100
+                && metrics.safe_insets.top == 0.0
+            {
+                // Preserve the desktop mockup's zero-inset two-row crop exactly.
                 card_top + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
             } else {
-                card_top + visible_rows as f32 * row_height + LIB_CARD_ART_HEIGHT
+                // Once chrome consumes a top inset, admit only rows whose complete
+                // derived content remains above the fixed prompt area.
+                card_top + visible_rows as f32 * row_height + card_content_height
                     <= h - PROMPTS_AREA_HEIGHT
             } {
                 visible_rows += 1;
@@ -3732,7 +3906,7 @@ impl ShellCore {
                     geometry.card_left + column as f32 * (geometry.card_width + geometry.card_gap),
                     card_y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + 34.0,
+                    card_content_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 card.state.focused = self.focus == i + 5;
@@ -3746,7 +3920,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT,
+                    library_card_art_height,
                     self.focus == i + 5,
                     self.text_scale,
                 );
@@ -3758,7 +3932,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT,
+                    library_card_art_height,
                     None,
                     self.text_scale,
                     true,
@@ -3777,30 +3951,37 @@ impl ShellCore {
                     art.state.focused = true;
                 }
                 if item.favorite {
+                    let (pin_width, pin_height) =
+                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
+                    let pin_center_y = card.bounds.y + 18.0;
                     card.children.push(
                         node(
                             &format!("favorite-pin-{}", item.id),
                             Role::Text,
                             "★",
-                            card.bounds.x + geometry.card_width - 28.0,
-                            card.bounds.y + 8.0,
-                            20.0,
-                            20.0,
+                            pin_center_x - pin_width / 2.0,
+                            pin_center_y - pin_height / 2.0,
+                            pin_width,
+                            pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
                         .with_type_role(TypeRole::Caption),
                     );
                 }
-                let title_y = card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP;
+                let title_y = card.bounds.y
+                    + library_card_art_height
+                    + CARD_LABEL_GAP
+                    + library_cue_slot_height;
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
                         Role::Text,
-                        &item.title,
+                        &scale_aware_single_line(&item.title, geometry.card_width, self.text_scale),
                         card.bounds.x,
                         title_y,
                         geometry.card_width,
-                        34.0,
+                        library_title_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
                     .with_type_role(TypeRole::Label),
@@ -5855,7 +6036,8 @@ fn plate_art_nodes(
     );
     let mut nodes = vec![art];
     let home = context == "home-card";
-    let stack_scale = if home {
+    let scale_aware_card = !favorite && !detail;
+    let stack_scale = if scale_aware_card {
         f32::from(text_scale) / 100.0
     } else {
         1.0
@@ -6010,15 +6192,21 @@ fn add_unavailable_card_cues(
     show_reason: bool,
 ) {
     let home = context == "home-card";
-    let title_y = y + art_height + CARD_LABEL_GAP;
-    let title_height = if home {
+    let scale_aware_card = context != "favorite-card" && context != "detail-art";
+    let library_cue_slot_height = if scale_aware_card && !home && text_scale != 100 {
+        scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
+    } else {
+        0.0
+    };
+    let title_y = y + art_height + CARD_LABEL_GAP + library_cue_slot_height;
+    let title_height = if scale_aware_card {
         scaled_text_box_height(28.0, text_scale)
     } else {
         28.0
     };
     let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
-        if home && text_scale != 100 {
+        if scale_aware_card && text_scale != 100 {
             (
                 measured_text_advance(base_width, text_scale)
                     .max(text_node_box_width(caption_text_width(text, text_scale)))
@@ -6027,6 +6215,15 @@ fn add_unavailable_card_cues(
             )
         } else {
             (base_width, base_height)
+        }
+    };
+    let badge_top = |badge_height: f32| {
+        if home {
+            y + art_height - 46.0
+        } else if scale_aware_card && text_scale != 100 {
+            y + art_height + CARD_LABEL_GAP
+        } else {
+            y + art_height - 18.0 - badge_height
         }
     };
     if matches!(availability, Availability::Ready)
@@ -6045,7 +6242,7 @@ fn add_unavailable_card_cues(
                 Role::Text,
                 &badge,
                 x + 10.0,
-                y + art_height - 46.0,
+                badge_top(badge_height),
                 badge_width,
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
@@ -6079,7 +6276,7 @@ fn add_unavailable_card_cues(
                 Role::Text,
                 &badge,
                 x + 10.0,
-                y + art_height - 46.0,
+                badge_top(badge_height),
                 badge_width,
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
@@ -6120,7 +6317,7 @@ fn add_unavailable_card_cues(
             Role::Text,
             &badge,
             x + 10.0,
-            y + art_height - 46.0,
+            badge_top(badge_height),
             badge_width,
             badge_height,
             COLOR_SURFACE_CANVAS_TOKEN,
@@ -6146,13 +6343,13 @@ fn add_unavailable_card_cues(
         || full_reason.clone(),
         |max_lines| ellipsize_to_lines(&full_reason, width, max_lines),
     );
-    let reason = if home {
+    let reason = if scale_aware_card {
         scale_aware_single_line(&reason, width, text_scale)
     } else {
         reason
     };
     let reason_lines = (label_text_width(&reason) / width).ceil().max(1.0);
-    let reason_height = if home {
+    let reason_height = if scale_aware_card {
         scaled_text_box_height(20.0, text_scale)
     } else {
         8.0 + 20.0 * reason_lines
@@ -6385,7 +6582,7 @@ fn fixed_layout(width: f32, height: f32) -> LayoutStyle {
     }
 }
 
-fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
+fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16) {
     let system_id = |id: &str| {
         matches!(
             id,
@@ -6420,7 +6617,12 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32) {
             "battery-cavity" => (148.0, 26.0, 18.0, 10.0),
             "battery-level" => (165.0 - node.bounds.width, 27.0, node.bounds.width, 8.0),
             "battery-terminal" => (142.0, 28.0, 2.0, 6.0),
-            "status-cluster" => (-16.0, 16.0, node.bounds.width.max(152.0), 32.0),
+            "status-cluster" => (
+                if text_scale == 100 { -16.0 } else { 0.0 },
+                16.0,
+                node.bounds.width.max(152.0),
+                node.bounds.height,
+            ),
             _ => continue,
         };
         node.layout = Some(LayoutStyle {
@@ -6551,11 +6753,7 @@ fn rooms_layout(
     );
     assert!(nodes.is_empty(), "rooms subtree contains unexpected nodes");
 
-    let rooms_width = KEYCAP_MIN_WIDTH * 2.0
-        + room_label_box_width(room_label_advance("Home", text_scale))
-        + room_label_box_width(room_label_advance("Library", text_scale))
-        + room_label_box_width(room_label_advance("Settings", text_scale))
-        + ROOM_STRIP_GAP * 4.0;
+    let rooms_width = room_strip_width(text_scale);
     rooms.layout = Some(LayoutStyle {
         position: Position::Absolute,
         flex_direction: FlexDirection::Row,
@@ -8742,6 +8940,35 @@ mod tests {
     }
 
     #[test]
+    fn compact_scaled_library_filter_keeps_full_accessible_name_when_paint_is_ellipsized() {
+        let mut core = fixture_core(vec![item(
+            "game",
+            "Game",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.text_scale = 200;
+        core.go(Route::Library);
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let chip = node_by_id(scene.root(), "library-filter-3").unwrap();
+        let painted_label = node_by_id(chip, "library-filter-3-label").unwrap();
+
+        assert_eq!(chip.accessible_label, "Everything else · 0");
+        assert_eq!(painted_label.accessible_label, "Everything…");
+    }
+
+    #[test]
     fn library_wrapped_toolbar_navigation_matches_rendered_rows_and_columns() {
         let items = (0..6)
             .map(|index| {
@@ -10755,6 +10982,63 @@ mod tests {
     }
 
     #[test]
+    fn scaled_compact_library_grid_starts_below_the_filter_toolbar() {
+        let items = (0..12)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        "native",
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.go(Route::Library);
+
+        for text_scale in [150, 200] {
+            core.text_scale = text_scale;
+            for width in [480.0, 640.0] {
+                let scene = core
+                    .scene(
+                        SurfaceMetrics {
+                            logical_width: width,
+                            logical_height: 720.0,
+                            scale: 1.0,
+                            safe_insets: Default::default(),
+                            orientation: pf_scene::Orientation::Landscape,
+                        },
+                        "",
+                    )
+                    .unwrap();
+                let toolbar_bottom = scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("library-filter-"))
+                    .map(|node| node.bounds.y + node.bounds.height)
+                    .fold(0.0_f32, f32::max);
+                let card_top = scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("library-item-"))
+                    .map(|node| node.bounds.y)
+                    .reduce(f32::min)
+                    .expect("compact Library must emit a visible card row");
+
+                assert!(
+                    toolbar_bottom <= card_top,
+                    "filter toolbar bottom {toolbar_bottom} overlaps card top {card_top} at {text_scale}% and width {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn desktop_library_emits_every_card_in_the_first_row() {
         let items = (0..12)
             .map(|index| {
@@ -11255,6 +11539,83 @@ mod tests {
     }
 
     #[test]
+    fn inset_library_search_derives_from_shifted_chrome_bottom() {
+        let mut core = fixture_core(vec![]);
+        core.go(Route::Library);
+        let inset_metrics = SurfaceMetrics {
+            logical_width: 480.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: pf_scene::Insets {
+                top: 32.0,
+                left: 24.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(inset_metrics, "").unwrap();
+        let chrome = node_by_id(scene.root(), "rooms-layout-anchor").unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let room_bounds = ["room-home", "room-library", "room-settings"]
+            .map(|id| (id, node_by_id(scene.root(), id).unwrap().bounds));
+        eprintln!(
+            "safe-inset diagnosis: chrome={:?}, rooms={room_bounds:?}, library-search={:?}",
+            chrome.bounds, search.bounds
+        );
+
+        let existing_gap = LIB_HEAD_TOP - STATUS_BAR_HEIGHT;
+        let derived_search_top =
+            inset_metrics.safe_insets.top + chrome.bounds.height + existing_gap;
+        assert!(
+            search.bounds.y >= derived_search_top - f32::EPSILON,
+            "Library search must derive from the safe-inset-shifted chrome row"
+        );
+
+        let zero_scene = core
+            .scene(
+                SurfaceMetrics {
+                    safe_insets: Default::default(),
+                    ..inset_metrics
+                },
+                "",
+            )
+            .unwrap();
+        let zero_search_top = node_by_id(zero_scene.root(), "library-search")
+            .unwrap()
+            .bounds
+            .y;
+        assert!(
+            (zero_search_top - LIB_HEAD_TOP).abs() < f32::EPSILON,
+            "zero-inset Library geometry must remain byte-identical"
+        );
+    }
+
+    #[test]
+    fn two_hundred_percent_library_search_starts_below_scaled_chrome() {
+        let mut core = fixture_core(vec![]);
+        core.go(Route::Library);
+        core.text_scale = 200;
+        let metrics = SurfaceMetrics {
+            logical_width: 800.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "").unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let scaled_chrome_bottom = chrome_row_bottom(metrics.safe_insets.top, core.text_scale);
+        let standard_gap = LIB_HEAD_TOP - STATUS_BAR_HEIGHT;
+
+        assert!(
+            search.bounds.y >= scaled_chrome_bottom + standard_gap,
+            "Library search top {} must clear scaled chrome bottom {scaled_chrome_bottom} plus gap {standard_gap}",
+            search.bounds.y
+        );
+    }
+
+    #[test]
     fn desktop_library_footer_matches_promptbar_css_without_separators() {
         let mut core = fixture_core(vec![item(
             "item-0",
@@ -11738,6 +12099,48 @@ mod tests {
                         "{id} must stay on one text row on {route:?} at {text_scale}%"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn status_group_is_atomic_and_yields_when_scaled_extent_cannot_clear_room_strip() {
+        let mut core = fixture_core(vec![]);
+        core.text_scale = 200;
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
+
+        for (logical_width, expected_group) in [(640.0, false), (800.0, false), (1280.0, true)] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            for id in [
+                "wifi-glyph",
+                "battery-outline",
+                "battery-cavity",
+                "battery-level",
+                "battery-terminal",
+                "status-cluster",
+            ] {
+                assert_eq!(
+                    node_by_id(scene.root(), id).is_some(),
+                    expected_group,
+                    "the status group must be admitted atomically from its 200%-scale extent at {logical_width}px ({id})"
+                );
             }
         }
     }

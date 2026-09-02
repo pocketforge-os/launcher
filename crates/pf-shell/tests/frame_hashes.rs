@@ -191,7 +191,8 @@ fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
         // Home intentionally rebaselines for the corrected attention-pill dot geometry.
-        // Details routes rebaseline for the quiet-console layout polish.
+        // Details routes rebaseline for the quiet-console layout polish, including
+        // the active-variant window and collapsed empty-description slot.
         "6f9c658df4def86762e94e126564d9657a5c27c5fe5bf31264ad93cab747b244  ",
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
@@ -200,8 +201,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "b47565735bcca17ad020e3f92bcfa7c305f1291aa717aaa1ba7df102bc62287d  ",
-        "a47ea29d231167985e6d2454df83afed1a1384c72fbbbc821aefda05ac8c84fb  ",
-        "bd3ce9ffc93aae7499977eeaacee8c849f17e63ffecc74157f9cb5c95185b7d3  ",
+        "706990aacd3876bec78d08904d0f121ddbad3f1ecbf59ee8ff5203129f9c8076  ",
+        "129850b67760cdbe6c9ec9f167e0140188738474348f7fe1eb86fae48f608156  ",
         "eb3e4049e7b52d92370ca9f7824953835211da8938286313086b44537809e5b3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

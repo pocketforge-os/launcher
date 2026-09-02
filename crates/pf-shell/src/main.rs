@@ -4829,14 +4829,94 @@ mod durable_tests {
         }
     }
 
+    fn find_search_node<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+        (node.id.as_str() == id).then_some(node).or_else(|| {
+            node.children
+                .iter()
+                .find_map(|child| find_search_node(child, id))
+        })
+    }
+
+    fn assert_populated_search_query_and_hint(root: &Node) {
+        let search_box = find_search_node(root, "search-query").unwrap();
+        assert_eq!(search_box.style_token, "--color-surface-raised");
+        assert!(search_box.corner_radius > 0.0);
+        assert_eq!(
+            search_box.border_token.as_deref(),
+            Some("--color-border-hairline")
+        );
+        assert!(!search_box.state.focused);
+        let hint = find_search_node(root, "search-hint").unwrap();
+        assert_eq!(hint.type_role, pf_scene::TypeRole::Caption);
+        assert_eq!(hint.ink_token.as_deref(), Some("--color-text-muted"));
+    }
+
+    fn assert_populated_search_region_and_rows(root: &Node) {
+        let region = find_search_node(root, "search-results-scroll-region").unwrap();
+        let prompts = find_search_node(root, "prompts").unwrap();
+        assert!(region.bounds.y + region.bounds.height <= prompts.bounds.y);
+        let rows = region
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("search-result-"))
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty());
+        assert_eq!(rows.len(), region.children.len());
+        assert!(
+            root.children
+                .iter()
+                .all(|node| !node.id.as_str().starts_with("search-result-"))
+        );
+        for row in &rows {
+            assert_eq!(row.type_role, pf_scene::TypeRole::Label);
+            assert!(row.corner_radius > 0.0);
+            assert!(row.bounds.x >= region.bounds.x);
+            assert!(row.bounds.x + row.bounds.width <= region.bounds.x + region.bounds.width);
+            assert!(row.bounds.y >= region.bounds.y);
+            assert!(row.bounds.y + row.bounds.height <= region.bounds.y + region.bounds.height);
+            let caption = row
+                .children
+                .iter()
+                .find(|child| child.id.as_str().ends_with("-caption"))
+                .expect("each result keeps its inline caption distinct");
+            assert_eq!(caption.type_role, pf_scene::TypeRole::Caption);
+            assert_eq!(caption.ink_token.as_deref(), Some("--color-text-muted"));
+        }
+        for pair in rows.windows(2) {
+            assert!((pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height) >= 12.0);
+        }
+        assert!(rows[0].state.focused);
+        assert_eq!(rows[0].style_token, "--state-rest-surface");
+        assert_eq!(
+            rows[0].border_token.as_deref(),
+            Some("--state-focused-ring")
+        );
+        assert!((rows[0].border_width - 2.0).abs() < f32::EPSILON);
+        let mut focused = Vec::new();
+        collect_focused(root, &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id, rows[0].id);
+        assert!(find_search_node(root, "home-prompt-keycap-0-border").is_some());
+    }
+
+    fn assert_populated_search_raster_guards(
+        scene: &pf_scene::Scene,
+        metrics: SurfaceMetrics,
+        text_scale: u16,
+    ) {
+        assert_scene_occlusion_safe(scene, metrics, pf_theme::Base::Dusk, text_scale)
+            .unwrap_or_else(|error| panic!("populated Search occlusion at {text_scale}%: {error}"));
+        assert_raster_text_paint_contained_and_complete(
+            scene,
+            metrics,
+            pf_theme::Base::Dusk,
+            text_scale,
+        )
+        .unwrap_or_else(|error| panic!("populated Search containment at {text_scale}%: {error}"));
+    }
+
     #[test]
     fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_every_scale() {
-        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
-            (node.id.as_str() == id)
-                .then_some(node)
-                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
-        }
-
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let metrics = SurfaceMetrics {
@@ -4869,77 +4949,9 @@ mod durable_tests {
 
             let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
             let root = scene.root();
-            let search_box = find(root, "search-query").unwrap();
-            assert_eq!(search_box.style_token, "--color-surface-raised");
-            assert!(search_box.corner_radius > 0.0);
-            assert_eq!(
-                search_box.border_token.as_deref(),
-                Some("--color-border-hairline")
-            );
-            assert!(!search_box.state.focused);
-            let hint = find(root, "search-hint").unwrap();
-            assert_eq!(hint.type_role, pf_scene::TypeRole::Caption);
-            assert_eq!(hint.ink_token.as_deref(), Some("--color-text-muted"));
-
-            let region = find(root, "search-results-scroll-region").unwrap();
-            let prompts = find(root, "prompts").unwrap();
-            assert!(region.bounds.y + region.bounds.height <= prompts.bounds.y);
-            let rows = region
-                .children
-                .iter()
-                .filter(|node| node.id.as_str().starts_with("search-result-"))
-                .collect::<Vec<_>>();
-            assert!(!rows.is_empty());
-            assert_eq!(rows.len(), region.children.len());
-            assert!(
-                root.children
-                    .iter()
-                    .all(|node| { !node.id.as_str().starts_with("search-result-") })
-            );
-            for row in &rows {
-                assert_eq!(row.type_role, pf_scene::TypeRole::Label);
-                assert!(row.corner_radius > 0.0);
-                assert!(row.bounds.x >= region.bounds.x);
-                assert!(row.bounds.x + row.bounds.width <= region.bounds.x + region.bounds.width);
-                assert!(row.bounds.y >= region.bounds.y);
-                assert!(row.bounds.y + row.bounds.height <= region.bounds.y + region.bounds.height);
-                let caption = row
-                    .children
-                    .iter()
-                    .find(|child| child.id.as_str().ends_with("-caption"))
-                    .expect("each result keeps its inline caption distinct");
-                assert_eq!(caption.type_role, pf_scene::TypeRole::Caption);
-                assert_eq!(caption.ink_token.as_deref(), Some("--color-text-muted"));
-            }
-            for pair in rows.windows(2) {
-                assert!((pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height) >= 12.0);
-            }
-            assert!(rows[0].state.focused);
-            assert_eq!(rows[0].style_token, "--state-rest-surface");
-            assert_eq!(
-                rows[0].border_token.as_deref(),
-                Some("--state-focused-ring")
-            );
-            assert!((rows[0].border_width - 2.0).abs() < f32::EPSILON);
-            let mut focused = Vec::new();
-            collect_focused(root, &mut focused);
-            assert_eq!(focused.len(), 1);
-            assert_eq!(focused[0].id, rows[0].id);
-            assert!(find(root, "home-prompt-keycap-0-border").is_some());
-
-            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)
-                .unwrap_or_else(|error| {
-                    panic!("populated Search occlusion at {text_scale}%: {error}")
-                });
-            assert_raster_text_paint_contained_and_complete(
-                &scene,
-                metrics,
-                pf_theme::Base::Dusk,
-                text_scale,
-            )
-            .unwrap_or_else(|error| {
-                panic!("populated Search containment at {text_scale}%: {error}")
-            });
+            assert_populated_search_query_and_hint(root);
+            assert_populated_search_region_and_rows(root);
+            assert_populated_search_raster_guards(&scene, metrics, text_scale);
         }
     }
 

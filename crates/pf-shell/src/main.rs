@@ -4904,7 +4904,7 @@ mod durable_tests {
                 rows[0].border_token.as_deref(),
                 Some("--state-focused-ring")
             );
-            assert_eq!(rows[0].border_width, 2.0);
+            assert!((rows[0].border_width - 2.0).abs() < f32::EPSILON);
             assert!(find(root, "home-prompt-keycap-0-border").is_some());
 
             assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)

@@ -2767,10 +2767,15 @@ impl ShellCore {
         self.library_surface_width.set(w);
         let mut children = Vec::new();
         let battery_x = w - 168.0;
+        let room_left = w / 2.0 - 220.0;
+        let room_right = room_left + 416.0;
+        let clears_room_strip =
+            |left: f32, width: f32| left + width <= room_left || left >= room_right;
         if self
             .network_state
             .as_ref()
             .is_ok_and(|state| state.connected_ssid.is_some())
+            && clears_room_strip(w - 200.0, 20.0)
         {
             children.push(
                 node(
@@ -2786,7 +2791,10 @@ impl ShellCore {
                 .with_image(wifi_glyph_source(), ImageFit::Contain),
             );
         }
-        if let Some(battery_percent) = self.battery_percent {
+        if let Some(battery_percent) = self
+            .battery_percent
+            .filter(|_| clears_room_strip(battery_x, 26.0))
+        {
             children.extend([
                 node(
                     "battery-outline",
@@ -2846,28 +2854,35 @@ impl ShellCore {
                 % 86_400;
             status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
         }
-        // At enlarged text on compact surfaces the room switcher consumes the full
-        // status row. Keep that primary navigation unobscured; the same status data
-        // remains available once the surface reaches the six-column breakpoint.
-        if !status_parts.is_empty() && (self.text_scale == 100 || w >= 800.0) {
+        // On compact surfaces the room switcher consumes the full status row. Keep
+        // that primary navigation unobscured whenever the measured status box would
+        // intersect the room strip plus its standard gap; the same status data
+        // remains available once the geometry provides enough horizontal room.
+        if !status_parts.is_empty() {
             let status_text = status_parts.join("     ");
-            let mut status = node(
-                "status-cluster",
-                Role::Text,
-                &status_text,
-                battery_x + 32.0,
-                16.0,
-                text_node_box_width(caption_text_width(&status_text, self.text_scale)),
-                scaled_text_box_height(32.0, self.text_scale),
-                SCENE_TRANSPARENT_TOKEN,
-            )
-            .with_type_role(TypeRole::Caption);
-            if self.text_scale > 100 {
-                status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
+            let status_left = battery_x + 32.0;
+            let status_width =
+                text_node_box_width(caption_text_width(&status_text, self.text_scale));
+            let status_clears_room = status_left + status_width <= room_left - ROOM_STRIP_GAP
+                || status_left >= room_right + ROOM_STRIP_GAP;
+            if status_clears_room {
+                let mut status = node(
+                    "status-cluster",
+                    Role::Text,
+                    &status_text,
+                    status_left,
+                    16.0,
+                    status_width,
+                    scaled_text_box_height(32.0, self.text_scale),
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption);
+                if self.text_scale > 100 {
+                    status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
+                }
+                children.push(status);
             }
-            children.push(status);
         }
-        let room_left = w / 2.0 - 220.0;
         let mut room_nodes = Vec::new();
         for (id, label, x, width) in [
             ("room-keycap-left", "L", room_left + 8.0, 32.0),
@@ -11939,6 +11954,32 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn status_cluster_yields_to_room_strip_only_when_geometry_intersects() {
+        let mut core = fixture_core(vec![]);
+        core.text_scale = 100;
+
+        for (logical_width, expected_status) in [(480.0, false), (800.0, true), (1280.0, true)] {
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            assert_eq!(
+                node_by_id(scene.root(), "status-cluster").is_some(),
+                expected_status,
+                "status visibility must follow measured room-strip clearance at {logical_width}px"
+            );
         }
     }
 

@@ -2025,6 +2025,7 @@ impl ShellCore {
                     self.go(Route::Quick);
                 }
             }
+            ShellAction::Custom(name) if name == "Quick.open" => self.go(Route::Quick),
             ShellAction::Back if self.route == Route::Quick => {
                 let route = self.previous_route;
                 self.go(route);
@@ -8558,6 +8559,12 @@ mod tests {
             })
         );
         assert_eq!(details.route(), Route::Details);
+
+        assert_eq!(
+            details.action(&ShellAction::Custom("Quick.open".into())),
+            None
+        );
+        assert_eq!(details.route(), Route::Quick);
     }
 
     #[test]

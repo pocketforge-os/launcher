@@ -54,7 +54,7 @@ const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
 const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const LOW_BATTERY_PERCENT: u8 = 20;
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Tab, F   Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -92,25 +92,28 @@ fn installed_app_provider(root: &Path, favorites_path: PathBuf) -> InstalledAppP
 
 #[cfg(feature = "wayland")]
 fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Option<ShellAction> {
-    let action = match (key, keysym) {
-        (Key::Up, _) => "Move.up",
-        (Key::Down, _) => "Move.down",
-        (Key::Left, _) => "Move.left",
-        (Key::Right, _) => "Move.right",
-        (Key::Char('['), _) | (_, 0xff55) => "Room.previous",
-        (Key::Char(']'), _) | (_, 0xff56) => "Room.next",
-        (Key::Enter, _) => "Activate",
-        (_, 0x20) => "Start",
-        (Key::Escape, _) | (_, 0xff08) => "Back",
-        (_, 0xff09) | (Key::Char('f' | 'F'), _) => "Quick",
-        (Key::Char('s' | 'S'), _) => "SafeReturn",
+    let (action, effective_action) = match (key, keysym) {
+        (Key::Up, _) => ("Move.up", "Move.up"),
+        (Key::Down, _) => ("Move.down", "Move.down"),
+        (Key::Left, _) => ("Move.left", "Move.left"),
+        (Key::Right, _) => ("Move.right", "Move.right"),
+        (Key::Char('['), _) | (_, 0xff55) => ("Room.previous", "Room.previous"),
+        (Key::Char(']'), _) | (_, 0xff56) => ("Room.next", "Room.next"),
+        (Key::Enter, _) => ("Activate", "Activate"),
+        (_, 0x20) => ("Start", "Start"),
+        (Key::Escape, _) | (_, 0xff08) => ("Back", "Back"),
+        (Key::Char('y' | 'Y'), _) => ("Filter.next", "Search.submit"),
+        (Key::Char('/'), _) => ("Search.open", "Search.open"),
+        (_, 0xff09) => ("Quick.open", "Quick"),
+        (Key::Char('f' | 'F'), _) => ("Quick", "Quick"),
+        (Key::Char('s' | 'S'), _) => ("SafeReturn", "SafeReturn"),
         _ => return None,
     };
     (action.starts_with("Room.")
         || map
             .mappings()
             .iter()
-            .any(|mapping| mapping.action == action))
+            .any(|mapping| mapping.action == effective_action))
     .then(|| match action {
         "Move.up" => ShellAction::Move(pf_scene::AxisMove::Up),
         "Move.down" => ShellAction::Move(pf_scene::AxisMove::Down),
@@ -120,6 +123,9 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         "Activate" => ShellAction::Activate,
         "Start" => ShellAction::Custom("Start".into()),
         "Back" => ShellAction::Back,
+        "Filter.next" => ShellAction::Custom("Filter.next".into()),
+        "Search.open" => ShellAction::Custom("Search.open".into()),
+        "Quick.open" => ShellAction::Custom("Quick.open".into()),
         "Quick" => ShellAction::Custom("Quick".into()),
         "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
         _ => unreachable!("keyboard action table is exhaustive"),
@@ -5632,7 +5638,8 @@ mod durable_tests {
     #[cfg(feature = "wayland")]
     #[test]
     fn wayland_keyboard_mapping_table_only_exposes_effective_actions() {
-        let map = effective_map();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let cases = [
             (Key::Up, 0xff52, ShellAction::Move(pf_scene::AxisMove::Up)),
             (
@@ -5657,7 +5664,17 @@ mod durable_tests {
             (
                 Key::Other(0xff09),
                 0xff09,
-                ShellAction::Custom("Quick".into()),
+                ShellAction::Custom("Quick.open".into()),
+            ),
+            (
+                Key::Char('Y'),
+                u32::from('Y'),
+                ShellAction::Custom("Filter.next".into()),
+            ),
+            (
+                Key::Char('/'),
+                u32::from('/'),
+                ShellAction::Custom("Search.open".into()),
             ),
             (
                 Key::Char('F'),
@@ -5694,6 +5711,10 @@ mod durable_tests {
         without_quick = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         assert_eq!(
             effective_keyboard_action(&without_quick, Key::Char('f'), u32::from('f')),
+            None
+        );
+        assert_eq!(
+            effective_keyboard_action(&without_quick, Key::Other(0xff09), 0xff09),
             None
         );
 

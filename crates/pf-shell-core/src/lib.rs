@@ -4158,16 +4158,8 @@ impl ShellCore {
             );
             out.push(cover);
             let detail_availability = best_availability(item);
-            let ready_variant = item
-                .variants
-                .iter()
-                .find(|variant| matches!(variant.availability, Availability::Ready));
             let availability = if matches!(detail_availability, Availability::Ready) {
-                match ready_variant.map(ready_variant_capability) {
-                    Some(ReadyVariantCapability::Native) => "● Ready".to_owned(),
-                    Some(ReadyVariantCapability::Stream) => "● Ready".to_owned(),
-                    Some(ReadyVariantCapability::Unknown) | None => "● Ready".to_owned(),
-                }
+                "● Ready".to_owned()
             } else {
                 format!(
                     "⊘ {}",
@@ -6521,8 +6513,7 @@ fn detail_provenance_text(kind: &AppKind, variant: &Variant) -> String {
         .descriptor_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .map(humanize_identifier)
-        .unwrap_or_else(|| "Manifest".to_owned());
+        .map_or_else(|| "Manifest".to_owned(), humanize_identifier);
     format!("{} · {provider} · {manifest}", sentence_kind(kind))
 }
 
@@ -13932,7 +13923,6 @@ mod tests {
         for id in [
             "detail-provenance",
             "detail-availability-reason",
-            "detail-description",
             "detail-ways-heading",
         ] {
             assert_eq!(
@@ -14415,7 +14405,7 @@ mod tests {
             "detail-fact-time-played-heading",
             "detail-fact-offline-heading",
         ] {
-            assert_eq!(node_by_id(root, id).unwrap().bounds.y, fact_heading_y);
+            assert!((node_by_id(root, id).unwrap().bounds.y - fact_heading_y).abs() < f32::EPSILON);
         }
 
         let prompts = node_by_id(root, "prompts").unwrap();

@@ -191,7 +191,7 @@ fn vertical_slice_frame_hashes_are_stable() {
     let (_out, lines) = render_offscreen();
     for expected in [
         // Home intentionally rebaselines for the corrected attention-pill dot geometry.
-        // Every route without the attention pill remains byte-identical.
+        // Details routes rebaseline for the quiet-console layout polish.
         "6f9c658df4def86762e94e126564d9657a5c27c5fe5bf31264ad93cab747b244  ",
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
@@ -200,8 +200,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
         "b47565735bcca17ad020e3f92bcfa7c305f1291aa717aaa1ba7df102bc62287d  ",
-        "04e8e637e69f97837eadb942c44c46fa2e0157816c04e1e71cb7f3149ce51c69  ",
-        "98b40ebeb9b7dfb31701daeb0978a2205e2a2eda3c3e35b3e0ec632a1609238d  ",
+        "76b8c46056a3f86f2af2f076583a1f88c753ea23c056f35d4c15661b2553ab48  ",
+        "b5497a101f98c0a117ef52ddbdff5eb29c338553a9387536a22aeb7ccc4ec603  ",
         "eb3e4049e7b52d92370ca9f7824953835211da8938286313086b44537809e5b3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

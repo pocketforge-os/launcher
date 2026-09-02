@@ -77,7 +77,8 @@ const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
 const HOME_STACK_BUDGET: f32 = 664.0;
-const HOME_STACK_HARD_LIMIT: f32 = 720.0;
+const HOME_FOCUS_RING_OVERSHOOT: f32 = 4.0;
+const HOME_PROMPT_BAND_TOP: f32 = 720.0 - PROMPTS_AREA_HEIGHT;
 const HOME_TOP_SPACER: f32 = 144.0;
 const HOME_TOP_SPACER_FLOOR: f32 = 96.0;
 const HOME_AIR_SPACER: f32 = 88.0;
@@ -178,6 +179,7 @@ struct HomeVerticalLayout {
     status_y: f32,
     shelf_label_y: f32,
     card_row_y: f32,
+    card_art_height: f32,
     card_height: f32,
     show_card_caption: bool,
 }
@@ -205,8 +207,11 @@ fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
     let top_spacer = HOME_TOP_SPACER - shrink * top_slack / total_slack;
     let air_spacer = HOME_AIR_SPACER - shrink * air_slack / total_slack;
     let bottom_with_caption = top_spacer + air_spacer + fixed_height;
-    let show_card_caption = bottom_with_caption <= HOME_STACK_HARD_LIMIT;
-    let card_height = card_primary_height
+    // The footer owns the final prompt-area band. Once the stack has exhausted both
+    // spacers, yield captions and then card art to that edge rather than treating the
+    // physical 720 px surface bottom as usable Home content.
+    let show_card_caption = text_scale < 200 || bottom_with_caption <= HOME_PROMPT_BAND_TOP;
+    let mut card_height = card_primary_height
         + if show_card_caption {
             card_caption_height
         } else {
@@ -216,12 +221,21 @@ fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
     let status_y = title_y + title_height + 8.0;
     let shelf_label_y = status_y + status_height + air_spacer;
     let card_row_y = shelf_label_y + shelf_label_height + 16.0;
+    let required_clearance = SPACE_2 + HOME_FOCUS_RING_OVERSHOOT;
+    let overflow_into_prompts = if show_card_caption {
+        0.0
+    } else {
+        (card_row_y + card_height + required_clearance - HOME_PROMPT_BAND_TOP).max(0.0)
+    };
+    let card_art_height = (CARD_ART_HEIGHT - overflow_into_prompts).max(0.0);
+    card_height -= overflow_into_prompts;
 
     HomeVerticalLayout {
         title_y,
         status_y,
         shelf_label_y,
         card_row_y,
+        card_art_height,
         card_height,
         show_card_caption,
     }
@@ -3623,7 +3637,7 @@ impl ShellCore {
                     x,
                     vertical.card_row_y,
                     card_width,
-                    CARD_ART_HEIGHT,
+                    vertical.card_art_height,
                     i == self.focus,
                     self.text_scale,
                 );
@@ -3635,7 +3649,7 @@ impl ShellCore {
                     x,
                     vertical.card_row_y,
                     card_width,
-                    CARD_ART_HEIGHT,
+                    vertical.card_art_height,
                     Some(h - PROMPTS_AREA_HEIGHT),
                     self.text_scale,
                     vertical.show_card_caption,
@@ -13996,10 +14010,7 @@ mod tests {
                 );
             }
             let card_bottom = card.bounds.y + card.bounds.height;
-            assert!(card_bottom <= HOME_STACK_HARD_LIMIT);
-            if text_scale <= 150 {
-                assert!(card_bottom <= HOME_STACK_BUDGET);
-            }
+            assert!(card_bottom <= HOME_STACK_BUDGET);
 
             let mut card_text = Vec::new();
             collect_matching(
@@ -14052,6 +14063,81 @@ mod tests {
         core.text_scale = 200;
         let scene = core.scene(metrics, "A Open · X Details").unwrap();
         assert!(node_by_id(scene.root(), "home-card-reason-network-game").is_none());
+    }
+
+    #[test]
+    fn full_home_fixture_keeps_the_card_row_clear_of_prompts_at_200_percent() {
+        struct AttentionStatus;
+        impl DeviceStatusPort for AttentionStatus {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 25,
+                    attention_message: Some("Controller battery low".to_owned()),
+                })
+            }
+        }
+
+        let items = (0..HOME_SHELF_LIMIT)
+            .map(|index| {
+                let mut ready =
+                    variant("stream", &format!("ready-app-{index}"), Availability::Ready);
+                ready.requirements.push(Requirement {
+                    capability: "network".into(),
+                    optional: false,
+                });
+                item(
+                    &format!("ready-{index}"),
+                    &format!("Ready Game {index}"),
+                    vec![ready],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.load_device_status(&AttentionStatus);
+        core.text_scale = 200;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open · X Details",
+            )
+            .unwrap();
+        assert!(node_by_id(scene.root(), "attention-pill").is_some());
+        assert_eq!(
+            scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("item-"))
+                .count(),
+            HOME_SHELF_LIMIT
+        );
+
+        let prompt_top = 720.0 - PROMPTS_AREA_HEIGHT;
+        let row: Vec<_> = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("item-"))
+            .cloned()
+            .collect();
+        let (_, row_bottom) = home_row_vertical_extent(&row);
+        let focused_ring_bottom = row
+            .iter()
+            .find(|node| node.state.focused)
+            .map_or(row_bottom, |node| {
+                node.bounds.y + node.bounds.height + HOME_FOCUS_RING_OVERSHOOT
+            });
+        assert!(
+            row_bottom.max(focused_ring_bottom) + SPACE_2 <= prompt_top,
+            "full Home card row bottom {} does not leave space-2 before prompts at {prompt_top}",
+            row_bottom.max(focused_ring_bottom)
+        );
     }
 
     #[test]

@@ -3186,14 +3186,19 @@ impl ShellCore {
         ));
         let prompt_height = scaled_text_box_height(32.0, self.text_scale);
         let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
+        let prompt_label = if self.route == Route::Details {
+            ""
+        } else {
+            &footer
+        };
         let mut prompt_node = node(
             "prompts",
-            if matches!(self.route, Route::Home | Route::Library) {
+            if matches!(self.route, Route::Home | Route::Library | Route::Details) {
                 Role::Group
             } else {
                 Role::Text
             },
-            &footer,
+            prompt_label,
             if self.route == Route::Home {
                 w - 660.0
             } else {
@@ -13945,6 +13950,20 @@ mod tests {
                 .then_some(node)
                 .or_else(|| node.children.iter().find_map(|child| find(child, id)))
         }
+        fn prompt_labels(node: &Node) -> Vec<&str> {
+            node.children
+                .iter()
+                .filter(|child| {
+                    let id = child.id.as_str();
+                    id.strip_prefix("home-prompt-keycap-")
+                        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+                        || id
+                            .strip_prefix("home-prompt-verb-")
+                            .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+                })
+                .map(|child| child.accessible_label.as_str())
+                .collect()
+        }
         let unavailable = Availability::NeedsSetup {
             reason: "choose a profile".into(),
         };
@@ -14025,6 +14044,34 @@ mod tests {
         core.selected_item = Some(0);
         core.go(Route::Details);
         let ready = core.scene(metrics, "wrong caller footer").unwrap();
+        let footer_clusters = ready
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str() == "prompts")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            footer_clusters.len(),
+            1,
+            "Details must emit exactly one footer hint cluster"
+        );
+        let details_prompts = footer_clusters[0];
+        assert_eq!(
+            details_prompts.role,
+            Role::Group,
+            "Details footer must not retain a centered plain-text prompt sibling"
+        );
+        assert!(
+            details_prompts.accessible_label.is_empty(),
+            "Details footer cluster must not carry the legacy centered text label"
+        );
+        assert!(
+            details_prompts
+                .children
+                .iter()
+                .any(|node| node.id.as_str().starts_with("home-prompt-keycap-")),
+            "Details footer cluster must contain the keycap chips"
+        );
         assert_eq!(
             find(ready.root(), "detail-title").map(|node| node.style_token.as_str()),
             Some(COLOR_SURFACE_CANVAS_TOKEN)
@@ -14033,9 +14080,9 @@ mod tests {
         assert!(
             find(ready.root(), "detail-open").is_some_and(|node| node.accessible_label == "▶ Play")
         );
-        assert!(
-            find(ready.root(), "prompts")
-                .is_some_and(|node| node.accessible_label == "B Back · X Favorite · A Play")
+        assert_eq!(
+            prompt_labels(find(ready.root(), "prompts").unwrap()),
+            ["B", "Back", "X", "Favorite", "A", "Play"]
         );
 
         let mut remapped = desktop_bindings();
@@ -14046,10 +14093,8 @@ mod tests {
             .binding = "START".into();
         core.set_control_bindings(remapped);
         let remapped = core.scene(metrics, "wrong caller footer").unwrap();
-        assert!(
-            find(remapped.root(), "prompts")
-                .is_some_and(|node| node.accessible_label.contains("START Favorite"))
-        );
+        let remapped_labels = prompt_labels(find(remapped.root(), "prompts").unwrap());
+        assert!(remapped_labels.contains(&"START") && remapped_labels.contains(&"Favorite"));
 
         core.set_control_bindings(
             desktop_bindings()
@@ -14058,12 +14103,10 @@ mod tests {
                 .collect(),
         );
         let favorite_unbound = core.scene(metrics, "wrong caller footer").unwrap();
-        assert!(
-            find(favorite_unbound.root(), "prompts").is_some_and(|node| {
-                !node.accessible_label.contains("Favorite")
-                    && !node.accessible_label.contains("Unfavorite")
-            })
-        );
+        let favorite_unbound_labels =
+            prompt_labels(find(favorite_unbound.root(), "prompts").unwrap());
+        assert!(!favorite_unbound_labels.contains(&"Favorite"));
+        assert!(!favorite_unbound_labels.contains(&"Unfavorite"));
 
         core.selected_item = Some(1);
         let unavailable = core.scene(metrics, "wrong caller footer").unwrap();
@@ -14071,9 +14114,9 @@ mod tests {
         assert!(labels.contains("⊘ Stream"));
         assert!(labels.contains("choose a profile"));
         assert!(find(unavailable.root(), "detail-open").is_none());
-        assert!(find(unavailable.root(), "prompts").is_some_and(|node| {
-            !node.accessible_label.contains("Play") && !node.accessible_label.contains("Open")
-        }));
+        let unavailable_labels = prompt_labels(find(unavailable.root(), "prompts").unwrap());
+        assert!(!unavailable_labels.contains(&"Play"));
+        assert!(!unavailable_labels.contains(&"Open"));
     }
 
     #[test]

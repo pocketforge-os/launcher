@@ -914,7 +914,9 @@ fn emit_f10_evidence(
     emit(host, &mut core, footer, out, "library")?;
     emit(host, &mut core, footer, out, "library-focused-search")?;
     core.action(&ShellAction::Custom("Search".into()));
-    core.set_search_query("ridgeline");
+    // Keep Search's evidence state populated deeply enough to exercise the
+    // declared scroll-region/footer boundary, not merely the single-result path.
+    core.set_search_query("e");
     emit(host, &mut core, footer, out, "search")?;
     core.action(&ShellAction::Activate);
     emit(host, &mut core, footer, out, "details")?;
@@ -4815,6 +4817,104 @@ mod durable_tests {
             let mut host = OffscreenHost::new(metrics);
             host.present(&scene).unwrap();
             assert_eq!(host.frame().unwrap().notes, [], "{route} render notes");
+        }
+    }
+
+    #[test]
+    fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_every_scale() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for text_scale in [100, 150, 200] {
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.load_preferences(
+                &FakePreferencePort::new(
+                    [EffectivePreference {
+                        key: PreferenceKey("textScale".into()),
+                        effective: PreferenceValue::Text(format!("{text_scale}%")),
+                        stored: PreferenceValue::Text(format!("{text_scale}%")),
+                        applied: true,
+                    }],
+                    ChangeAuthority("user".into()),
+                ),
+                true,
+            )
+            .unwrap();
+            core.action(&ShellAction::Custom("Room.next".into()));
+            core.action(&ShellAction::Custom("Search".into()));
+            core.set_search_query("e");
+            assert_eq!(core.search_result_ids().len(), 24, "fixture-list drift");
+
+            let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+            let root = scene.root();
+            let search_box = find(root, "search-query").unwrap();
+            assert_eq!(search_box.style_token, "--color-surface-raised");
+            assert!(search_box.corner_radius > 0.0);
+            assert_eq!(
+                search_box.border_token.as_deref(),
+                Some("--state-focused-ring")
+            );
+            let hint = find(root, "search-hint").unwrap();
+            assert_eq!(hint.type_role, pf_scene::TypeRole::Caption);
+            assert_eq!(hint.ink_token.as_deref(), Some("--color-text-muted"));
+
+            let region = find(root, "search-results-scroll-region").unwrap();
+            let prompts = find(root, "prompts").unwrap();
+            assert!(region.bounds.y + region.bounds.height <= prompts.bounds.y);
+            let rows = root
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("search-result-"))
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty());
+            for row in &rows {
+                assert_eq!(row.type_role, pf_scene::TypeRole::Label);
+                assert!(row.corner_radius > 0.0);
+                assert!(row.bounds.x >= region.bounds.x);
+                assert!(row.bounds.x + row.bounds.width <= region.bounds.x + region.bounds.width);
+                assert!(row.bounds.y >= region.bounds.y);
+                assert!(row.bounds.y + row.bounds.height <= region.bounds.y + region.bounds.height);
+                let caption = row
+                    .children
+                    .iter()
+                    .find(|child| child.id.as_str().ends_with("-caption"))
+                    .expect("each result keeps its inline caption distinct");
+                assert_eq!(caption.type_role, pf_scene::TypeRole::Caption);
+                assert_eq!(caption.ink_token.as_deref(), Some("--color-text-muted"));
+            }
+            for pair in rows.windows(2) {
+                assert!((pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height) >= 12.0);
+            }
+            assert!(rows[0].state.focused);
+            assert_eq!(rows[0].style_token, "--state-focused-ring");
+            assert!(find(root, "home-prompt-keycap-0-border").is_some());
+
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                .unwrap_or_else(|error| {
+                    panic!("populated Search occlusion at {text_scale}%: {error}")
+                });
+            assert_raster_text_paint_contained_and_complete(
+                &scene,
+                metrics,
+                pf_theme::Base::Dusk,
+                text_scale,
+            )
+            .unwrap_or_else(|error| {
+                panic!("populated Search containment at {text_scale}%: {error}")
+            });
         }
     }
 

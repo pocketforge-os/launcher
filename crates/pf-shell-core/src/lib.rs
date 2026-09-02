@@ -3219,7 +3219,10 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
-        } else if matches!(self.route, Route::Library | Route::Details | Route::Quick) {
+        } else if matches!(
+            self.route,
+            Route::Library | Route::Details | Route::Quick | Route::Search
+        ) {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
@@ -4069,19 +4072,44 @@ impl ShellCore {
                 .with_ink_token("--scene-overlay-role"),
             );
         } else if self.route == Route::Search {
-            out.push(node(
+            let scale = f32::from(self.text_scale) / 100.0;
+            let column_width = (w - 2.0 * SPACE_7).min(800.0);
+            let column_left = (w - column_width) / 2.0;
+            let search_top = chrome_row_bottom(metrics.safe_insets.top, self.text_scale) + SPACE_5;
+            let search_height = 52.0 * scale;
+            let mut search_box = node(
                 "search-query",
                 Role::Text,
-                &format!(
-                    "{}│ · Titles and tags · Back returns to where you were",
-                    self.search_query
-                ),
-                48.0,
-                165.0,
-                w - 96.0,
-                54.0,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            ));
+                &format!("{}│", self.search_query),
+                column_left,
+                search_top,
+                column_width,
+                search_height,
+                COLOR_SURFACE_RAISED_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_corner_radius(RADIUS_M * scale)
+            .with_elevation(Elevation::Elev2);
+            search_box.state.focused = true;
+            search_box.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
+            search_box.border_width = 2.0;
+            out.push(search_box);
+            let hint_top = search_top + search_height + SPACE_2 * scale;
+            let hint_height = scaled_text_box_height(24.0, self.text_scale);
+            out.push(
+                node(
+                    "search-hint",
+                    Role::Text,
+                    "SEARCH · Titles and tags · Back returns to where you were",
+                    column_left,
+                    hint_top,
+                    column_width,
+                    hint_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            );
             if self.search_results.is_empty() {
                 out.push(node(
                     "search-empty",
@@ -4091,35 +4119,103 @@ impl ShellCore {
                     } else {
                         "Nothing matches — check the spelling, or browse the Library."
                     },
-                    48.0,
-                    250.0,
-                    w - 96.0,
+                    column_left,
+                    hint_top + hint_height + SPACE_4 * scale,
+                    column_width,
                     70.0,
                     COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
-            for (result, &item_index) in self.search_results.iter().enumerate() {
+            let rows_top = hint_top + hint_height + SPACE_4 * scale;
+            let rows_bottom = h
+                - PROMPTS_AREA_HEIGHT.max(scaled_text_box_height(32.0, self.text_scale))
+                - SPACE_3;
+            let row_height = 44.0 * scale;
+            let row_gap = SPACE_3 * scale;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let capacity = (((rows_bottom - rows_top + row_gap) / (row_height + row_gap))
+                .floor()
+                .max(1.0)) as usize;
+            let first = self
+                .focus
+                .saturating_sub(capacity.saturating_sub(1))
+                .min(self.search_results.len().saturating_sub(capacity));
+            out.push(node(
+                "search-results-scroll-region",
+                Role::Group,
+                "Search results",
+                column_left,
+                rows_top,
+                column_width,
+                (rows_bottom - rows_top).max(0.0),
+                SCENE_TRANSPARENT_TOKEN,
+            ));
+            for (result, &item_index) in self
+                .search_results
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(capacity)
+            {
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
+                let result_top = rows_top + (result - first) as f32 * (row_height + row_gap);
+                let title = item.title.as_str();
+                let caption = format!(
+                    " · {} · {}",
+                    kind_text(&item.kind),
+                    availability_text(availability, &self.presentation)
+                );
+                let text_left = column_left + SPACE_4 * scale;
+                // Reserve a stable inline title column so shaped label bearings
+                // cannot force a nominally one-line result into a second row.
+                let title_width = (column_width * 0.42).max(
+                    measured_text_advance(label_text_width(title), self.text_scale)
+                        + 2.0 * TEXT_NODE_INLINE_INSET * scale,
+                );
                 let mut row = node(
                     &format!("search-result-{}", item.id),
                     Role::Button,
-                    &format!(
-                        "{} · {} · {}",
-                        item.title,
-                        kind_text(&item.kind),
-                        availability_text(availability, &self.presentation)
-                    ),
-                    w * 0.46,
-                    230.0 + result as f32 * 68.0,
-                    w * 0.48,
-                    58.0,
+                    &format!("{title}{caption}"),
+                    column_left,
+                    result_top,
+                    column_width,
+                    row_height,
                     if self.focus == result {
                         STATE_FOCUSED_RING_TOKEN
                     } else {
-                        state_token(availability, false)
+                        STATE_REST_SURFACE_TOKEN
                     },
-                );
+                )
+                .with_type_role(TypeRole::Label)
+                .with_corner_radius(RADIUS_M * scale)
+                .with_ink_token(SCENE_TRANSPARENT_TOKEN)
+                .with_children(vec![
+                    node(
+                        &format!("search-result-{}-title", item.id),
+                        Role::Text,
+                        title,
+                        text_left,
+                        result_top,
+                        title_width,
+                        row_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+                    node(
+                        &format!("search-result-{}-caption", item.id),
+                        Role::Text,
+                        &caption,
+                        text_left + title_width,
+                        result_top,
+                        (column_left + column_width - text_left - title_width).max(0.0),
+                        row_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+                ]);
                 row.state.focused = self.focus == result;
                 row.action = Some(NodeAction::Activate);
                 out.push(row);
@@ -6798,20 +6894,6 @@ fn humanize_identifier(value: &str) -> String {
         chars.next().map_or_else(String::new, |first| {
             first.to_uppercase().collect::<String>() + chars.as_str()
         })
-    }
-}
-fn state_token(a: &Availability, focused: bool) -> &'static str {
-    if focused {
-        STATE_FOCUSED_RING_TOKEN
-    } else {
-        match a {
-            Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => {
-                COLOR_STATUS_ATTENTION_TOKEN
-            }
-            Availability::Ready
-            | Availability::UnsupportedCapability { .. }
-            | Availability::IncompatibleRuntime { .. } => STATE_REST_SURFACE_TOKEN,
-        }
     }
 }
 fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token: &str) -> Node {

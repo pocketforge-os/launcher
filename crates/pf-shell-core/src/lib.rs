@@ -5778,40 +5778,46 @@ impl ShellCore {
             }
             let (primary, value) = label.split_once(" · ").unwrap_or((label, ""));
             let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
-            row.children.push(
-                node(
-                    &format!("quick-power-{id}-label"),
+            let mut label_node = node(
+                &format!("quick-power-{id}-label"),
+                Role::Text,
+                primary,
+                content_left + SPACE_4,
+                y + (row_height - label_height) / 2.0,
+                content_width - 2.0 * SPACE_4,
+                label_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(if !enabled {
+                STATE_UNAVAILABLE_TEXT_TOKEN
+            } else if index == self.focus {
+                STATE_FOCUSED_TEXT_TOKEN
+            } else {
+                STATE_REST_TEXT_TOKEN
+            });
+            label_node.state.disabled = !enabled;
+            row.children.push(label_node);
+            if !value.is_empty() {
+                let value_width = text_node_box_width(caption_text_width(value, self.text_scale));
+                let mut value_node = node(
+                    &format!("quick-power-{id}-value"),
                     Role::Text,
-                    primary,
-                    content_left + SPACE_4,
+                    value,
+                    content_left + content_width - SPACE_4 - value_width,
                     y + (row_height - label_height) / 2.0,
-                    content_width - 2.0 * SPACE_4,
+                    value_width,
                     label_height,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_type_role(TypeRole::Label)
-                .with_ink_token(if index == self.focus {
-                    STATE_FOCUSED_TEXT_TOKEN
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(if enabled {
+                    COLOR_TEXT_MUTED_TOKEN
                 } else {
-                    STATE_REST_TEXT_TOKEN
-                }),
-            );
-            if !value.is_empty() {
-                let value_width = text_node_box_width(caption_text_width(value, self.text_scale));
-                row.children.push(
-                    node(
-                        &format!("quick-power-{id}-value"),
-                        Role::Text,
-                        value,
-                        content_left + content_width - SPACE_4 - value_width,
-                        y + (row_height - label_height) / 2.0,
-                        value_width,
-                        label_height,
-                        SCENE_TRANSPARENT_TOKEN,
-                    )
-                    .with_type_role(TypeRole::Caption)
-                    .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
-                );
+                    STATE_UNAVAILABLE_TEXT_TOKEN
+                });
+                value_node.state.disabled = !enabled;
+                row.children.push(value_node);
             }
             out.push(row);
             system_position += 1;
@@ -15290,6 +15296,15 @@ mod tests {
             .unwrap();
         assert_eq!(idle.accessible_label, "Auto-sleep · 15 min");
         assert!(!idle.state.disabled);
+        assert!(idle.children.iter().all(|child| !child.state.disabled));
+        assert_eq!(
+            idle.children[0].ink_token.as_deref(),
+            Some(STATE_REST_TEXT_TOKEN)
+        );
+        assert_eq!(
+            idle.children[1].ink_token.as_deref(),
+            Some(COLOR_TEXT_MUTED_TOKEN)
+        );
         for id in ["quick-power-power-off", "quick-power-restart"] {
             let row = scene
                 .root()
@@ -15302,6 +15317,14 @@ mod tests {
                 "{id} should degrade without capabilities"
             );
             assert_eq!(row.action, None);
+            assert!(!row.children.is_empty());
+            for child in &row.children {
+                assert_eq!(
+                    child.ink_token.as_deref(),
+                    Some(STATE_UNAVAILABLE_TEXT_TOKEN)
+                );
+                assert!(child.state.disabled);
+            }
         }
         assert!(scene.root().children.iter().any(|node| {
             node.id.as_str() == "quick-power-status"

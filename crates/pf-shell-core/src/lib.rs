@@ -3193,7 +3193,10 @@ impl ShellCore {
         };
         let mut prompt_node = node(
             "prompts",
-            if matches!(self.route, Route::Home | Route::Library | Route::Details) {
+            if matches!(
+                self.route,
+                Route::Home | Route::Library | Route::Details | Route::Quick
+            ) {
                 Role::Group
             } else {
                 Role::Text
@@ -3216,7 +3219,7 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
-        } else if matches!(self.route, Route::Library | Route::Details) {
+        } else if matches!(self.route, Route::Library | Route::Details | Route::Quick) {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
@@ -5610,39 +5613,102 @@ impl ShellCore {
             }
             return;
         }
+        let scale = f32::from(self.text_scale) / 100.0;
+        let panel_width = (360.0 * scale).min(w - 2.0 * SPACE_5);
+        let panel_left = w - SPACE_5 - panel_width;
+        let panel_top = chrome_row_bottom(0.0, self.text_scale) + SPACE_5;
+        let panel_bottom = h - PROMPTS_AREA_HEIGHT - SPACE_5;
+        let panel_height = panel_bottom - panel_top;
+        let content_left = panel_left + SPACE_5;
+        let content_width = panel_width - 2.0 * SPACE_5;
+        let row_height = scaled_text_box_height(40.0, self.text_scale).min(52.0);
+        let row_gap = SPACE_3;
+        let mut panel = node(
+            "quick-panel-surface",
+            Role::Group,
+            "Quick actions",
+            panel_left,
+            panel_top,
+            panel_width,
+            panel_height,
+            COLOR_SURFACE_RAISED_TOKEN,
+        )
+        .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+        .with_elevation(Elevation::Elev2);
+        panel.state.expanded = true;
+        out.push(panel);
+
+        let mut push_row = |id: &str, index: usize, label: &str, y: f32, enabled: bool| {
+            let focused = index == self.focus;
+            let mut row = node(
+                id,
+                Role::Button,
+                label,
+                content_left,
+                y,
+                content_width,
+                row_height,
+                STATE_REST_SURFACE_TOKEN,
+            )
+            .with_border(
+                if focused {
+                    STATE_FOCUSED_RING_TOKEN
+                } else {
+                    COLOR_BORDER_HAIRLINE_TOKEN
+                },
+                if focused { 2.0 } else { 1.0 },
+            );
+            row.state.focused = focused;
+            row.state.disabled = !enabled;
+            if enabled {
+                row.action = Some(NodeAction::Activate);
+            }
+            let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+            row.children.push(
+                node(
+                    &format!("{id}-label"),
+                    Role::Text,
+                    label,
+                    content_left + SPACE_4,
+                    y + (row_height - label_height) / 2.0,
+                    content_width - 2.0 * SPACE_4,
+                    label_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(if focused {
+                    STATE_FOCUSED_TEXT_TOKEN
+                } else {
+                    STATE_REST_TEXT_TOKEN
+                }),
+            );
+            out.push(row);
+        };
+
         // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
         for (i, label) in ["Open focused item", "Browse the library"]
             .iter()
             .enumerate()
         {
-            let mut n = node(
+            push_row(
                 &format!("quick-{i}"),
-                Role::Button,
+                i,
                 label,
-                w - 400.0,
-                96.0 + i as f32 * 64.0,
-                352.0,
-                52.0,
-                if i == self.focus {
-                    STATE_FOCUSED_RING_TOKEN
-                } else {
-                    STATE_REST_SURFACE_TOKEN
-                },
+                panel_top + SPACE_5 + i as f32 * (row_height + row_gap),
+                true,
             );
-            n.state.focused = i == self.focus;
-            n.action = Some(NodeAction::Activate);
-            out.push(n);
         }
         out.push(node(
-            "quick-power-heading",
-            Role::Heading,
-            "Power",
-            w - 400.0,
-            232.0,
-            352.0,
-            34.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
+            "quick-section-divider",
+            Role::Group,
+            "",
+            content_left,
+            panel_top + SPACE_5 + 2.0 * (row_height + row_gap),
+            content_width,
+            1.0,
+            COLOR_BORDER_HAIRLINE_TOKEN,
         ));
+        let system_top = panel_top + SPACE_5 + 2.0 * (row_height + row_gap) + SPACE_3;
         let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
         if let Some(index) = self.sleep_row() {
             rows.push((index, "sleep", "Sleep"));
@@ -5660,73 +5726,149 @@ impl ShellCore {
         if let Some(label) = &idle_label {
             rows.push((self.idle_row(), "idle", label));
         }
+        let mut system_position = 0_usize;
         for (index, id, label) in rows {
             let enabled = match index {
                 2 => self.supports_power(PowerAction::PowerOff),
                 3 => self.supports_power(PowerAction::Restart),
                 _ => true,
             };
+            let y = system_top + system_position as f32 * (row_height + row_gap);
             let mut row = node(
                 &format!("quick-power-{id}"),
                 Role::Button,
                 label,
-                w - 400.0,
-                274.0 + (index - 2) as f32 * 58.0,
-                352.0,
-                48.0,
+                content_left,
+                y,
+                content_width,
+                row_height,
+                STATE_REST_SURFACE_TOKEN,
+            )
+            .with_border(
                 if index == self.focus {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
-                    STATE_REST_SURFACE_TOKEN
+                    COLOR_BORDER_HAIRLINE_TOKEN
                 },
+                if index == self.focus { 2.0 } else { 1.0 },
             );
             row.state.focused = index == self.focus;
             row.state.disabled = !enabled;
             if enabled {
                 row.action = Some(NodeAction::Activate);
             }
+            let (primary, value) = label.split_once(" · ").unwrap_or((label, ""));
+            let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+            row.children.push(
+                node(
+                    &format!("quick-power-{id}-label"),
+                    Role::Text,
+                    primary,
+                    content_left + SPACE_4,
+                    y + (row_height - label_height) / 2.0,
+                    content_width - 2.0 * SPACE_4,
+                    label_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(if index == self.focus {
+                    STATE_FOCUSED_TEXT_TOKEN
+                } else {
+                    STATE_REST_TEXT_TOKEN
+                }),
+            );
+            if !value.is_empty() {
+                let value_width = text_node_box_width(caption_text_width(value, self.text_scale));
+                row.children.push(
+                    node(
+                        &format!("quick-power-{id}-value"),
+                        Role::Text,
+                        value,
+                        content_left + content_width - SPACE_4 - value_width,
+                        y + (row_height - label_height) / 2.0,
+                        value_width,
+                        label_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+                );
+            }
             out.push(row);
+            system_position += 1;
         }
         let screenshot_index = self.screenshot_row();
         let mut screenshot = node(
             "quick-capture-screenshot",
             Role::Button,
             "Capture screenshot",
-            w - 400.0,
-            274.0 + (screenshot_index - 2) as f32 * 58.0,
-            352.0,
-            48.0,
+            content_left,
+            system_top + system_position as f32 * (row_height + row_gap),
+            content_width,
+            row_height,
+            STATE_REST_SURFACE_TOKEN,
+        )
+        .with_border(
             if screenshot_index == self.focus {
                 STATE_FOCUSED_RING_TOKEN
             } else {
-                STATE_REST_SURFACE_TOKEN
+                COLOR_BORDER_HAIRLINE_TOKEN
+            },
+            if screenshot_index == self.focus {
+                2.0
+            } else {
+                1.0
             },
         );
         screenshot.state.focused = screenshot_index == self.focus;
         screenshot.action = Some(NodeAction::Activate);
+        let screenshot_y = system_top + system_position as f32 * (row_height + row_gap);
+        let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+        screenshot.children.push(
+            node(
+                "quick-capture-screenshot-label",
+                Role::Text,
+                "Capture screenshot",
+                content_left + SPACE_4,
+                screenshot_y + (row_height - label_height) / 2.0,
+                content_width - 2.0 * SPACE_4,
+                label_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(if screenshot_index == self.focus {
+                STATE_FOCUSED_TEXT_TOKEN
+            } else {
+                STATE_REST_TEXT_TOKEN
+            }),
+        );
         out.push(screenshot);
         if let Some(status) = &self.power_status {
             out.push(node(
                 "quick-power-status",
                 Role::Text,
                 status,
-                w - 400.0,
-                h - 142.0,
-                352.0,
+                content_left,
+                panel_bottom - SPACE_5 - scaled_text_box_height(64.0, self.text_scale),
+                content_width,
                 32.0,
                 COLOR_STATUS_ATTENTION_TOKEN,
             ));
         }
-        out.push(declared_multiline(node(
-            "quick-truth",
-            Role::Text,
-            "Nothing is running now. Quick shows only what applies right here.",
-            w - 400.0,
-            h - 110.0,
-            352.0,
-            60.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
-        )));
+        out.push(declared_multiline(
+            node(
+                "quick-truth",
+                Role::Text,
+                "Nothing is running now. Quick shows only what applies right here.",
+                content_left,
+                panel_bottom - SPACE_5 - scaled_text_box_height(40.0, self.text_scale),
+                content_width,
+                scaled_text_box_height(40.0, self.text_scale),
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+        ));
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
         out.push(node(
@@ -7364,6 +7506,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("detail-art-")
         || id == "first-run-panel"
         || id == "receipt-panel"
+        || id == "quick-panel-surface"
     {
         Some(RADIUS_L)
     } else if id.starts_with("item-")
@@ -7382,6 +7525,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("chooser-") && id != "chooser-note" && id != "chooser-scroll-region"
         || id.starts_with("settings-nav-") && !id.ends_with("-label")
         || id.starts_with("settings-row-") && !id.contains("-line-") && !id.ends_with("-control")
+        || id.starts_with("quick-") && (node.action.is_some() || id == "quick-capture-screenshot")
         || id == "settings-text-scale-segmented-control"
         || id.starts_with("comfort-")
     {
@@ -14826,7 +14970,8 @@ mod tests {
             .map(|node| node.id.as_str())
             .collect();
         for required in [
-            "quick-power-heading",
+            "quick-panel-surface",
+            "quick-section-divider",
             "quick-power-power-off",
             "quick-power-restart",
             "quick-power-idle",
@@ -14836,7 +14981,33 @@ mod tests {
                 "missing semantic anatomy {required}"
             );
         }
+        assert!(!ids.contains(&"quick-power-heading"));
         assert!(!ids.contains(&"quick-power-sleep"));
+
+        let panel = node_by_id(unsupported_scene.root(), "quick-panel-surface").unwrap();
+        assert_eq!(panel.style_token, COLOR_SURFACE_RAISED_TOKEN);
+        assert_eq!(
+            panel.border_token.as_deref(),
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        assert!((panel.border_width - 1.0).abs() < f32::EPSILON);
+        assert_eq!(panel.elevation, Elevation::Elev2);
+        assert!((panel.corner_radius - RADIUS_L).abs() < f32::EPSILON);
+        let focused = node_by_id(unsupported_scene.root(), "quick-0").unwrap();
+        assert_eq!(focused.style_token, STATE_REST_SURFACE_TOKEN);
+        assert_eq!(
+            focused.border_token.as_deref(),
+            Some(STATE_FOCUSED_RING_TOKEN)
+        );
+        assert!((focused.border_width - 2.0).abs() < f32::EPSILON);
+        assert!((focused.corner_radius - RADIUS_M).abs() < f32::EPSILON);
+        let prompts = node_by_id(unsupported_scene.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert_eq!(
+            prompts.children.len(),
+            6,
+            "two prompts use one keycap cluster"
+        );
 
         let supported = FakePowerPort::new(
             vec![PowerCapability {

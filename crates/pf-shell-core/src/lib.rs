@@ -4100,35 +4100,40 @@ impl ShellCore {
                 |variant| detail_provenance_text(&item.kind, variant),
             );
             let compact = library_geometry(w).columns < 6;
+            let detail_wrap_top = 96.0;
             let cover_left = 48.0;
-            let cover_top = 112.0;
-            let cover_width = if compact { 240.0 } else { 320.0 };
-            let cover_height = if compact { 321.0 } else { 428.0 };
-            let detail_column_left = cover_left + cover_width + 32.0;
+            let cover_top = detail_wrap_top;
+            let cover_width = 320.0;
+            let cover_height = 428.0;
+            let detail_column_left = cover_left + cover_width + 48.0;
             let detail_column_width = w - detail_column_left - 48.0;
+            let provenance_height = scaled_text_box_height(30.0, self.text_scale);
+            let provenance_top = detail_wrap_top;
             out.push(
                 node(
                     "detail-provenance",
                     Role::Text,
                     &provenance,
                     detail_column_left,
-                    112.0,
+                    provenance_top,
                     detail_column_width,
-                    30.0,
+                    provenance_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Caption)
                 .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
+            let title_top = provenance_top + provenance_height + 6.0;
+            let title_height = scaled_text_box_height(66.0, self.text_scale);
             out.push(
                 node(
                     "detail-title",
                     Role::Heading,
                     &item.title,
                     detail_column_left,
-                    148.0,
+                    title_top,
                     detail_column_width,
-                    64.0,
+                    title_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Hero)
@@ -4174,19 +4179,23 @@ impl ShellCore {
             } else {
                 availability
             };
+            let availability_top = title_top + title_height + 6.0;
+            let availability_height = scaled_text_box_height(30.0, self.text_scale);
             let mut availability_node = node(
                 "detail-availability-reason",
                 Role::Text,
                 &availability,
                 detail_column_left,
-                218.0,
+                availability_top,
                 detail_column_width,
-                30.0,
+                availability_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             );
             availability_node.state.unavailable =
                 !matches!(detail_availability, Availability::Ready);
             out.push(availability_node);
+            let description_top = availability_top + availability_height + 4.0;
+            let description_height = scaled_text_box_height(42.0, self.text_scale);
             if let Some(description) = item.description.as_deref() {
                 out.push(
                     node(
@@ -4194,24 +4203,26 @@ impl ShellCore {
                         Role::Text,
                         description,
                         detail_column_left,
-                        252.0,
+                        description_top,
                         detail_column_width,
-                        42.0,
+                        description_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
                     .with_line_height(1.55)
                     .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
                 );
             }
+            let ways_heading_top = description_top + description_height;
+            let ways_heading_height = scaled_text_box_height(28.0, self.text_scale);
             out.push(
                 node(
                     "detail-ways-heading",
                     Role::Heading,
                     "WAYS TO PLAY",
                     detail_column_left,
-                    294.0,
+                    ways_heading_top,
                     detail_column_width,
-                    28.0,
+                    ways_heading_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
                 .with_type_role(TypeRole::Eyebrow),
@@ -4219,7 +4230,7 @@ impl ShellCore {
             let ready = self.ready_variants(item_index);
             let variant_row_height = 66.0;
             let variant_row_gap = 7.0;
-            let variant_rows_top = 326.0;
+            let variant_rows_top = ways_heading_top + ways_heading_height + 4.0;
             let detail_variant_capacity = 2;
             let visible_detail_variants = item.variants.len().min(detail_variant_capacity);
             if self.route == Route::Details {
@@ -4444,7 +4455,7 @@ impl ShellCore {
                         };
                     let button_gap = 12.0;
                     let stack_buttons = compact && detail_column_width < 336.0;
-                    let buttons_top = variants_bottom.max(430.0);
+                    let buttons_top = variants_bottom.max(detail_wrap_top + 334.0);
                     let play_focus = self.detail_play_focus().unwrap_or(0);
                     let open_label = if ready.len() == 1 {
                         "▶ Play"
@@ -4463,27 +4474,24 @@ impl ShellCore {
                         buttons_top,
                         open_width,
                         54.0,
-                        if self.focus == play_focus {
-                            STATE_FOCUSED_RING_TOKEN
-                        } else {
-                            STATE_SELECTED_ACCENT_TOKEN
-                        },
+                        STATE_SELECTED_ACCENT_TOKEN,
                     );
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
-                    open.children.push(
-                        node(
-                            "detail-open-label",
-                            Role::Text,
-                            &open.accessible_label,
-                            open.bounds.x + 16.0,
-                            open.bounds.y + 13.0,
-                            open.bounds.width - 32.0,
-                            28.0,
-                            STATE_SELECTED_ACCENT_TOKEN,
-                        )
-                        .with_type_role(TypeRole::Label),
-                    );
+                    let mut open_label_node = node(
+                        "detail-open-label",
+                        Role::Text,
+                        &open.accessible_label,
+                        open.bounds.x + 16.0,
+                        open.bounds.y + 13.0,
+                        open.bounds.width - 32.0,
+                        28.0,
+                        STATE_SELECTED_ACCENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_ink_token(COLOR_TEXT_INVERSE_TOKEN);
+                    open_label_node.state.focused = open.state.focused;
+                    open.children.push(open_label_node);
                     out.push(open);
                     let pin_label = if item.favorite {
                         "★ Unpin"
@@ -4539,7 +4547,7 @@ impl ShellCore {
                         Role::Text,
                         "No launch action is available",
                         detail_column_left,
-                        430.0,
+                        detail_wrap_top + 318.0,
                         detail_column_width,
                         60.0,
                         STATE_UNAVAILABLE_TEXT_TOKEN,
@@ -4555,7 +4563,7 @@ impl ShellCore {
                             "★ Pin to favorites"
                         },
                         detail_column_left,
-                        500.0,
+                        detail_wrap_top + 388.0,
                         detail_column_width,
                         54.0,
                         STATE_FOCUSED_RING_TOKEN,
@@ -4576,7 +4584,7 @@ impl ShellCore {
                         .with_type_role(TypeRole::Label),
                     );
                     out.push(pin);
-                    554.0
+                    detail_wrap_top + 442.0
                 };
                 let block_gap = 16.0;
                 let block_height = 54.0;
@@ -14385,6 +14393,16 @@ mod tests {
             )
             .unwrap();
         let root = scene.root();
+
+        let cover = node_by_id(root, "detail-cover").unwrap();
+        assert!((cover.bounds.x - 48.0).abs() < f32::EPSILON);
+        assert!((cover.bounds.y - 96.0).abs() < f32::EPSILON);
+        assert!((cover.bounds.width - 320.0).abs() < f32::EPSILON);
+        assert!((cover.bounds.height - 428.0).abs() < f32::EPSILON);
+        let provenance = node_by_id(root, "detail-provenance").unwrap();
+        assert!((provenance.bounds.x - 416.0).abs() < f32::EPSILON);
+        assert!((provenance.bounds.y - 96.0).abs() < f32::EPSILON);
+        assert!((provenance.bounds.width - 816.0).abs() < f32::EPSILON);
 
         assert_eq!(
             node_by_id(root, "detail-title").unwrap().type_role,

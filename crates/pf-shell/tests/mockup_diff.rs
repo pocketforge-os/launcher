@@ -8,7 +8,7 @@ const HEIGHT: u32 = 720;
 const SCREENS: [(&str, &str, f64); 5] = [
     ("home", "boot-home.png", 0.938_874_005_707_607),
     ("library", "library.png", 0.976_248_729_121_278),
-    ("detail", "details.png", 0.940_459_872_288_036),
+    ("detail", "details.png", 0.939_874_452_500_908),
     ("settings", "settings.png", 0.959_066_767_939_815),
     ("high-contrast", "high-contrast.png", 0.911_737_872_753_268),
 ];

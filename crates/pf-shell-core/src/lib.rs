@@ -3186,7 +3186,7 @@ impl ShellCore {
         ));
         let prompt_height = scaled_text_box_height(32.0, self.text_scale);
         let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-        let prompt_label = if self.route == Route::Details {
+        let prompt_label = if matches!(self.route, Route::Search | Route::Details) {
             ""
         } else {
             &footer
@@ -3195,7 +3195,7 @@ impl ShellCore {
             "prompts",
             if matches!(
                 self.route,
-                Route::Home | Route::Library | Route::Details | Route::Quick
+                Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
             ) {
                 Role::Group
             } else {
@@ -4090,9 +4090,15 @@ impl ShellCore {
             .with_type_role(TypeRole::Label)
             .with_corner_radius(RADIUS_M * scale)
             .with_elevation(Elevation::Elev2);
-            search_box.state.focused = true;
-            search_box.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
-            search_box.border_width = 2.0;
+            search_box.state.focused = self.search_results.is_empty();
+            if search_box.state.focused {
+                search_box.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
+                search_box.border_width = 2.0;
+                search_box.action = Some(NodeAction::Custom("Search".into()));
+            } else {
+                search_box.border_token = Some(COLOR_BORDER_HAIRLINE_TOKEN.into());
+                search_box.border_width = 1.0;
+            }
             out.push(search_box);
             let hint_top = search_top + search_height + SPACE_2 * scale;
             let hint_height = scaled_text_box_height(24.0, self.text_scale);
@@ -9406,6 +9412,61 @@ mod tests {
         assert!(caption.bounds.x >= painted_title.bounds.x + painted_title.bounds.width);
         assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
         assert!(caption.bounds.width >= caption_text_width(" · GAME · Ready", 200));
+    }
+
+    #[test]
+    fn search_has_one_semantic_focus_owner_and_grouped_prompts() {
+        fn focused_nodes<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            if node.state.focused {
+                out.push(node);
+            }
+            for child in &node.children {
+                focused_nodes(child, out);
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "search-result",
+            "Ridgeline",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("ridge");
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let populated = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let mut focused = Vec::new();
+        focused_nodes(populated.root(), &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id.as_str(), "search-result-search-result");
+        assert_eq!(
+            populated.focused().map(NodeId::as_str),
+            Some("search-result-search-result")
+        );
+        let query = node_by_id(populated.root(), "search-query").unwrap();
+        assert!(!query.state.focused);
+        assert_eq!(
+            query.border_token.as_deref(),
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        let prompts = node_by_id(populated.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert!(prompts.accessible_label.is_empty());
+        assert!(!prompts.children.is_empty());
+
+        core.set_search_query("no match");
+        let empty = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let mut focused = Vec::new();
+        focused_nodes(empty.root(), &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id.as_str(), "search-query");
+        assert_eq!(empty.focused().map(NodeId::as_str), Some("search-query"));
     }
 
     #[test]

@@ -3186,7 +3186,7 @@ impl ShellCore {
         ));
         let prompt_height = scaled_text_box_height(32.0, self.text_scale);
         let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-        let prompt_label = if self.route == Route::Details {
+        let prompt_label = if matches!(self.route, Route::Search | Route::Details) {
             ""
         } else {
             &footer
@@ -3195,7 +3195,7 @@ impl ShellCore {
             "prompts",
             if matches!(
                 self.route,
-                Route::Home | Route::Library | Route::Details | Route::Quick
+                Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
             ) {
                 Role::Group
             } else {
@@ -3219,7 +3219,10 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
-        } else if matches!(self.route, Route::Library | Route::Details | Route::Quick) {
+        } else if matches!(
+            self.route,
+            Route::Library | Route::Details | Route::Quick | Route::Search
+        ) {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
@@ -4069,19 +4072,50 @@ impl ShellCore {
                 .with_ink_token("--scene-overlay-role"),
             );
         } else if self.route == Route::Search {
-            out.push(node(
+            let scale = f32::from(self.text_scale) / 100.0;
+            let column_width = (w - 2.0 * SPACE_7).min(800.0);
+            let column_left = (w - column_width) / 2.0;
+            let search_top = chrome_row_bottom(metrics.safe_insets.top, self.text_scale) + SPACE_5;
+            let search_height = 52.0 * scale;
+            let mut search_box = node(
                 "search-query",
                 Role::Text,
-                &format!(
-                    "{}│ · Titles and tags · Back returns to where you were",
-                    self.search_query
-                ),
-                48.0,
-                165.0,
-                w - 96.0,
-                54.0,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            ));
+                &format!("{}│", self.search_query),
+                column_left,
+                search_top,
+                column_width,
+                search_height,
+                COLOR_SURFACE_RAISED_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_corner_radius(RADIUS_M * scale)
+            .with_elevation(Elevation::Elev2);
+            search_box.state.focused = self.search_results.is_empty();
+            if search_box.state.focused {
+                search_box.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
+                search_box.border_width = 2.0;
+                search_box.action = Some(NodeAction::Custom("Search".into()));
+            } else {
+                search_box.border_token = Some(COLOR_BORDER_HAIRLINE_TOKEN.into());
+                search_box.border_width = 1.0;
+            }
+            out.push(search_box);
+            let hint_top = search_top + search_height + SPACE_2 * scale;
+            let hint_height = scaled_text_box_height(24.0, self.text_scale);
+            out.push(
+                node(
+                    "search-hint",
+                    Role::Text,
+                    "SEARCH · Titles and tags · Back returns to where you were",
+                    column_left,
+                    hint_top,
+                    column_width,
+                    hint_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            );
             if self.search_results.is_empty() {
                 out.push(node(
                     "search-empty",
@@ -4091,39 +4125,132 @@ impl ShellCore {
                     } else {
                         "Nothing matches — check the spelling, or browse the Library."
                     },
-                    48.0,
-                    250.0,
-                    w - 96.0,
+                    column_left,
+                    hint_top + hint_height + SPACE_4 * scale,
+                    column_width,
                     70.0,
                     COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
-            for (result, &item_index) in self.search_results.iter().enumerate() {
+            let rows_top = hint_top + hint_height + SPACE_4 * scale;
+            let rows_bottom = h
+                - PROMPTS_AREA_HEIGHT.max(scaled_text_box_height(32.0, self.text_scale))
+                - SPACE_3;
+            let row_height = 44.0 * scale;
+            let row_gap = SPACE_3 * scale;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let capacity = (((rows_bottom - rows_top + row_gap) / (row_height + row_gap))
+                .floor()
+                .max(1.0)) as usize;
+            let first = self
+                .focus
+                .saturating_sub(capacity.saturating_sub(1))
+                .min(self.search_results.len().saturating_sub(capacity));
+            let mut results_region = node(
+                "search-results-scroll-region",
+                Role::Group,
+                "Search results",
+                column_left,
+                rows_top,
+                column_width,
+                (rows_bottom - rows_top).max(0.0),
+                SCENE_TRANSPARENT_TOKEN,
+            );
+            for (result, &item_index) in self
+                .search_results
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(capacity)
+            {
                 let item = &self.items[item_index];
                 let availability = best_availability(item);
+                let result_top = rows_top + (result - first) as f32 * (row_height + row_gap);
+                let title = item.title.as_str();
+                let caption = format!(
+                    " · {} · {}",
+                    kind_text(&item.kind),
+                    availability_text(availability, &self.presentation)
+                );
+                let text_left = column_left + SPACE_4 * scale;
+                let content_width = (column_width - 2.0 * SPACE_4 * scale).max(0.0);
+                let inter_gap = SPACE_2 * scale;
+                let title_floor = 72.0 * scale;
+                let caption_natural_width = caption_text_width(&caption, self.text_scale)
+                    + 2.0 * TEXT_NODE_INLINE_INSET * scale;
+                let caption_reserve =
+                    caption_natural_width.min((content_width - inter_gap - title_floor).max(0.0));
+                // Keep the established 42% column at roomy widths, but reserve the
+                // caption before allowing long titles to grow. The gap lives at the
+                // end of the title column so existing wide evidence keeps its geometry.
+                let title_column_width = (column_width * 0.42)
+                    .max(
+                        measured_text_advance(label_text_width(title), self.text_scale)
+                            + 2.0 * TEXT_NODE_INLINE_INSET * scale
+                            + inter_gap,
+                    )
+                    .min((content_width - caption_reserve).max(0.0));
+                let title_paint_width = (title_column_width - inter_gap).max(0.0);
+                let caption_width =
+                    (column_left + column_width - text_left - title_column_width).max(0.0);
+                let painted_title = ellipsize_to_lines(
+                    title,
+                    title_paint_width * 100.0 / f32::from(self.text_scale),
+                    1,
+                );
+                let painted_caption = ellipsize_to_lines(
+                    &caption,
+                    caption_width * 100.0 / f32::from(self.text_scale),
+                    1,
+                );
                 let mut row = node(
                     &format!("search-result-{}", item.id),
                     Role::Button,
-                    &format!(
-                        "{} · {} · {}",
-                        item.title,
-                        kind_text(&item.kind),
-                        availability_text(availability, &self.presentation)
-                    ),
-                    w * 0.46,
-                    230.0 + result as f32 * 68.0,
-                    w * 0.48,
-                    58.0,
-                    if self.focus == result {
-                        STATE_FOCUSED_RING_TOKEN
-                    } else {
-                        state_token(availability, false)
-                    },
-                );
+                    &format!("{title}{caption}"),
+                    column_left,
+                    result_top,
+                    column_width,
+                    row_height,
+                    STATE_REST_SURFACE_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_corner_radius(RADIUS_M * scale)
+                .with_ink_token(SCENE_TRANSPARENT_TOKEN)
+                .with_children(vec![
+                    node(
+                        &format!("search-result-{}-title", item.id),
+                        Role::Text,
+                        &painted_title,
+                        text_left,
+                        result_top,
+                        title_paint_width,
+                        row_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+                    node(
+                        &format!("search-result-{}-caption", item.id),
+                        Role::Text,
+                        &painted_caption,
+                        text_left + title_column_width,
+                        result_top,
+                        caption_width,
+                        row_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+                ]);
                 row.state.focused = self.focus == result;
+                if row.state.focused {
+                    row.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
+                    row.border_width = 2.0;
+                }
                 row.action = Some(NodeAction::Activate);
-                out.push(row);
+                results_region.children.push(row);
             }
+            out.push(results_region);
         } else if matches!(self.route, Route::Details | Route::VariantChooser) {
             let Some(item_index) = self.selected_item else {
                 return;
@@ -6800,20 +6927,6 @@ fn humanize_identifier(value: &str) -> String {
         })
     }
 }
-fn state_token(a: &Availability, focused: bool) -> &'static str {
-    if focused {
-        STATE_FOCUSED_RING_TOKEN
-    } else {
-        match a {
-            Availability::NeedsNetwork { .. } | Availability::NeedsSetup { .. } => {
-                COLOR_STATUS_ATTENTION_TOKEN
-            }
-            Availability::Ready
-            | Availability::UnsupportedCapability { .. }
-            | Availability::IncompatibleRuntime { .. } => STATE_REST_SURFACE_TOKEN,
-        }
-    }
-}
 fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token: &str) -> Node {
     Node::new(
         NodeId::new(id).unwrap(),
@@ -9263,6 +9376,111 @@ mod tests {
 
         assert_eq!(chip.accessible_label, "Everything else · 0");
         assert_eq!(painted_label.accessible_label, "Everything…");
+    }
+
+    #[test]
+    fn narrow_scaled_search_row_caps_title_and_preserves_inline_caption() {
+        let title = "An Extraordinary Ridgeline Adventure With A Deliberately Long Title";
+        let mut core = fixture_core(vec![item(
+            "long-search-result",
+            title,
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.text_scale = 200;
+        core.go(Route::Search);
+        core.set_search_query("extraordinary");
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let row = node_by_id(scene.root(), "search-result-long-search-result").unwrap();
+        let painted_title = node_by_id(row, "search-result-long-search-result-title").unwrap();
+        let caption = node_by_id(row, "search-result-long-search-result-caption").unwrap();
+
+        assert_eq!(row.accessible_label, format!("{title} · GAME · Ready"));
+        assert!(painted_title.accessible_label.ends_with('…'));
+        assert!(painted_title.bounds.x >= row.bounds.x);
+        assert!(painted_title.bounds.x + painted_title.bounds.width <= caption.bounds.x);
+        assert!(caption.bounds.x >= painted_title.bounds.x + painted_title.bounds.width);
+        assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
+        assert!(caption.bounds.width >= caption_text_width(" · GAME · Ready", 200));
+    }
+
+    #[test]
+    fn search_has_one_semantic_focus_owner_and_grouped_prompts() {
+        fn focused_nodes<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            if node.state.focused {
+                out.push(node);
+            }
+            for child in &node.children {
+                focused_nodes(child, out);
+            }
+        }
+
+        let mut core = fixture_core(vec![item(
+            "search-result",
+            "Ridgeline",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("ridge");
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        let populated = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let mut focused = Vec::new();
+        focused_nodes(populated.root(), &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id.as_str(), "search-result-search-result");
+        assert_eq!(
+            populated.focused().map(NodeId::as_str),
+            Some("search-result-search-result")
+        );
+        let query = node_by_id(populated.root(), "search-query").unwrap();
+        assert!(!query.state.focused);
+        assert_eq!(
+            query.border_token.as_deref(),
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        let results_region = node_by_id(populated.root(), "search-results-scroll-region").unwrap();
+        assert_eq!(results_region.children.len(), 1);
+        assert_eq!(
+            results_region.children[0].id.as_str(),
+            "search-result-search-result"
+        );
+        assert!(
+            populated
+                .root()
+                .children
+                .iter()
+                .all(|node| { !node.id.as_str().starts_with("search-result-") })
+        );
+        let prompts = node_by_id(populated.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert!(prompts.accessible_label.is_empty());
+        assert!(!prompts.children.is_empty());
+
+        core.set_search_query("no match");
+        let empty = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let mut focused = Vec::new();
+        focused_nodes(empty.root(), &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id.as_str(), "search-query");
+        assert_eq!(empty.focused().map(NodeId::as_str), Some("search-query"));
     }
 
     #[test]

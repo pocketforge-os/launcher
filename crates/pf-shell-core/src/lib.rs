@@ -8508,9 +8508,9 @@ mod tests {
                         COLOR_BORDER_HAIRLINE_TOKEN
                     })
                 );
-                assert_eq!(
-                    chip.border_width,
-                    if value == effective { 2.0 } else { 1.0 }
+                assert!(
+                    (chip.border_width - if value == effective { 2.0 } else { 1.0 }).abs()
+                        < f32::EPSILON
                 );
                 assert_eq!(chip.state.selected, value == effective);
                 let value_text =

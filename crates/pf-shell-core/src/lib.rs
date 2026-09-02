@@ -3671,7 +3671,8 @@ impl ShellCore {
                             pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
-                        .with_type_role(TypeRole::Caption),
+                        .with_type_role(TypeRole::Caption)
+                        .with_fixed_paint_scale(),
                     );
                 }
                 content.push(n);
@@ -4047,7 +4048,8 @@ impl ShellCore {
                             pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
-                        .with_type_role(TypeRole::Caption),
+                        .with_type_role(TypeRole::Caption)
+                        .with_fixed_paint_scale(),
                     );
                 }
                 let title_y = card.bounds.y
@@ -6491,7 +6493,8 @@ fn plate_art_nodes(
         )
         .with_type_role(TypeRole::Plate)
         .with_ink_token(plate_ink)
-        .with_text_align(TextAlign::Center),
+        .with_text_align(TextAlign::Center)
+        .with_fixed_paint_scale(),
     );
     nodes.push(
         node(
@@ -6506,7 +6509,8 @@ fn plate_art_nodes(
         )
         .with_type_role(TypeRole::Eyebrow)
         .with_ink_token(plate_ink)
-        .with_text_align(TextAlign::Center),
+        .with_text_align(TextAlign::Center)
+        .with_fixed_paint_scale(),
     );
     if !detail {
         let title = if home {
@@ -6678,7 +6682,8 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption),
+            .with_type_role(TypeRole::Caption)
+            .with_fixed_paint_scale(),
         );
         if show_reason {
             let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
@@ -6694,7 +6699,8 @@ fn add_unavailable_card_cues(
                     reason_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Caption),
+                .with_type_role(TypeRole::Caption)
+                .with_fixed_paint_scale(),
             );
         }
     }
@@ -6713,7 +6719,8 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption),
+            .with_type_role(TypeRole::Caption)
+            .with_fixed_paint_scale(),
         );
         return;
     }
@@ -6755,7 +6762,8 @@ fn add_unavailable_card_cues(
             badge_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
-        .with_type_role(TypeRole::Caption),
+        .with_type_role(TypeRole::Caption)
+        .with_fixed_paint_scale(),
     );
     if !show_reason {
         return;
@@ -6798,7 +6806,8 @@ fn add_unavailable_card_cues(
             reason_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
-        .with_type_role(TypeRole::Caption),
+        .with_type_role(TypeRole::Caption)
+        .with_fixed_paint_scale(),
     );
 }
 

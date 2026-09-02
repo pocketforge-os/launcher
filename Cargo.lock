@@ -444,7 +444,7 @@ dependencies = [
 [[package]]
 name = "pf-framehost"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "libc",
  "pf-ports",
@@ -455,7 +455,7 @@ dependencies = [
 [[package]]
 name = "pf-framehost-wayland"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "libc",
  "pf-ports",
@@ -470,7 +470,7 @@ dependencies = [
 [[package]]
 name = "pf-input-map"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-ports",
  "pf-scene",
@@ -481,7 +481,7 @@ dependencies = [
 [[package]]
 name = "pf-ports"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-render",
  "pf-scene",
@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "serde",
  "serde_json",
@@ -499,7 +499,7 @@ dependencies = [
 [[package]]
 name = "pf-prefs-port"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-ports",
  "pf-prefs",
@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "pf-prefsd"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "libc",
  "pf-prefs",
@@ -522,7 +522,7 @@ dependencies = [
 [[package]]
 name = "pf-render"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "cosmic-text",
  "pf-scene",
@@ -535,7 +535,7 @@ dependencies = [
 [[package]]
 name = "pf-scene"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "taffy",
 ]
@@ -543,7 +543,7 @@ dependencies = [
 [[package]]
 name = "pf-session-authority"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-ports",
  "pf-wire",
@@ -554,7 +554,7 @@ dependencies = [
 [[package]]
 name = "pf-session-client"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-ports",
  "pf-session-authority",
@@ -607,7 +607,7 @@ dependencies = [
 [[package]]
 name = "pf-theme"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 dependencies = [
  "pf-scene",
  "roxmltree",
@@ -618,7 +618,7 @@ dependencies = [
 [[package]]
 name = "pf-wire"
 version = "0.0.1"
-source = "git+https://github.com/pocketforge-os/runtime.git?rev=f7559fca3ad66f8933f3de977b0fabe6297441a2#f7559fca3ad66f8933f3de977b0fabe6297441a2"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=ba8ccc962b264227490162ef07a9eaf6d334f9b8#ba8ccc962b264227490162ef07a9eaf6d334f9b8"
 
 [[package]]
 name = "pkg-config"

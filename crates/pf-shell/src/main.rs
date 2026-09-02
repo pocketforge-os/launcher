@@ -2206,12 +2206,340 @@ fn raster_guard_record(
     text_scale_percent: u16,
     baseline_record_only: bool,
 ) -> Result<String, String> {
-    match assert_raster_text_paint_contained_and_complete(scene, metrics, base, text_scale_percent)
+    match assert_scene_occlusion_safe(scene, metrics, base, text_scale_percent)
+        .and_then(|()| {
+            assert_raster_text_paint_contained_and_complete(
+                scene,
+                metrics,
+                base,
+                text_scale_percent,
+            )
+        })
         .and_then(|()| assert_raster_text_legible(scene, metrics, base, text_scale_percent))
     {
         Ok(()) => Ok("PASS".to_owned()),
         Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
         Err(error) => Err(error),
+    }
+}
+
+const OVERLAY_ROLE_MARKER: &str = "--scene-overlay-role";
+const UNDERLAY_ROLE_MARKER: &str = "--scene-underlay-role";
+
+struct OcclusionTextInk {
+    bounds: Option<pf_scene::Bounds>,
+    /// One bit per full-resolution surface pixel. Keeping the common surface
+    /// coordinate space makes pair checks a cheap word-wise AND.
+    mask: Vec<u64>,
+}
+
+fn text_ink_intersects(earlier: &OcclusionTextInk, later: &OcclusionTextInk) -> bool {
+    // Bounds are only a prefilter: sparse and multi-line text can leave large
+    // unpainted holes inside its ink rectangle.
+    earlier
+        .bounds
+        .zip(later.bounds)
+        .is_some_and(|(a, b)| intersects_bounds(a, b))
+        && earlier
+            .mask
+            .iter()
+            .zip(&later.mask)
+            .any(|(a, b)| a & b != 0)
+}
+
+struct OcclusionPaintedNode<'a> {
+    node: &'a Node,
+    ancestors: Vec<&'a str>,
+}
+
+fn collect_occlusion_nodes<'a>(
+    node: &'a Node,
+    ancestors: &mut Vec<&'a str>,
+    out: &mut Vec<OcclusionPaintedNode<'a>>,
+) {
+    out.push(OcclusionPaintedNode {
+        node,
+        ancestors: ancestors.clone(),
+    });
+    ancestors.push(node.id.as_str());
+    for child in &node.children {
+        collect_occlusion_nodes(child, ancestors, out);
+    }
+    ancestors.pop();
+}
+
+fn occlusion_nodes_related(a: &OcclusionPaintedNode<'_>, b: &OcclusionPaintedNode<'_>) -> bool {
+    a.ancestors.contains(&b.node.id.as_str())
+        || b.ancestors.contains(&a.node.id.as_str())
+        // A shared component owns the geometry of all its descendants. The
+        // scene root is only a paint-order container, not shared ownership.
+        || a.ancestors
+            .iter()
+            .skip(1)
+            .any(|ancestor| b.ancestors.contains(ancestor))
+}
+
+fn occlusion_node_is_text(node: &Node) -> bool {
+    matches!(node.role, Role::Text | Role::Heading) && !node.accessible_label.trim().is_empty()
+}
+
+fn occlusion_node_is_content(node: &Node) -> bool {
+    occlusion_node_is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. })
+}
+
+fn occlusion_node_declares_overlay(node: &Node) -> bool {
+    node.ink_token.as_deref() == Some(OVERLAY_ROLE_MARKER)
+}
+
+fn occlusion_node_declares_underlay(node: &Node) -> bool {
+    node.ink_token.as_deref() == Some(UNDERLAY_ROLE_MARKER)
+}
+
+fn occlusion_fill_value_is_opaque(value: &str) -> bool {
+    let value = value.trim();
+    if value == "transparent" {
+        return false;
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        return hex.len() == 6 || (hex.len() == 8 && hex[6..].eq_ignore_ascii_case("ff"));
+    }
+    if let Some(rgba) = value.strip_prefix("rgba(") {
+        let Some(rgba) = rgba.strip_suffix(')') else {
+            return true;
+        };
+        let mut components = rgba.split(',').map(str::trim);
+        let parsed = match (
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+            components.next(),
+        ) {
+            (Some(red), Some(green), Some(blue), Some(alpha), None) => match (
+                red.parse::<f32>(),
+                green.parse::<f32>(),
+                blue.parse::<f32>(),
+                alpha.parse::<f32>(),
+            ) {
+                (Ok(red), Ok(green), Ok(blue), Ok(alpha)) => Some([red, green, blue, alpha]),
+                _ => None,
+            },
+            _ => None,
+        };
+        return parsed.is_none_or(|components| {
+            let [red, green, blue, alpha] = components;
+            !components.iter().all(|component| component.is_finite())
+                || !(0.0..=255.0).contains(&red)
+                || !(0.0..=255.0).contains(&green)
+                || !(0.0..=255.0).contains(&blue)
+                || !(0.0..=1.0).contains(&alpha)
+                || alpha >= 1.0
+        });
+    }
+    !value.contains("gradient")
+}
+
+fn occlusion_node_has_opaque_fill(node: &Node, base: pf_theme::Base) -> bool {
+    if occlusion_node_is_text(node) || matches!(node.content, pf_scene::NodeContent::Image { .. }) {
+        return false;
+    }
+    let theme = pf_theme::flagship();
+    let Ok(value) = theme.resolve(base, &node.style_token) else {
+        return false;
+    };
+    occlusion_fill_value_is_opaque(value)
+}
+
+fn assert_fade_is_declared_gradient(node: &Node) -> Result<(), String> {
+    if node.ink_token.as_deref() != Some(OVERLAY_ROLE_MARKER) {
+        return Err("library-grid-footer-fade: missing explicit overlay marker".into());
+    }
+    let pf_scene::NodeContent::Image { source, .. } = &node.content else {
+        return Err("library-grid-footer-fade: overlay must remain an image gradient".into());
+    };
+    let decoder = png::Decoder::new(std::io::Cursor::new(source.bytes.as_ref()));
+    let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut pixels)
+        .map_err(|error| error.to_string())?;
+    let bytes = &pixels[..info.buffer_size()];
+    let alphas = bytes.chunks_exact(4).map(|pixel| pixel[3]);
+    let min = alphas.clone().min().unwrap_or(255);
+    let max = alphas.max().unwrap_or(255);
+    if min == 255 || min == max {
+        return Err(format!(
+            "library-grid-footer-fade: overlay must be non-opaque and gradient; alpha={min}..{max}"
+        ));
+    }
+    Ok(())
+}
+
+fn occlusion_isolate_node_path(current: &Node, replacement: &Node) -> Option<Node> {
+    if current.id == replacement.id {
+        return Some(replacement.clone());
+    }
+
+    let child = current
+        .children
+        .iter()
+        .find_map(|child| occlusion_isolate_node_path(child, replacement))?;
+    let mut ancestor = current.clone();
+    ancestor.role = Role::Group;
+    ancestor.accessible_label.clear();
+    ancestor.style_token = "--color-transparent".into();
+    ancestor.content = pf_scene::NodeContent::Label;
+    ancestor.ink_token = None;
+    ancestor.border_token = None;
+    ancestor.border_width = 0.0;
+    ancestor.elevation = pf_scene::Elevation::None;
+    ancestor.children = vec![child];
+    Some(ancestor)
+}
+
+// Render surfaces are far smaller than f32's exact-integer range.
+#[allow(clippy::cast_precision_loss)]
+fn occlusion_text_ink(
+    scene: &pf_scene::Scene,
+    rasterizer: &mut Rasterizer,
+    metrics: SurfaceMetrics,
+    node: &Node,
+) -> Result<OcclusionTextInk, String> {
+    let mut root = occlusion_isolate_node_path(scene.root(), node)
+        .ok_or_else(|| format!("{}: missing from scene tree", node.id.as_str()))?;
+    let root_id = root.id.clone();
+    let painted_scene =
+        pf_scene::Scene::new(root.clone(), root_id.clone()).map_err(|error| error.to_string())?;
+    let mut blank = node.clone();
+    blank.role = Role::Group;
+    blank.accessible_label.clear();
+    blank.content = pf_scene::NodeContent::Label;
+    root = occlusion_isolate_node_path(scene.root(), &blank)
+        .ok_or_else(|| format!("{}: missing from scene tree", node.id.as_str()))?;
+    let blank_scene = pf_scene::Scene::new(root, root_id).map_err(|error| error.to_string())?;
+    let painted = rasterizer
+        .render(&painted_scene, metrics)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let blank = rasterizer
+        .render(&blank_scene, metrics)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let width = painted.width as usize;
+    let pixel_count = painted.rgba.len() / 4;
+    let mut mask = vec![0_u64; pixel_count.div_ceil(64)];
+    let mut extent: Option<(usize, usize, usize, usize)> = None;
+    for (pixel, (ink, background)) in painted
+        .rgba
+        .chunks_exact(4)
+        .zip(blank.rgba.chunks_exact(4))
+        .enumerate()
+    {
+        if ink == background {
+            continue;
+        }
+        mask[pixel / 64] |= 1_u64 << (pixel % 64);
+        let (x, y) = (pixel % width, pixel / width);
+        extent = Some(extent.map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
+            (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+        }));
+    }
+    let bounds = extent.map(|(min_x, min_y, max_x, max_y)| {
+        pf_scene::Bounds::new(
+            min_x as f32,
+            min_y as f32,
+            (max_x - min_x + 1) as f32,
+            (max_y - min_y + 1) as f32,
+        )
+    });
+    Ok(OcclusionTextInk { bounds, mask })
+}
+
+fn evaluate_occlusion_pair(
+    earlier: &OcclusionPaintedNode<'_>,
+    later: &OcclusionPaintedNode<'_>,
+    ink_by_id: &BTreeMap<&str, OcclusionTextInk>,
+    base: pf_theme::Base,
+    failures: &mut Vec<String>,
+) {
+    if occlusion_nodes_related(earlier, later) {
+        return;
+    }
+    if occlusion_node_is_content(earlier.node)
+        && intersects_bounds(earlier.node.bounds, later.node.bounds)
+        && !occlusion_node_declares_underlay(earlier.node)
+        && occlusion_node_has_opaque_fill(later.node, base)
+        && !occlusion_node_declares_overlay(later.node)
+    {
+        failures.push(format!(
+            "opaque fill {} paints over foreign content {}",
+            later.node.id.as_str(),
+            earlier.node.id.as_str()
+        ));
+    }
+    if occlusion_node_is_text(earlier.node)
+        && occlusion_node_is_text(later.node)
+        && !occlusion_node_declares_overlay(earlier.node)
+        && !occlusion_node_declares_overlay(later.node)
+        && text_ink_intersects(
+            &ink_by_id[earlier.node.id.as_str()],
+            &ink_by_id[later.node.id.as_str()],
+        )
+    {
+        failures.push(format!(
+            "text {} intersects foreign text {}",
+            earlier.node.id.as_str(),
+            later.node.id.as_str()
+        ));
+    }
+}
+
+fn intersects_bounds(a: pf_scene::Bounds, b: pf_scene::Bounds) -> bool {
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+}
+
+fn assert_scene_occlusion_safe(
+    scene: &pf_scene::Scene,
+    metrics: SurfaceMetrics,
+    base: pf_theme::Base,
+    text_scale: u16,
+) -> Result<(), String> {
+    let mut nodes = Vec::new();
+    collect_occlusion_nodes(scene.root(), &mut Vec::new(), &mut nodes);
+    if let Some(fade) = nodes
+        .iter()
+        .find(|entry| entry.node.id.as_str() == "library-grid-footer-fade")
+    {
+        assert_fade_is_declared_gradient(fade.node)?;
+    }
+
+    // Text line boxes deliberately include padding for layout and focus geometry.
+    // Compare the pixels the renderer actually paints, not those padded boxes.
+    let mut rasterizer = Rasterizer::new();
+    rasterizer.set_theme_base(base);
+    rasterizer
+        .set_text_scale(f32::from(text_scale) / 100.0)
+        .map_err(|error| format!("render: {error:?}"))?;
+    let mut ink_by_id = BTreeMap::new();
+    for entry in &nodes {
+        if occlusion_node_is_text(entry.node) {
+            ink_by_id.insert(
+                entry.node.id.as_str(),
+                occlusion_text_ink(scene, &mut rasterizer, metrics, entry.node)?,
+            );
+        }
+    }
+    let mut failures = Vec::new();
+    for (later_index, later) in nodes.iter().enumerate() {
+        for earlier in &nodes[..later_index] {
+            evaluate_occlusion_pair(earlier, later, &ink_by_id, base, &mut failures);
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "scene occlusion guard failed:\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -3889,6 +4217,336 @@ mod durable_tests {
             failure.contains("occluded-label") && failure.contains("occluded-by-later-paint"),
             "unexpected guard verdict: {failure}"
         );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_prompt_bar_panel_shape() {
+        let root_id = pf_scene::NodeId::new("panel-occlusion-probe").unwrap();
+        let overlap = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("foreign-card-title").unwrap(),
+                Role::Text,
+                "Foreign card title",
+                overlap,
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("invented-prompt-panel").unwrap(),
+                Role::Group,
+                "",
+                overlap,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("invented-prompt-panel")
+                && failure.contains("foreign-card-title")
+                && failure.contains("opaque fill"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_classifies_fully_opaque_rgba_panel_fill() {
+        assert!(occlusion_fill_value_is_opaque("rgba(16, 15, 13, 1)"));
+        assert!(occlusion_fill_value_is_opaque(" rgba(16, 15, 13, 1.0) "));
+        assert!(occlusion_fill_value_is_opaque("rgba(16, nope, 13, 0.55)"));
+        assert!(occlusion_fill_value_is_opaque(
+            "rgba(16, 15, 13, 0.55) malformed gradient"
+        ));
+
+        // Couple the representation pin above to the complete guard path: an
+        // opaque panel classified by that predicate must become a scene
+        // failure, rather than merely producing an unused boolean.
+        let root_id = pf_scene::NodeId::new("rgba-panel-occlusion-probe").unwrap();
+        let overlap = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("rgba-covered-label").unwrap(),
+                Role::Text,
+                "Foreign content",
+                overlap,
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("rgba-opaque-panel").unwrap(),
+                Role::Group,
+                "",
+                overlap,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("rgba-opaque-panel")
+                && failure.contains("rgba-covered-label")
+                && failure.contains("opaque fill"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_keeps_translucent_rgba_panel_fill_non_opaque() {
+        assert!(!occlusion_fill_value_is_opaque("rgba(23, 21, 18, 0.55)"));
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_foreign_text_intersection() {
+        let root_id = pf_scene::NodeId::new("text-occlusion-probe").unwrap();
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("grown-hero-title").unwrap(),
+                Role::Heading,
+                "A hero title grown by text scale",
+                pf_scene::Bounds::new(20.0, 20.0, 260.0, 64.0),
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("fixed-hero-status").unwrap(),
+                Role::Text,
+                "Ready",
+                pf_scene::Bounds::new(20.0, 20.0, 260.0, 64.0),
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("grown-hero-title")
+                && failure.contains("fixed-hero-status")
+                && failure.contains("foreign text"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_preserves_pressed_ancestor_transform_for_text_ink() {
+        let root_id = pf_scene::NodeId::new("transformed-text-occlusion-probe").unwrap();
+        let mut pressed_group = Node::new(
+            pf_scene::NodeId::new("pressed-offset-group").unwrap(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(180.0, 20.0, 20.0, 48.0),
+            "--color-transparent",
+        );
+        pressed_group.state.pressed = true;
+        pressed_group.children = vec![Node::new(
+            pf_scene::NodeId::new("transformed-label").unwrap(),
+            Role::Text,
+            "Shift",
+            pf_scene::Bounds::new(20.0, 20.0, 100.0, 48.0),
+            "--color-transparent",
+        )];
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            pressed_group,
+            Node::new(
+                pf_scene::NodeId::new("stationary-label").unwrap(),
+                Role::Text,
+                "X",
+                pf_scene::Bounds::new(70.0, 20.0, 40.0, 48.0),
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("transformed-label")
+                && failure.contains("stationary-label")
+                && failure.contains("foreign text"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_rejects_text_ink_across_disjoint_node_bounds() {
+        let title_bounds = pf_scene::Bounds::new(20.0, 20.0, 100.0, 48.0);
+        let status_bounds = pf_scene::Bounds::new(121.0, 20.0, 100.0, 48.0);
+        assert!(title_bounds.x + title_bounds.width < status_bounds.x);
+        let root_id = pf_scene::NodeId::new("disjoint-bounds-occlusion-probe").unwrap();
+        let mut grown_title = Node::new(
+            pf_scene::NodeId::new("grown-title-component").unwrap(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(320.0, 20.0, 20.0, 48.0),
+            "--color-transparent",
+        );
+        grown_title.state.pressed = true;
+        grown_title.children = vec![Node::new(
+            pf_scene::NodeId::new("grown-title-disjoint-box").unwrap(),
+            Role::Heading,
+            "MMMMMMMMMMMMMMMM",
+            title_bounds,
+            "--color-transparent",
+        )];
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            grown_title,
+            Node::new(
+                pf_scene::NodeId::new("fixed-status-disjoint-box").unwrap(),
+                Role::Text,
+                "Ready",
+                status_bounds,
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let mut rasterizer = Rasterizer::new();
+        rasterizer.set_theme_base(pf_theme::Base::Dusk);
+        rasterizer.set_text_scale(2.0).unwrap();
+        let title_ink = occlusion_text_ink(
+            &scene,
+            &mut rasterizer,
+            metrics,
+            &scene.root().children[0].children[0],
+        )
+        .unwrap();
+        let status_ink =
+            occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[1])
+                .unwrap();
+        assert!(
+            text_ink_intersects(&title_ink, &status_ink),
+            "the scaled scene fixture must paint colliding ink"
+        );
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 200).unwrap_err();
+        assert!(
+            failure.contains("grown-title-disjoint-box")
+                && failure.contains("fixed-status-disjoint-box")
+                && failure.contains("foreign text"),
+            "unexpected guard verdict: {failure}"
+        );
+    }
+
+    #[test]
+    fn scene_occlusion_guard_accepts_text_nested_in_multiline_whitespace() {
+        let root_id = pf_scene::NodeId::new("text-whitespace-probe").unwrap();
+        let multiline = Node::new(
+            pf_scene::NodeId::new("multiline-label").unwrap(),
+            Role::Text,
+            "A deliberately wide first line\nX",
+            pf_scene::Bounds::new(20.0, 20.0, 220.0, 72.0),
+            "--color-transparent",
+        );
+        let nested = Node::new(
+            pf_scene::NodeId::new("gap-label").unwrap(),
+            Role::Text,
+            "Gap",
+            pf_scene::Bounds::new(100.0, 47.0, 80.0, 24.0),
+            "--color-transparent",
+        );
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 280.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![multiline, nested]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 280.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let mut rasterizer = Rasterizer::new();
+        rasterizer.set_theme_base(pf_theme::Base::Dusk);
+        let first = occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[0])
+            .unwrap();
+        let second =
+            occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[1])
+                .unwrap();
+        assert!(intersects_bounds(
+            first.bounds.unwrap(),
+            second.bounds.unwrap()
+        ));
+        assert!(!text_ink_intersects(&first, &second));
+        assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap();
     }
 
     #[test]

@@ -2992,7 +2992,7 @@ impl ShellCore {
             Presentation::FirstRun => self.first_run_nodes(&mut children, w),
             Presentation::Crash => self.crash_nodes(&mut children, w, h),
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
-            _ => self.route_nodes(&mut children, w, h),
+            _ => self.route_nodes(&mut children, metrics),
         }
         let supplied_footer = footer.to_owned();
         let footer = match self.route {
@@ -3196,7 +3196,8 @@ impl ShellCore {
             .map(|binding| format!("{} {label}", binding.binding))
     }
 
-    fn route_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
+    fn route_nodes(&self, out: &mut Vec<Node>, metrics: SurfaceMetrics) {
+        let (w, h) = (metrics.logical_width, metrics.logical_height);
         let heading = match self.route {
             Route::Home => {
                 if self.just_returned {
@@ -3304,8 +3305,13 @@ impl ShellCore {
                 .min(w - 96.0)
             };
             let hero_status_height = scaled_text_box_height(32.0, self.text_scale);
-            let mut content = vec![
-                node(
+            // At 150% the responsive hero stack rises by 24 px. Keep its eyebrow
+            // immediately above the title; at 200% the chrome consumes that slot,
+            // so omit the decorative eyebrow rather than overlap either region.
+            if self.text_scale == 150 {
+                heading.bounds.y = vertical.title_y - heading.bounds.height - 8.0;
+            }
+            let mut content = vec![node(
                     "hero-wash",
                     Role::Group,
                     "Ridgeline aura: rgba(201,111,87,0.5) to transparent 68%; rgba(58,43,78,0.65) to transparent 70%; layer opacity 0.55",
@@ -3319,8 +3325,11 @@ impl ShellCore {
                 // The wash is the ambient image beneath the whole hero composition,
                 // not foreign foreground content. Keep that role explicit in the
                 // scene graph so paint-order guards never have to infer it by id.
-                .with_ink_token("--scene-underlay-role"),
-                heading,
+                .with_ink_token("--scene-underlay-role")];
+            if self.text_scale < 200 {
+                content.push(heading);
+            }
+            content.extend([
                 node(
                     "hero-title",
                     Role::Heading,
@@ -3346,7 +3355,7 @@ impl ShellCore {
                 )
                 .with_type_role(TypeRole::Label)
                 .with_ink_token(COLOR_STATUS_READY_TOKEN),
-            ];
+            ]);
             let attention = self.attention_message.as_deref().or_else(|| {
                 (self.presentation == Presentation::ForcedClose)
                     .then_some("The previous game didn't close cleanly")
@@ -3567,6 +3576,13 @@ impl ShellCore {
             out.extend(content);
         } else if self.route == Route::Library {
             let geometry = library_geometry(w);
+            // The chrome row is laid out inside the safe area, so its bottom moves
+            // with the top inset. Derive every Library row from that shifted edge;
+            // the subtractions preserve the existing zero-inset gaps exactly.
+            let chrome_bottom = metrics.safe_insets.top + STATUS_BAR_HEIGHT;
+            let library_head_top = chrome_bottom + (LIB_HEAD_TOP - STATUS_BAR_HEIGHT);
+            let compact_toolbar_top =
+                chrome_bottom + (COMPACT_LIBRARY_TOOLBAR_TOP - STATUS_BAR_HEIGHT);
             let games = self
                 .items
                 .iter()
@@ -3602,7 +3618,7 @@ impl ShellCore {
                 Role::Button,
                 &format!("⌕  Search {} titles", self.items.len()),
                 LIBRARY_SIDE_MARGIN,
-                LIB_HEAD_TOP,
+                library_head_top,
                 search_width,
                 search_height,
                 STATE_REST_SURFACE_TOKEN,
@@ -3615,7 +3631,7 @@ impl ShellCore {
                     Role::Text,
                     &format!("⌕  Search {} titles", self.items.len()),
                     LIBRARY_SIDE_MARGIN + SPACE_4,
-                    LIB_HEAD_TOP + 8.0,
+                    library_head_top + 8.0,
                     search_width - 32.0,
                     scaled_text_box_height(28.0, self.text_scale),
                     STATE_REST_SURFACE_TOKEN,
@@ -3630,9 +3646,9 @@ impl ShellCore {
                     LIBRARY_SIDE_MARGIN + search_width + LIBRARY_TOOLBAR_GAP
                 };
                 let toolbar_top = if compact_toolbar {
-                    COMPACT_LIBRARY_TOOLBAR_TOP
+                    compact_toolbar_top
                 } else {
-                    LIB_HEAD_TOP
+                    library_head_top
                 };
                 let toolbar_width = if compact_toolbar {
                     w - 2.0 * LIBRARY_SIDE_MARGIN
@@ -3798,20 +3814,38 @@ impl ShellCore {
             } else {
                 scaled_text_box_height(28.0, self.text_scale) + CARD_CAPTION_GAP
             };
-            let row_height = LIB_CARD_ART_HEIGHT
+            let card_top =
+                chrome_bottom + (geometry.scaled_card_top(self.text_scale) - STATUS_BAR_HEIGHT);
+            // Compact enlarged-text cells have less room below the derived toolbar.
+            // Keep the complete label chain above the prompt bar by yielding image
+            // height; the default cell retains the design-token art height exactly.
+            let library_card_art_height = LIB_CARD_ART_HEIGHT.min(
+                (h - PROMPTS_AREA_HEIGHT
+                    - card_top
+                    - CARD_LABEL_GAP
+                    - library_cue_slot_height
+                    - library_title_height)
+                    .max(0.0),
+            );
+            let row_height = library_card_art_height
                 + CARD_LABEL_GAP
                 + library_cue_slot_height
                 + library_title_height
                 + SPACE_5;
-            let card_top = geometry.scaled_card_top(self.text_scale);
             let mut visible_rows: usize = 1;
-            let card_content_height = LIB_CARD_ART_HEIGHT
+            let card_content_height = library_card_art_height
                 + CARD_LABEL_GAP
                 + library_cue_slot_height
                 + library_title_height;
-            while if geometry.columns == 6 && self.text_scale == 100 {
+            while if geometry.columns == 6
+                && self.text_scale == 100
+                && metrics.safe_insets.top == 0.0
+            {
+                // Preserve the desktop mockup's zero-inset two-row crop exactly.
                 card_top + visible_rows as f32 * row_height < h - PROMPTS_AREA_HEIGHT
             } else {
+                // Once chrome consumes a top inset, admit only rows whose complete
+                // derived content remains above the fixed prompt area.
                 card_top + visible_rows as f32 * row_height + card_content_height
                     <= h - PROMPTS_AREA_HEIGHT
             } {
@@ -3849,7 +3883,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT,
+                    library_card_art_height,
                     self.focus == i + 5,
                     self.text_scale,
                 );
@@ -3861,7 +3895,7 @@ impl ShellCore {
                     card.bounds.x,
                     card.bounds.y,
                     geometry.card_width,
-                    LIB_CARD_ART_HEIGHT,
+                    library_card_art_height,
                     None,
                     self.text_scale,
                     true,
@@ -3898,8 +3932,10 @@ impl ShellCore {
                         .with_type_role(TypeRole::Caption),
                     );
                 }
-                let title_y =
-                    card.bounds.y + LIB_CARD_ART_HEIGHT + CARD_LABEL_GAP + library_cue_slot_height;
+                let title_y = card.bounds.y
+                    + library_card_art_height
+                    + CARD_LABEL_GAP
+                    + library_cue_slot_height;
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
@@ -11467,6 +11503,58 @@ mod tests {
         }
         let toolbar_gap = chips[0].bounds.x - search.bounds.x - search.bounds.width;
         assert!((toolbar_gap - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn inset_library_search_derives_from_shifted_chrome_bottom() {
+        let mut core = fixture_core(vec![]);
+        core.go(Route::Library);
+        let inset_metrics = SurfaceMetrics {
+            logical_width: 480.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: pf_scene::Insets {
+                top: 32.0,
+                left: 24.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(inset_metrics, "").unwrap();
+        let chrome = node_by_id(scene.root(), "rooms-layout-anchor").unwrap();
+        let search = node_by_id(scene.root(), "library-search").unwrap();
+        let room_bounds = ["room-home", "room-library", "room-settings"]
+            .map(|id| (id, node_by_id(scene.root(), id).unwrap().bounds));
+        eprintln!(
+            "safe-inset diagnosis: chrome={:?}, rooms={room_bounds:?}, library-search={:?}",
+            chrome.bounds, search.bounds
+        );
+
+        let existing_gap = LIB_HEAD_TOP - STATUS_BAR_HEIGHT;
+        assert_eq!(
+            search.bounds.y,
+            inset_metrics.safe_insets.top + chrome.bounds.height + existing_gap,
+            "Library search must derive from the safe-inset-shifted chrome row"
+        );
+
+        let zero_scene = core
+            .scene(
+                SurfaceMetrics {
+                    safe_insets: Default::default(),
+                    ..inset_metrics
+                },
+                "",
+            )
+            .unwrap();
+        assert_eq!(
+            node_by_id(zero_scene.root(), "library-search")
+                .unwrap()
+                .bounds
+                .y,
+            LIB_HEAD_TOP,
+            "zero-inset Library geometry must remain byte-identical"
+        );
     }
 
     #[test]

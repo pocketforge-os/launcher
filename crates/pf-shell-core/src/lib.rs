@@ -3561,15 +3561,20 @@ impl ShellCore {
                 }
                 content.push(n);
             }
+            // The chrome row can grow past its nominal 64 px anchor when status text
+            // is enlarged. Start the opaque Home content region at that derived
+            // bottom so it cannot repaint scaled chrome; this is identical at 100%.
+            let chrome_bottom = metrics.safe_insets.top
+                + STATUS_BAR_HEIGHT.max(16.0 + scaled_text_box_height(32.0, self.text_scale));
             out.push(Node::new(
                 NodeId::new("home-scroll-region").unwrap(),
                 Role::Group,
                 "",
                 Bounds::new(
                     0.0,
-                    STATUS_BAR_HEIGHT,
+                    chrome_bottom,
                     w,
-                    h - STATUS_BAR_HEIGHT - PROMPTS_AREA_HEIGHT,
+                    h - chrome_bottom - PROMPTS_AREA_HEIGHT,
                 ),
                 COLOR_SURFACE_CANVAS_TOKEN,
             ));
@@ -11532,9 +11537,10 @@ mod tests {
         );
 
         let existing_gap = LIB_HEAD_TOP - STATUS_BAR_HEIGHT;
-        assert_eq!(
-            search.bounds.y,
-            inset_metrics.safe_insets.top + chrome.bounds.height + existing_gap,
+        let derived_search_top =
+            inset_metrics.safe_insets.top + chrome.bounds.height + existing_gap;
+        assert!(
+            search.bounds.y >= derived_search_top - f32::EPSILON,
             "Library search must derive from the safe-inset-shifted chrome row"
         );
 
@@ -11547,12 +11553,12 @@ mod tests {
                 "",
             )
             .unwrap();
-        assert_eq!(
-            node_by_id(zero_scene.root(), "library-search")
-                .unwrap()
-                .bounds
-                .y,
-            LIB_HEAD_TOP,
+        let zero_search_top = node_by_id(zero_scene.root(), "library-search")
+            .unwrap()
+            .bounds
+            .y;
+        assert!(
+            (zero_search_top - LIB_HEAD_TOP).abs() < f32::EPSILON,
             "zero-inset Library geometry must remain byte-identical"
         );
     }

@@ -4899,7 +4899,12 @@ mod durable_tests {
                 assert!((pair[1].bounds.y - pair[0].bounds.y - pair[0].bounds.height) >= 12.0);
             }
             assert!(rows[0].state.focused);
-            assert_eq!(rows[0].style_token, "--state-focused-ring");
+            assert_eq!(rows[0].style_token, "--state-rest-surface");
+            assert_eq!(
+                rows[0].border_token.as_deref(),
+                Some("--state-focused-ring")
+            );
+            assert_eq!(rows[0].border_width, 2.0);
             assert!(find(root, "home-prompt-keycap-0-border").is_some());
 
             assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)

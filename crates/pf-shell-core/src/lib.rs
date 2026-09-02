@@ -4181,11 +4181,7 @@ impl ShellCore {
                     result_top,
                     column_width,
                     row_height,
-                    if self.focus == result {
-                        STATE_FOCUSED_RING_TOKEN
-                    } else {
-                        STATE_REST_SURFACE_TOKEN
-                    },
+                    STATE_REST_SURFACE_TOKEN,
                 )
                 .with_type_role(TypeRole::Label)
                 .with_corner_radius(RADIUS_M * scale)
@@ -4217,6 +4213,10 @@ impl ShellCore {
                     .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                 ]);
                 row.state.focused = self.focus == result;
+                if row.state.focused {
+                    row.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
+                    row.border_width = 2.0;
+                }
                 row.action = Some(NodeAction::Activate);
                 out.push(row);
             }

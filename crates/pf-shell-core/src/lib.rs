@@ -3653,6 +3653,7 @@ impl ShellCore {
                     Some(h - PROMPTS_AREA_HEIGHT),
                     self.text_scale,
                     vertical.show_card_caption,
+                    true,
                 );
                 if item.favorite {
                     // The star is artwork inside the fixed card box, so accessible text
@@ -4018,6 +4019,7 @@ impl ShellCore {
                     library_card_art_height,
                     None,
                     self.text_scale,
+                    true,
                     true,
                 );
                 card.children.retain(|child| {
@@ -6624,14 +6626,23 @@ fn add_unavailable_card_cues(
     footer_top: Option<f32>,
     text_scale: u16,
     show_reason: bool,
+    fixed_scale_on_art_cues: bool,
 ) {
+    let mark_on_art = |node: Node| {
+        if fixed_scale_on_art_cues {
+            node.with_fixed_paint_scale()
+        } else {
+            node
+        }
+    };
     let home = context == "home-card";
     let scale_aware_card = context != "favorite-card" && context != "detail-art";
-    let library_cue_slot_height = if scale_aware_card && !home && text_scale != 100 {
-        scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
-    } else {
-        0.0
-    };
+    let library_cue_slot_height =
+        if !fixed_scale_on_art_cues && scale_aware_card && !home && text_scale != 100 {
+            scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
+        } else {
+            0.0
+        };
     let title_y = y + art_height + CARD_LABEL_GAP + library_cue_slot_height;
     let title_height = if scale_aware_card {
         scaled_text_box_height(28.0, text_scale)
@@ -6640,7 +6651,7 @@ fn add_unavailable_card_cues(
     };
     let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
-        if scale_aware_card && !home && text_scale != 100 {
+        if !fixed_scale_on_art_cues && scale_aware_card && !home && text_scale != 100 {
             (
                 measured_text_advance(base_width, text_scale)
                     .max(text_node_box_width(caption_text_width(text, text_scale)))
@@ -6654,7 +6665,7 @@ fn add_unavailable_card_cues(
     let badge_top = |badge_height: f32| {
         if home {
             y + art_height - 46.0
-        } else if scale_aware_card && text_scale != 100 {
+        } else if !fixed_scale_on_art_cues && scale_aware_card && text_scale != 100 {
             y + art_height + CARD_LABEL_GAP
         } else {
             y + art_height - 18.0 - badge_height
@@ -6668,10 +6679,14 @@ fn add_unavailable_card_cues(
                 .any(|requirement| !requirement.optional && requirement.capability == "network")
         })
     {
-        let badge_scale = if home { 100 } else { text_scale };
+        let badge_scale = if fixed_scale_on_art_cues {
+            100
+        } else {
+            text_scale
+        };
         let badge = scale_aware_single_line("⊘ Network", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 92.0, 28.0);
-        nodes.push(
+        nodes.push(mark_on_art(
             node(
                 &format!("{context}-badge-{}", item.id),
                 Role::Text,
@@ -6682,12 +6697,11 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption)
-            .with_fixed_paint_scale(),
-        );
+            .with_type_role(TypeRole::Caption),
+        ));
         if show_reason {
             let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
-            let (_, reason_height) = cue_box(&reason, width, 20.0);
+            let reason_height = scaled_text_box_height(20.0, text_scale);
             nodes.push(
                 node(
                     &format!("{context}-reason-{}", item.id),
@@ -6699,16 +6713,19 @@ fn add_unavailable_card_cues(
                     reason_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Caption)
-                .with_fixed_paint_scale(),
+                .with_type_role(TypeRole::Caption),
             );
         }
     }
     if matches!(availability, Availability::IncompatibleRuntime { .. }) {
-        let badge_scale = if home { 100 } else { text_scale };
+        let badge_scale = if fixed_scale_on_art_cues {
+            100
+        } else {
+            text_scale
+        };
         let badge = scale_aware_single_line("◉ Update", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
-        nodes.push(
+        nodes.push(mark_on_art(
             node(
                 &format!("{context}-badge-{}", item.id),
                 Role::Text,
@@ -6719,9 +6736,8 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption)
-            .with_fixed_paint_scale(),
-        );
+            .with_type_role(TypeRole::Caption),
+        ));
         return;
     }
     if matches!(availability, Availability::Ready) {
@@ -6734,7 +6750,11 @@ fn add_unavailable_card_cues(
         Availability::UnsupportedCapability { .. } => "Unavailable",
         Availability::Ready => return,
     };
-    let badge_scale = if home { 100 } else { text_scale };
+    let badge_scale = if fixed_scale_on_art_cues {
+        100
+    } else {
+        text_scale
+    };
     let badge = scale_aware_single_line(&format!("⊘ {badge}"), width - 20.0, badge_scale);
     let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
     // Illustrated covers receive a dimming veil. Identity plates already encode their
@@ -6751,7 +6771,7 @@ fn add_unavailable_card_cues(
             STATE_UNAVAILABLE_VEIL_TOKEN,
         ));
     }
-    nodes.push(
+    nodes.push(mark_on_art(
         node(
             &format!("{context}-badge-{}", item.id),
             Role::Text,
@@ -6762,9 +6782,8 @@ fn add_unavailable_card_cues(
             badge_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
-        .with_type_role(TypeRole::Caption)
-        .with_fixed_paint_scale(),
-    );
+        .with_type_role(TypeRole::Caption),
+    ));
     if !show_reason {
         return;
     }
@@ -6806,8 +6825,7 @@ fn add_unavailable_card_cues(
             reason_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
-        .with_type_role(TypeRole::Caption)
-        .with_fixed_paint_scale(),
+        .with_type_role(TypeRole::Caption),
     );
 }
 
@@ -9948,12 +9966,12 @@ mod tests {
         let core = fixture_core(vec![plate]);
         let plate = &core.items[0];
 
-        let card_nodes = |text_scale| {
+        let card_nodes = |context, text_scale| {
             let mut nodes = plate_art_nodes(
                 plate,
-                "home-card",
+                context,
                 48.0,
-                388.0,
+                40.0,
                 CARD_ART_WIDTH,
                 CARD_ART_HEIGHT,
                 text_scale,
@@ -9962,40 +9980,77 @@ mod tests {
                 &mut nodes,
                 plate,
                 &Availability::Ready,
-                "home-card",
+                context,
                 48.0,
-                388.0,
+                40.0,
                 CARD_ART_WIDTH,
                 CARD_ART_HEIGHT,
                 Some(HOME_PROMPT_BAND_TOP),
                 text_scale,
                 true,
+                true,
             );
             nodes
         };
-        let at_100 = card_nodes(100);
-        let at_200 = card_nodes(200);
+        let metrics = SurfaceMetrics {
+            logical_width: 400.0,
+            logical_height: 500.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
 
-        for id in [
-            "home-card-initial-plate-steam-link",
-            "home-card-plate-kind-steam-link",
-            "home-card-badge-steam-link",
-        ] {
-            let bounds_at = |nodes: &[Node]| {
-                nodes
-                    .iter()
-                    .find(|node| node.id.as_str() == id)
-                    .unwrap()
-                    .bounds
+        for context in ["home-card", "library-card"] {
+            let at_100 = card_nodes(context, 100);
+            let at_200 = card_nodes(context, 200);
+            for suffix in ["initial-plate", "plate-kind", "badge"] {
+                let id = format!("{context}-{suffix}-steam-link");
+                let bounds_at = |nodes: &[Node]| {
+                    nodes
+                        .iter()
+                        .find(|node| node.id.as_str() == id)
+                        .unwrap()
+                        .bounds
+                };
+                assert_eq!(
+                    bounds_at(&at_100),
+                    bounds_at(&at_200),
+                    "{id} must retain 100% on-card metrics"
+                );
+            }
+
+            let scene_at = |nodes| {
+                let root_id = NodeId::new(format!("{context}-scale-test")).unwrap();
+                Scene::new(
+                    Node::new(
+                        root_id.clone(),
+                        Role::Group,
+                        "",
+                        Bounds::new(0.0, 0.0, 400.0, 500.0),
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_children(nodes),
+                    root_id,
+                )
+                .unwrap()
             };
+            let scene_100 = scene_at(at_100);
+            let scene_200 = scene_at(at_200);
+            let badge_id = format!("{context}-badge-steam-link");
             assert_eq!(
-                bounds_at(&at_100),
-                bounds_at(&at_200),
-                "{id} must retain 100% on-card metrics"
+                label_ink(&scene_100, &badge_id, metrics, 100),
+                label_ink(&scene_200, &badge_id, metrics, 200),
+                "{badge_id} on-art ink must retain 100% paint metrics"
+            );
+            let reason_id = format!("{context}-reason-steam-link");
+            assert!(
+                label_ink(&scene_200, &reason_id, metrics, 200).1
+                    > label_ink(&scene_100, &reason_id, metrics, 100).1,
+                "{reason_id} below-art ink must grow with accessible text scale"
             );
         }
         assert_eq!(
-            at_200
+            card_nodes("home-card", 200)
                 .iter()
                 .find(|node| node.id.as_str() == "home-card-badge-steam-link")
                 .unwrap()

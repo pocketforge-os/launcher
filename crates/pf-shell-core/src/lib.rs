@@ -3193,7 +3193,10 @@ impl ShellCore {
         };
         let mut prompt_node = node(
             "prompts",
-            if matches!(self.route, Route::Home | Route::Library | Route::Details) {
+            if matches!(
+                self.route,
+                Route::Home | Route::Library | Route::Details | Route::Quick
+            ) {
                 Role::Group
             } else {
                 Role::Text
@@ -3216,7 +3219,7 @@ impl ShellCore {
         .with_type_role(TypeRole::Label);
         if self.route == Route::Home {
             prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
-        } else if matches!(self.route, Route::Library | Route::Details) {
+        } else if matches!(self.route, Route::Library | Route::Details | Route::Quick) {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
         children.push(prompt_node);
@@ -5610,39 +5613,78 @@ impl ShellCore {
             }
             return;
         }
-        // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
-        for (i, label) in ["Open focused item", "Browse the library"]
-            .iter()
-            .enumerate()
-        {
-            let mut n = node(
-                &format!("quick-{i}"),
+        let scale = f32::from(self.text_scale) / 100.0;
+        let panel_width = (360.0 * scale).min(w - 2.0 * SPACE_5);
+        let panel_left = w - SPACE_5 - panel_width;
+        let panel_top = chrome_row_bottom(0.0, self.text_scale) + SPACE_5;
+        let panel_bottom = h - PROMPTS_AREA_HEIGHT - SPACE_5;
+        let panel_height = panel_bottom - panel_top;
+        let content_left = panel_left + SPACE_5;
+        let content_width = panel_width - 2.0 * SPACE_5;
+        let row_height = scaled_text_box_height(40.0, self.text_scale).min(52.0);
+        let preferred_gap = SPACE_3;
+        let mut panel = node(
+            "quick-panel-surface",
+            Role::Group,
+            "Quick actions",
+            panel_left,
+            panel_top,
+            panel_width,
+            panel_height,
+            COLOR_SURFACE_RAISED_TOKEN,
+        )
+        .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+        .with_elevation(Elevation::Elev2);
+        panel.state.expanded = true;
+        out.push(panel);
+
+        let mut push_row = |id: &str, index: usize, label: &str, y: f32, enabled: bool| {
+            let focused = index == self.focus;
+            let mut row = node(
+                id,
                 Role::Button,
                 label,
-                w - 400.0,
-                96.0 + i as f32 * 64.0,
-                352.0,
-                52.0,
-                if i == self.focus {
+                content_left,
+                y,
+                content_width,
+                row_height,
+                STATE_REST_SURFACE_TOKEN,
+            )
+            .with_border(
+                if focused {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
-                    STATE_REST_SURFACE_TOKEN
+                    COLOR_BORDER_HAIRLINE_TOKEN
                 },
+                if focused { 2.0 } else { 1.0 },
             );
-            n.state.focused = i == self.focus;
-            n.action = Some(NodeAction::Activate);
-            out.push(n);
-        }
-        out.push(node(
-            "quick-power-heading",
-            Role::Heading,
-            "Power",
-            w - 400.0,
-            232.0,
-            352.0,
-            34.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
-        ));
+            row.state.focused = focused;
+            row.state.disabled = !enabled;
+            if enabled {
+                row.action = Some(NodeAction::Activate);
+            }
+            let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+            row.children.push(
+                node(
+                    &format!("{id}-label"),
+                    Role::Text,
+                    label,
+                    content_left + SPACE_4,
+                    y + (row_height - label_height) / 2.0,
+                    content_width - 2.0 * SPACE_4,
+                    label_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(if focused {
+                    STATE_FOCUSED_TEXT_TOKEN
+                } else {
+                    STATE_REST_TEXT_TOKEN
+                }),
+            );
+            out.push(row);
+        };
+
         let mut rows = vec![(2, "power-off", "Power off"), (3, "restart", "Restart")];
         if let Some(index) = self.sleep_row() {
             rows.push((index, "sleep", "Sleep"));
@@ -5660,73 +5702,203 @@ impl ShellCore {
         if let Some(label) = &idle_label {
             rows.push((self.idle_row(), "idle", label));
         }
+
+        // Quick is a fixed-height transient sheet. Preserve its preferred rhythm when
+        // possible, then yield spacing uniformly before dropping reassurance copy.
+        let status_height = self
+            .power_status
+            .as_ref()
+            .map(|_| scaled_text_box_height(32.0, self.text_scale));
+        let truth_height = scaled_text_box_height(40.0, self.text_scale);
+        let row_count = rows.len() as f32 + 3.0; // two contextual rows + screenshot
+        let gap_count = rows.len() as f32 + 4.0 + f32::from(status_height.is_some());
+        let fixed_height = row_count * row_height + status_height.unwrap_or(0.0) + truth_height;
+        let stack_top = panel_top + SPACE_5;
+        let budget_bottom = panel_bottom - SPACE_5;
+        let preferred_bottom = stack_top + fixed_height + gap_count * preferred_gap;
+        let gap_floor = preferred_gap / 2.0;
+        let gap = (preferred_gap - (preferred_bottom - budget_bottom).max(0.0) / gap_count)
+            .max(gap_floor);
+        let show_truth = stack_top + fixed_height + gap_count * gap <= budget_bottom;
+
+        // Intentionally no title: §4.2/§4.7 makes the first contextual action the top edge.
+        for (i, label) in ["Open focused item", "Browse the library"]
+            .iter()
+            .enumerate()
+        {
+            push_row(
+                &format!("quick-{i}"),
+                i,
+                label,
+                panel_top + SPACE_5 + i as f32 * (row_height + gap),
+                true,
+            );
+        }
+        out.push(node(
+            "quick-section-divider",
+            Role::Group,
+            "",
+            content_left,
+            panel_top + SPACE_5 + 2.0 * (row_height + gap),
+            content_width,
+            1.0,
+            COLOR_BORDER_HAIRLINE_TOKEN,
+        ));
+        let system_top = panel_top + SPACE_5 + 2.0 * (row_height + gap) + gap;
+        let mut system_position = 0_usize;
         for (index, id, label) in rows {
             let enabled = match index {
                 2 => self.supports_power(PowerAction::PowerOff),
                 3 => self.supports_power(PowerAction::Restart),
                 _ => true,
             };
+            let y = system_top + system_position as f32 * (row_height + gap);
             let mut row = node(
                 &format!("quick-power-{id}"),
                 Role::Button,
                 label,
-                w - 400.0,
-                274.0 + (index - 2) as f32 * 58.0,
-                352.0,
-                48.0,
+                content_left,
+                y,
+                content_width,
+                row_height,
+                STATE_REST_SURFACE_TOKEN,
+            )
+            .with_border(
                 if index == self.focus {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
-                    STATE_REST_SURFACE_TOKEN
+                    COLOR_BORDER_HAIRLINE_TOKEN
                 },
+                if index == self.focus { 2.0 } else { 1.0 },
             );
             row.state.focused = index == self.focus;
             row.state.disabled = !enabled;
             if enabled {
                 row.action = Some(NodeAction::Activate);
             }
+            let (primary, value) = label.split_once(" · ").unwrap_or((label, ""));
+            let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+            let mut label_node = node(
+                &format!("quick-power-{id}-label"),
+                Role::Text,
+                primary,
+                content_left + SPACE_4,
+                y + (row_height - label_height) / 2.0,
+                content_width - 2.0 * SPACE_4,
+                label_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(if !enabled {
+                STATE_UNAVAILABLE_TEXT_TOKEN
+            } else if index == self.focus {
+                STATE_FOCUSED_TEXT_TOKEN
+            } else {
+                STATE_REST_TEXT_TOKEN
+            });
+            label_node.state.disabled = !enabled;
+            row.children.push(label_node);
+            if !value.is_empty() {
+                let value_width = text_node_box_width(caption_text_width(value, self.text_scale));
+                let mut value_node = node(
+                    &format!("quick-power-{id}-value"),
+                    Role::Text,
+                    value,
+                    content_left + content_width - SPACE_4 - value_width,
+                    y + (row_height - label_height) / 2.0,
+                    value_width,
+                    label_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(if enabled {
+                    COLOR_TEXT_MUTED_TOKEN
+                } else {
+                    STATE_UNAVAILABLE_TEXT_TOKEN
+                });
+                value_node.state.disabled = !enabled;
+                row.children.push(value_node);
+            }
             out.push(row);
+            system_position += 1;
         }
         let screenshot_index = self.screenshot_row();
         let mut screenshot = node(
             "quick-capture-screenshot",
             Role::Button,
             "Capture screenshot",
-            w - 400.0,
-            274.0 + (screenshot_index - 2) as f32 * 58.0,
-            352.0,
-            48.0,
+            content_left,
+            system_top + system_position as f32 * (row_height + gap),
+            content_width,
+            row_height,
+            STATE_REST_SURFACE_TOKEN,
+        )
+        .with_border(
             if screenshot_index == self.focus {
                 STATE_FOCUSED_RING_TOKEN
             } else {
-                STATE_REST_SURFACE_TOKEN
+                COLOR_BORDER_HAIRLINE_TOKEN
+            },
+            if screenshot_index == self.focus {
+                2.0
+            } else {
+                1.0
             },
         );
         screenshot.state.focused = screenshot_index == self.focus;
         screenshot.action = Some(NodeAction::Activate);
+        let screenshot_y = system_top + system_position as f32 * (row_height + gap);
+        let label_height = scaled_text_box_height(24.0, self.text_scale).min(row_height);
+        screenshot.children.push(
+            node(
+                "quick-capture-screenshot-label",
+                Role::Text,
+                "Capture screenshot",
+                content_left + SPACE_4,
+                screenshot_y + (row_height - label_height) / 2.0,
+                content_width - 2.0 * SPACE_4,
+                label_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(if screenshot_index == self.focus {
+                STATE_FOCUSED_TEXT_TOKEN
+            } else {
+                STATE_REST_TEXT_TOKEN
+            }),
+        );
         out.push(screenshot);
+        let mut note_y = screenshot_y + row_height + gap;
         if let Some(status) = &self.power_status {
+            let status_height = status_height.expect("power status height must be measured");
             out.push(node(
                 "quick-power-status",
                 Role::Text,
                 status,
-                w - 400.0,
-                h - 142.0,
-                352.0,
-                32.0,
+                content_left,
+                note_y,
+                content_width,
+                status_height,
                 COLOR_STATUS_ATTENTION_TOKEN,
             ));
+            note_y += status_height + gap;
         }
-        out.push(declared_multiline(node(
-            "quick-truth",
-            Role::Text,
-            "Nothing is running now. Quick shows only what applies right here.",
-            w - 400.0,
-            h - 110.0,
-            352.0,
-            60.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
-        )));
+        if show_truth {
+            out.push(declared_multiline(
+                node(
+                    "quick-truth",
+                    Role::Text,
+                    "Nothing is running now. Quick shows only what applies right here.",
+                    content_left,
+                    note_y,
+                    content_width,
+                    truth_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            ));
+        }
     }
     fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
         out.push(node(
@@ -7364,6 +7536,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("detail-art-")
         || id == "first-run-panel"
         || id == "receipt-panel"
+        || id == "quick-panel-surface"
     {
         Some(RADIUS_L)
     } else if id.starts_with("item-")
@@ -7382,6 +7555,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         || id.starts_with("chooser-") && id != "chooser-note" && id != "chooser-scroll-region"
         || id.starts_with("settings-nav-") && !id.ends_with("-label")
         || id.starts_with("settings-row-") && !id.contains("-line-") && !id.ends_with("-control")
+        || id.starts_with("quick-") && (node.action.is_some() || id == "quick-capture-screenshot")
         || id == "settings-text-scale-segmented-control"
         || id.starts_with("comfort-")
     {
@@ -14826,7 +15000,8 @@ mod tests {
             .map(|node| node.id.as_str())
             .collect();
         for required in [
-            "quick-power-heading",
+            "quick-panel-surface",
+            "quick-section-divider",
             "quick-power-power-off",
             "quick-power-restart",
             "quick-power-idle",
@@ -14836,7 +15011,33 @@ mod tests {
                 "missing semantic anatomy {required}"
             );
         }
+        assert!(!ids.contains(&"quick-power-heading"));
         assert!(!ids.contains(&"quick-power-sleep"));
+
+        let panel = node_by_id(unsupported_scene.root(), "quick-panel-surface").unwrap();
+        assert_eq!(panel.style_token, COLOR_SURFACE_RAISED_TOKEN);
+        assert_eq!(
+            panel.border_token.as_deref(),
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        assert!((panel.border_width - 1.0).abs() < f32::EPSILON);
+        assert_eq!(panel.elevation, Elevation::Elev2);
+        assert!((panel.corner_radius - RADIUS_L).abs() < f32::EPSILON);
+        let focused = node_by_id(unsupported_scene.root(), "quick-0").unwrap();
+        assert_eq!(focused.style_token, STATE_REST_SURFACE_TOKEN);
+        assert_eq!(
+            focused.border_token.as_deref(),
+            Some(STATE_FOCUSED_RING_TOKEN)
+        );
+        assert!((focused.border_width - 2.0).abs() < f32::EPSILON);
+        assert!((focused.corner_radius - RADIUS_M).abs() < f32::EPSILON);
+        let prompts = node_by_id(unsupported_scene.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert_eq!(
+            prompts.children.len(),
+            6,
+            "two prompts use one keycap cluster"
+        );
 
         let supported = FakePowerPort::new(
             vec![PowerCapability {
@@ -14852,6 +15053,151 @@ mod tests {
                 .children
                 .iter()
                 .any(|node| node.id.as_str() == "quick-power-sleep")
+        );
+    }
+
+    fn assert_quick_vertical_flow(scene: &Scene, ids: &[&str]) {
+        let nodes: Vec<_> = ids
+            .iter()
+            .map(|id| node_by_id(scene.root(), id).unwrap_or_else(|| panic!("missing {id}")))
+            .collect();
+        for pair in nodes.windows(2) {
+            let before = pair[0];
+            let after = pair[1];
+            assert!(
+                before.bounds.y + before.bounds.height <= after.bounds.y,
+                "{} {:?} overlaps {} {:?}",
+                before.id.as_str(),
+                before.bounds,
+                after.id.as_str(),
+                after.bounds
+            );
+        }
+    }
+
+    fn max_scale_quick_core(power_status: Option<&str>) -> ShellCore {
+        let mut core = core();
+        core.text_scale = 200;
+        core.load_power(&FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        ));
+        core.power_status = power_status.map(str::to_owned);
+        core.go(Route::Quick);
+        core
+    }
+
+    fn assert_quick_content_within_budget(scene: &Scene) {
+        let panel = node_by_id(scene.root(), "quick-panel-surface").unwrap();
+        let budget_bottom = panel.bounds.y + panel.bounds.height - SPACE_5;
+        for node in &scene.root().children {
+            if node.id.as_str().starts_with("quick-") && node.id.as_str() != "quick-panel-surface" {
+                assert!(
+                    node.bounds.y + node.bounds.height <= budget_bottom,
+                    "{} {:?} escapes Quick budget bottom {budget_bottom}",
+                    node.id.as_str(),
+                    node.bounds
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quick_max_scale_yields_truth_to_keep_rows_within_panel() {
+        let core = max_scale_quick_core(None);
+        let scene = quick_scene(&core);
+
+        assert_quick_content_within_budget(&scene);
+        assert!(node_by_id(scene.root(), "quick-truth").is_none());
+        assert_quick_vertical_flow(
+            &scene,
+            &[
+                "quick-power-sleep",
+                "quick-power-idle",
+                "quick-capture-screenshot",
+            ],
+        );
+    }
+
+    #[test]
+    fn quick_max_scale_never_drops_or_overflows_power_status() {
+        let core = max_scale_quick_core(Some("Power actions are unavailable"));
+        let scene = quick_scene(&core);
+
+        assert_quick_content_within_budget(&scene);
+        assert!(node_by_id(scene.root(), "quick-power-status").is_some());
+        assert!(node_by_id(scene.root(), "quick-truth").is_none());
+        assert_quick_vertical_flow(&scene, &["quick-capture-screenshot", "quick-power-status"]);
+    }
+
+    #[test]
+    fn quick_default_scale_keeps_truth_note() {
+        let mut core = core();
+        core.go(Route::Quick);
+
+        assert!(node_by_id(quick_scene(&core).root(), "quick-truth").is_some());
+    }
+
+    #[test]
+    fn quick_rows_follow_scaled_sleep_auto_sleep_order() {
+        let mut core = core();
+        core.text_scale = 200;
+        core.load_power(&FakePowerPort::new(
+            vec![
+                PowerCapability {
+                    action: PowerAction::PowerOff,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Restart,
+                    support: Support::Supported,
+                },
+                PowerCapability {
+                    action: PowerAction::Sleep,
+                    support: Support::Supported,
+                },
+            ],
+            IdlePolicy::default(),
+        ));
+        core.go(Route::Quick);
+
+        assert_quick_vertical_flow(
+            &quick_scene(&core),
+            &[
+                "quick-power-sleep",
+                "quick-power-idle",
+                "quick-capture-screenshot",
+            ],
+        );
+    }
+
+    #[test]
+    fn quick_power_status_flows_between_capture_row_and_truth() {
+        let mut core = core();
+        core.text_scale = 100;
+        core.power_status = Some("Power actions are unavailable".into());
+        core.go(Route::Quick);
+
+        assert_quick_vertical_flow(
+            &quick_scene(&core),
+            &[
+                "quick-capture-screenshot",
+                "quick-power-status",
+                "quick-truth",
+            ],
         );
     }
 
@@ -14950,6 +15296,15 @@ mod tests {
             .unwrap();
         assert_eq!(idle.accessible_label, "Auto-sleep · 15 min");
         assert!(!idle.state.disabled);
+        assert!(idle.children.iter().all(|child| !child.state.disabled));
+        assert_eq!(
+            idle.children[0].ink_token.as_deref(),
+            Some(STATE_REST_TEXT_TOKEN)
+        );
+        assert_eq!(
+            idle.children[1].ink_token.as_deref(),
+            Some(COLOR_TEXT_MUTED_TOKEN)
+        );
         for id in ["quick-power-power-off", "quick-power-restart"] {
             let row = scene
                 .root()
@@ -14962,6 +15317,14 @@ mod tests {
                 "{id} should degrade without capabilities"
             );
             assert_eq!(row.action, None);
+            assert!(!row.children.is_empty());
+            for child in &row.children {
+                assert_eq!(
+                    child.ink_token.as_deref(),
+                    Some(STATE_UNAVAILABLE_TEXT_TOKEN)
+                );
+                assert!(child.state.disabled);
+            }
         }
         assert!(scene.root().children.iter().any(|node| {
             node.id.as_str() == "quick-power-status"

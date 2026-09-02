@@ -86,6 +86,12 @@ const HOME_AIR_SPACER_FLOOR: f32 = 24.0;
 // Keep node sizing expressed in terms of the per-edge paint contract so callers
 // cannot accidentally confuse a shaped advance with the containing box width.
 const TEXT_NODE_INLINE_INSET: f32 = 6.0;
+const ATTENTION_PILL_RIGHT_MARGIN: f32 = 48.0;
+const ATTENTION_PILL_TOP: f32 = 77.0;
+const ATTENTION_PILL_LABEL_HEIGHT: f32 = 22.0;
+const ATTENTION_PILL_VERTICAL_PADDING: f32 = 8.0;
+const ATTENTION_PILL_HORIZONTAL_PADDING: f32 = 16.0;
+const ATTENTION_PILL_DOT_SIZE: f32 = 6.4;
 
 // The flagship label role is 14 px Manrope semibold. This conservative advance keeps
 // scene geometry renderer-independent while reserving enough room for its widest glyphs.
@@ -3394,18 +3400,12 @@ impl ShellCore {
                     .then_some("The previous game didn't close cleanly")
             });
             if let Some(message) = attention {
-                const PILL_RIGHT_MARGIN: f32 = 48.0;
-                const PILL_TOP: f32 = 77.0;
                 // Caption glyph shaping needs the same 22px control box used by the
                 // chrome keycaps; the CSS padding remains outside this line box.
-                const PILL_LABEL_HEIGHT: f32 = 22.0;
-                const PILL_VERTICAL_PADDING: f32 = 8.0;
-                const PILL_HORIZONTAL_PADDING: f32 = 16.0;
-                const DOT_SIZE: f32 = 6.4;
                 let rem_scale = f32::from(self.text_scale) / 100.0;
-                let pill_label_height = PILL_LABEL_HEIGHT * rem_scale;
-                let pill_height = pill_label_height + 2.0 * PILL_VERTICAL_PADDING;
-                let dot_size = DOT_SIZE * rem_scale;
+                let pill_label_height = ATTENTION_PILL_LABEL_HEIGHT * rem_scale;
+                let pill_height = pill_label_height + 2.0 * ATTENTION_PILL_VERTICAL_PADDING;
+                let dot_size = ATTENTION_PILL_DOT_SIZE * rem_scale;
                 // Start-aligned text paints after the renderer's inline inset. Compensate
                 // the layout gap so the visible dot-to-glyph gap, not the control-box gap,
                 // resolves to space-2 at every text scale.
@@ -3415,7 +3415,7 @@ impl ShellCore {
                     Role::Group,
                     "",
                     0.0,
-                    PILL_TOP,
+                    ATTENTION_PILL_TOP,
                     0.0,
                     pill_height,
                     COLOR_BORDER_HAIRLINE_TOKEN,
@@ -3425,14 +3425,14 @@ impl ShellCore {
                     align_items: Some(AlignItems::Center),
                     gap: (LayoutValue::Px(0.0), LayoutValue::Px(pill_gap)),
                     padding: px_edges(
-                        PILL_VERTICAL_PADDING,
-                        PILL_HORIZONTAL_PADDING,
-                        PILL_VERTICAL_PADDING,
-                        PILL_HORIZONTAL_PADDING,
+                        ATTENTION_PILL_VERTICAL_PADDING,
+                        ATTENTION_PILL_HORIZONTAL_PADDING,
+                        ATTENTION_PILL_VERTICAL_PADDING,
+                        ATTENTION_PILL_HORIZONTAL_PADDING,
                     ),
                     inset: Edges {
-                        top: LayoutValue::Px(PILL_TOP),
-                        right: LayoutValue::Px(PILL_RIGHT_MARGIN),
+                        top: LayoutValue::Px(ATTENTION_PILL_TOP),
+                        right: LayoutValue::Px(ATTENTION_PILL_RIGHT_MARGIN),
                         bottom: LayoutValue::Auto,
                         left: LayoutValue::Auto,
                     },
@@ -12614,14 +12614,24 @@ mod tests {
         let right = node_by_id(root, "room-keycap-right-border").unwrap().bounds;
         assert!(((left.x + right.x + right.width) / 2.0 - 640.0).abs() <= 1.0);
         let pill_border = node_by_id(scene.root(), "attention-pill-border").unwrap();
+        let rem_scale = f32::from(core.text_scale) / 100.0;
+        let expected_pill_gap = SPACE_2 * rem_scale - TEXT_NODE_INLINE_INSET;
+        let expected_pill_width = 2.0 * ATTENTION_PILL_HORIZONTAL_PADDING
+            + ATTENTION_PILL_DOT_SIZE * rem_scale
+            + expected_pill_gap
+            + caption_text_width("Controller battery low", core.text_scale);
+        let expected_pill_x =
+            metrics.logical_width - ATTENTION_PILL_RIGHT_MARGIN - expected_pill_width;
+        let expected_pill_height =
+            ATTENTION_PILL_LABEL_HEIGHT * rem_scale + 2.0 * ATTENTION_PILL_VERTICAL_PADDING;
         assert!(
-            (pill_border.bounds.x - 1043.0).abs() <= 2.0,
+            (pill_border.bounds.x - expected_pill_x).abs() <= 2.0,
             "resolved pill bounds: {:?}",
             pill_border.bounds
         );
-        assert!((pill_border.bounds.y - 77.0).abs() < f32::EPSILON);
-        assert!((pill_border.bounds.width - 189.0).abs() <= 2.0);
-        assert!((pill_border.bounds.height - 38.0).abs() < f32::EPSILON);
+        assert!((pill_border.bounds.y - ATTENTION_PILL_TOP).abs() < f32::EPSILON);
+        assert!((pill_border.bounds.width - expected_pill_width).abs() <= 2.0);
+        assert!((pill_border.bounds.height - expected_pill_height).abs() < f32::EPSILON);
         assert!((pill_border.corner_radius - pill_border.bounds.height / 2.0).abs() < f32::EPSILON);
         assert_eq!(pill_border.style_token, COLOR_BORDER_HAIRLINE_TOKEN);
         assert_eq!(

@@ -4022,6 +4022,52 @@ mod durable_tests {
         assert!(occlusion_fill_value_is_opaque(
             "rgba(16, 15, 13, 0.55) malformed gradient"
         ));
+
+        // Couple the representation pin above to the complete guard path: an
+        // opaque panel classified by that predicate must become a scene
+        // failure, rather than merely producing an unused boolean.
+        let root_id = pf_scene::NodeId::new("rgba-panel-occlusion-probe").unwrap();
+        let overlap = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 240.0, 96.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            Node::new(
+                pf_scene::NodeId::new("rgba-covered-label").unwrap(),
+                Role::Text,
+                "Foreign content",
+                overlap,
+                "--color-transparent",
+            ),
+            Node::new(
+                pf_scene::NodeId::new("rgba-opaque-panel").unwrap(),
+                Role::Group,
+                "",
+                overlap,
+                "--color-surface-raised",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 240.0,
+            logical_height: 96.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 100).unwrap_err();
+        assert!(
+            failure.contains("rgba-opaque-panel")
+                && failure.contains("rgba-covered-label")
+                && failure.contains("opaque fill"),
+            "unexpected guard verdict: {failure}"
+        );
     }
 
     #[test]
@@ -4130,25 +4176,77 @@ mod durable_tests {
 
     #[test]
     fn scene_occlusion_guard_rejects_text_ink_across_disjoint_node_bounds() {
-        let title_bounds = pf_scene::Bounds::new(20.0, 20.0, 260.0, 32.0);
-        let status_bounds = pf_scene::Bounds::new(20.0, 56.0, 260.0, 32.0);
-        assert!(title_bounds.y + title_bounds.height <= status_bounds.y);
-        let grown_title_ink = pf_scene::Bounds::new(26.0, 28.0, 215.0, 36.0);
-        let fixed_status_ink = pf_scene::Bounds::new(27.0, 58.0, 43.0, 15.0);
-        let mut grown_mask = vec![0_u64; 2];
-        let mut status_mask = vec![0_u64; 2];
-        grown_mask[1] = 1 << 7;
-        status_mask[1] = 1 << 7;
-        assert!(text_ink_intersects(
-            &OcclusionTextInk {
-                bounds: Some(grown_title_ink),
-                mask: grown_mask,
-            },
-            &OcclusionTextInk {
-                bounds: Some(fixed_status_ink),
-                mask: status_mask,
-            }
-        ));
+        let title_bounds = pf_scene::Bounds::new(20.0, 20.0, 100.0, 48.0);
+        let status_bounds = pf_scene::Bounds::new(121.0, 20.0, 100.0, 48.0);
+        assert!(title_bounds.x + title_bounds.width < status_bounds.x);
+        let root_id = pf_scene::NodeId::new("disjoint-bounds-occlusion-probe").unwrap();
+        let mut grown_title = Node::new(
+            pf_scene::NodeId::new("grown-title-component").unwrap(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(320.0, 20.0, 20.0, 48.0),
+            "--color-transparent",
+        );
+        grown_title.state.pressed = true;
+        grown_title.children = vec![Node::new(
+            pf_scene::NodeId::new("grown-title-disjoint-box").unwrap(),
+            Role::Heading,
+            "MMMMMMMMMMMMMMMM",
+            title_bounds,
+            "--color-transparent",
+        )];
+        let root = Node::new(
+            root_id.clone(),
+            Role::Group,
+            "",
+            pf_scene::Bounds::new(0.0, 0.0, 320.0, 120.0),
+            "--color-surface-canvas",
+        )
+        .with_children(vec![
+            grown_title,
+            Node::new(
+                pf_scene::NodeId::new("fixed-status-disjoint-box").unwrap(),
+                Role::Text,
+                "Ready",
+                status_bounds,
+                "--color-transparent",
+            ),
+        ]);
+        let scene = pf_scene::Scene::new(root, root_id).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 320.0,
+            logical_height: 120.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        let mut rasterizer = Rasterizer::new();
+        rasterizer.set_theme_base(pf_theme::Base::Dusk);
+        rasterizer.set_text_scale(2.0).unwrap();
+        let title_ink = occlusion_text_ink(
+            &scene,
+            &mut rasterizer,
+            metrics,
+            &scene.root().children[0].children[0],
+        )
+        .unwrap();
+        let status_ink =
+            occlusion_text_ink(&scene, &mut rasterizer, metrics, &scene.root().children[1])
+                .unwrap();
+        assert!(
+            text_ink_intersects(&title_ink, &status_ink),
+            "the scaled scene fixture must paint colliding ink"
+        );
+
+        let failure =
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, 200).unwrap_err();
+        assert!(
+            failure.contains("grown-title-disjoint-box")
+                && failure.contains("fixed-status-disjoint-box")
+                && failure.contains("foreign text"),
+            "unexpected guard verdict: {failure}"
+        );
     }
 
     #[test]

@@ -3401,12 +3401,15 @@ impl ShellCore {
                 const PILL_LABEL_HEIGHT: f32 = 22.0;
                 const PILL_VERTICAL_PADDING: f32 = 8.0;
                 const PILL_HORIZONTAL_PADDING: f32 = 16.0;
-                const PILL_GAP: f32 = 8.0;
                 const DOT_SIZE: f32 = 6.4;
                 let rem_scale = f32::from(self.text_scale) / 100.0;
                 let pill_label_height = PILL_LABEL_HEIGHT * rem_scale;
                 let pill_height = pill_label_height + 2.0 * PILL_VERTICAL_PADDING;
                 let dot_size = DOT_SIZE * rem_scale;
+                // Start-aligned text paints after the renderer's inline inset. Compensate
+                // the layout gap so the visible dot-to-glyph gap, not the control-box gap,
+                // resolves to space-2 at every text scale.
+                let pill_gap = SPACE_2 * rem_scale - TEXT_NODE_INLINE_INSET;
                 let mut pill_border = node(
                     "attention-pill-border",
                     Role::Group,
@@ -3420,7 +3423,7 @@ impl ShellCore {
                 pill_border.layout = Some(LayoutStyle {
                     position: Position::Absolute,
                     align_items: Some(AlignItems::Center),
-                    gap: (LayoutValue::Px(0.0), LayoutValue::Px(PILL_GAP)),
+                    gap: (LayoutValue::Px(0.0), LayoutValue::Px(pill_gap)),
                     padding: px_edges(
                         PILL_VERTICAL_PADDING,
                         PILL_HORIZONTAL_PADDING,
@@ -12689,6 +12692,35 @@ mod tests {
 
     #[test]
     fn attention_pill_internal_geometry_matches_tokens_at_every_text_scale() {
+        fn clear_attention_label(node: &mut Node) -> bool {
+            if node.id.as_str() == "attention" {
+                node.accessible_label.clear();
+                return true;
+            }
+            node.children.iter_mut().any(clear_attention_label)
+        }
+
+        fn hide_attention_dot(node: &mut Node) -> bool {
+            if node.id.as_str() == "attention-dot" {
+                node.style_token = SCENE_TRANSPARENT_TOKEN.into();
+                return true;
+            }
+            node.children.iter_mut().any(hide_attention_dot)
+        }
+
+        fn changed_x_extent(rendered: &[u8], without: &[u8], width: usize) -> (usize, usize) {
+            let columns = rendered
+                .chunks_exact(4)
+                .zip(without.chunks_exact(4))
+                .enumerate()
+                .filter_map(|(pixel, (painted, blank))| (painted != blank).then_some(pixel % width))
+                .collect::<std::collections::BTreeSet<_>>();
+            (
+                *columns.first().expect("node must paint ink"),
+                *columns.last().unwrap(),
+            )
+        }
+
         struct Status;
         impl DeviceStatusPort for Status {
             fn status(&self) -> Result<DeviceStatus, String> {
@@ -12726,7 +12758,8 @@ mod tests {
             assert!((dot.height - 6.4 * rem_scale).abs() <= 0.01);
             assert_eq!(dot_node.style_token, COLOR_STATUS_ATTENTION_TOKEN);
             assert!((dot_node.corner_radius - dot.width / 2.0).abs() <= 0.01);
-            assert!((label.x - (dot.x + dot.width) - 8.0).abs() <= 0.01);
+            let control_box_gap = SPACE_2 * rem_scale - TEXT_NODE_INLINE_INSET;
+            assert!((label.x - (dot.x + dot.width) - control_box_gap).abs() <= 0.01);
             assert!(
                 (dot.y + dot.height / 2.0 - (label.y + label.height / 2.0)).abs() <= 0.01,
                 "dot and its sibling label must share a center at {text_scale}%: dot={dot:?} label={label:?}"
@@ -12735,6 +12768,36 @@ mod tests {
             assert!((border.x + border.width - label.x - label.width - 16.0).abs() <= 0.01);
             assert!((label.y - border.y - 8.0).abs() <= 0.01);
             assert!((border.y + border.height - label.y - label.height - 8.0).abs() <= 0.01);
+
+            let mut rasterizer = Rasterizer::new();
+            rasterizer.set_text_scale(rem_scale).unwrap();
+            let rendered = rasterizer.render(&scene, metrics).unwrap();
+            let mut without_label_root = scene.root().clone();
+            assert!(clear_attention_label(&mut without_label_root));
+            let without_label = rasterizer
+                .render(
+                    &Scene::new(without_label_root, scene.default_focus().clone()).unwrap(),
+                    metrics,
+                )
+                .unwrap();
+            let mut without_dot_root = scene.root().clone();
+            assert!(hide_attention_dot(&mut without_dot_root));
+            let without_dot = rasterizer
+                .render(
+                    &Scene::new(without_dot_root, scene.default_focus().clone()).unwrap(),
+                    metrics,
+                )
+                .unwrap();
+            let (label_ink_left, _) =
+                changed_x_extent(&rendered.rgba, &without_label.rgba, rendered.width as usize);
+            let (_, dot_ink_right) =
+                changed_x_extent(&rendered.rgba, &without_dot.rgba, rendered.width as usize);
+            let ink_gap = label_ink_left - dot_ink_right - 1;
+            let expected_gap = usize::from(text_scale) * 8 / 100;
+            assert!(
+                ink_gap.abs_diff(expected_gap) <= 1,
+                "attention dot-to-label ink gap must scale from space-2 at {text_scale}%: expected {expected_gap}px, got {ink_gap}px"
+            );
         }
     }
 

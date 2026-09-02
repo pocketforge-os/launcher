@@ -4167,11 +4167,35 @@ impl ShellCore {
                     availability_text(availability, &self.presentation)
                 );
                 let text_left = column_left + SPACE_4 * scale;
-                // Reserve a stable inline title column so shaped label bearings
-                // cannot force a nominally one-line result into a second row.
-                let title_width = (column_width * 0.42).max(
-                    measured_text_advance(label_text_width(title), self.text_scale)
-                        + 2.0 * TEXT_NODE_INLINE_INSET * scale,
+                let content_width = (column_width - 2.0 * SPACE_4 * scale).max(0.0);
+                let inter_gap = SPACE_2 * scale;
+                let title_floor = 72.0 * scale;
+                let caption_natural_width = caption_text_width(&caption, self.text_scale)
+                    + 2.0 * TEXT_NODE_INLINE_INSET * scale;
+                let caption_reserve =
+                    caption_natural_width.min((content_width - inter_gap - title_floor).max(0.0));
+                // Keep the established 42% column at roomy widths, but reserve the
+                // caption before allowing long titles to grow. The gap lives at the
+                // end of the title column so existing wide evidence keeps its geometry.
+                let title_column_width = (column_width * 0.42)
+                    .max(
+                        measured_text_advance(label_text_width(title), self.text_scale)
+                            + 2.0 * TEXT_NODE_INLINE_INSET * scale
+                            + inter_gap,
+                    )
+                    .min((content_width - caption_reserve).max(0.0));
+                let title_paint_width = (title_column_width - inter_gap).max(0.0);
+                let caption_width =
+                    (column_left + column_width - text_left - title_column_width).max(0.0);
+                let painted_title = ellipsize_to_lines(
+                    title,
+                    title_paint_width * 100.0 / f32::from(self.text_scale),
+                    1,
+                );
+                let painted_caption = ellipsize_to_lines(
+                    &caption,
+                    caption_width * 100.0 / f32::from(self.text_scale),
+                    1,
                 );
                 let mut row = node(
                     &format!("search-result-{}", item.id),
@@ -4190,10 +4214,10 @@ impl ShellCore {
                     node(
                         &format!("search-result-{}-title", item.id),
                         Role::Text,
-                        title,
+                        &painted_title,
                         text_left,
                         result_top,
-                        title_width,
+                        title_paint_width,
                         row_height,
                         SCENE_TRANSPARENT_TOKEN,
                     )
@@ -4202,10 +4226,10 @@ impl ShellCore {
                     node(
                         &format!("search-result-{}-caption", item.id),
                         Role::Text,
-                        &caption,
-                        text_left + title_width,
+                        &painted_caption,
+                        text_left + title_column_width,
                         result_top,
-                        (column_left + column_width - text_left - title_width).max(0.0),
+                        caption_width,
                         row_height,
                         SCENE_TRANSPARENT_TOKEN,
                     )
@@ -9345,6 +9369,43 @@ mod tests {
 
         assert_eq!(chip.accessible_label, "Everything else · 0");
         assert_eq!(painted_label.accessible_label, "Everything…");
+    }
+
+    #[test]
+    fn narrow_scaled_search_row_caps_title_and_preserves_inline_caption() {
+        let title = "An Extraordinary Ridgeline Adventure With A Deliberately Long Title";
+        let mut core = fixture_core(vec![item(
+            "long-search-result",
+            title,
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.text_scale = 200;
+        core.go(Route::Search);
+        core.set_search_query("extraordinary");
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let row = node_by_id(scene.root(), "search-result-long-search-result").unwrap();
+        let painted_title = node_by_id(row, "search-result-long-search-result-title").unwrap();
+        let caption = node_by_id(row, "search-result-long-search-result-caption").unwrap();
+
+        assert_eq!(row.accessible_label, format!("{title} · GAME · Ready"));
+        assert!(painted_title.accessible_label.ends_with('…'));
+        assert!(painted_title.bounds.x >= row.bounds.x);
+        assert!(painted_title.bounds.x + painted_title.bounds.width <= caption.bounds.x);
+        assert!(caption.bounds.x >= painted_title.bounds.x + painted_title.bounds.width);
+        assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
+        assert!(caption.bounds.width >= caption_text_width(" · GAME · Ready", 200));
     }
 
     #[test]

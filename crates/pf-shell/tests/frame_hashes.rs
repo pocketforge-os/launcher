@@ -192,7 +192,7 @@ fn vertical_slice_frame_hashes_are_stable() {
     for expected in [
         // Home intentionally rebaselines for the corrected attention-pill dot geometry.
         // Every route without the attention pill remains byte-identical.
-        "6816cf2307fd3c2846936da0f24d14578996128ca2fb4e9e7b2b5eb8bf49f4dc  ",
+        "6f9c658df4def86762e94e126564d9657a5c27c5fe5bf31264ad93cab747b244  ",
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
         "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
@@ -283,6 +283,6 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     assert!(
-        transcript.contains("1ecb87506153a869ee37ae77764e087e06b3e6044d4c183bda14f333cdd9fe44  ")
+        transcript.contains("17562411e168caeef61a00511a4e78add6c4ca6ead0ec87b63d965a45f7a1564  ")
     );
 }

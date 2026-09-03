@@ -5042,9 +5042,9 @@ impl ShellCore {
                     STATE_DISABLED_BORDER_TOKEN
                 },
             );
-            // Value editing is represented by the value affordance, never by
-            // painting a focused surface across the whole row.
-            scene_row.state.focused = false;
+            // The row remains the single semantic focus and action owner while
+            // its value affordance carries the visual focus treatment.
+            scene_row.state.focused = focused;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
             }
@@ -8525,6 +8525,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn settings_edit_mode_keeps_semantic_focus_on_the_active_row() {
+        fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {
+            if node.state.focused {
+                focused.push(node);
+            }
+            for child in &node.children {
+                collect_focused(child, focused);
+            }
+        }
+
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.enter_settings_rows();
+        core.focus = core
+            .settings_scene_rows()
+            .iter()
+            .position(|row| row.id == "accessibility-highContrast")
+            .unwrap();
+
+        let scene = settings_scene(&core);
+        let mut focused = Vec::new();
+        collect_focused(scene.root(), &mut focused);
+
+        assert_eq!(focused.len(), 1);
+        assert_eq!(
+            focused[0].id.as_str(),
+            "settings-row-accessibility-highContrast"
+        );
+        assert_eq!(
+            scene.focused().map(NodeId::as_str),
+            Some("settings-row-accessibility-highContrast")
+        );
     }
 
     #[test]

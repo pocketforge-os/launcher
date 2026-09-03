@@ -256,25 +256,31 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.369 intentionally repaints Settings values as individual chips and adds the
     // focused value-edit frame. Round 3 restores semantic focus ownership to that row.
-    // tsp-op5a.370 repins only first-run for its raised sheet, dim backdrop, value chips,
-    // suppressed Home footer, and filled Continue action; the other route hashes stay fixed.
+    // tsp-op5a.370 repins first-run for its raised sheet, dim backdrop, value chips,
+    // suppressed Home footer, and filled Continue action.
+    // tsp-op5a.374 repins all six Settings evidence frames after read-only rows moved to
+    // the raised surface with a disabled border/ink treatment and structured value slot:
+    // settings/settings-edit include the unavailable remap and diagnostic rows; controls
+    // includes remap, Safe Return, and source; network includes SSID and signal/address;
+    // system includes About, device/storage, and licenses; first-run retains the dimmed
+    // Settings scene beneath its sheet.
     assert!(
-        transcript.contains("e2c6c13e17ea149e9942e7f4158e750f5d2b3b719d8a33e27da84d61d471f7f4  ")
+        transcript.contains("4f90c62598d38163e164c673d870070047dc1d95359a068fe9a9e4229ecf8dea  ")
     );
     assert!(
-        transcript.contains("3837f70659d65037ac0b7bd2267b470c45d70f3046359608f8cbefa8d060ce00  ")
+        transcript.contains("4fdcd773c8df4da621bbba7fb23496edd6774d83e802fe472623fa76c97e4be4  ")
     );
     assert!(
-        transcript.contains("5df9261925db52c484f7b89ebfa853d38ce68c7dd8eee96c91d3c33ff1ad9f74  ")
+        transcript.contains("19749b339081d10aeeb684ec322fe6c1055166c67fafc6a91e891d2a84156593  ")
     );
     assert!(
-        transcript.contains("d12d4d489e74c69613a3b67d237846a6e497b59f2af0d2923f3d956dff959ea4  ")
+        transcript.contains("104e9d5a663eb109bc58480842a77b34f3bc97356ced11b702bd764257806a16  ")
     );
     assert!(
-        transcript.contains("197e9092bba58f5222bc4f4393d4363ce105be23cd1fac2bf8eb6421ce567064  ")
+        transcript.contains("7b95ae4e4942f1cecec93f24bff81227b8486a164abb717304ddfbc6e08febd8  ")
     );
     assert!(
-        transcript.contains("2d0ce0960560a8fbda8d0190ddfcb48a53754f344a16bf1fa3b83d7109643f1b  ")
+        transcript.contains("c5b65200f48f4d6ed642497fcf97020eb7bebb9ee4eee1f946e370b0538ca76a  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

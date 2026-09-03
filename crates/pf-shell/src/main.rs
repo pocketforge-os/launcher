@@ -45,6 +45,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod automation;
+
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 const RUNTIME_FAMILY: &str = "pocketforge/native";
@@ -54,7 +56,7 @@ const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
 const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const LOW_BATTERY_PERCENT: u8 = 20;
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window\n  --fbdev                   interactive framebuffer\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nWayland keyboard (only actions present in the effective input map are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -576,6 +578,7 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     validate_args(&args)?;
+    validate_automation_gate(&args, env::var("PF_SHELL_AUTOMATION").ok().as_deref())?;
     validate_baseline_capture(
         &args,
         env::var_os("PF_BASELINE_RECORD_ONLY").is_some(),
@@ -727,8 +730,14 @@ fn main() -> Result<(), String> {
     core.load_network(&mut *network);
     core.load_system(&*time, &*transfer);
     let fake_device_status = FakeDeviceStatusPort { attention: true };
-    let production_device_status = SysfsDeviceStatusPort::new("/sys/class/power_supply");
-    let device_status: &dyn DeviceStatusPort = if device_fixture_mode {
+    let power_supply_root = interactive_mode
+        .then(|| env::var_os("PF_POWER_SUPPLY_ROOT"))
+        .flatten();
+    let production_device_status =
+        SysfsDeviceStatusPort::new(device_status_root(power_supply_root.as_deref()));
+    let device_status: &dyn DeviceStatusPort = if power_supply_root.is_some() {
+        &production_device_status
+    } else if device_fixture_mode {
         &fake_device_status
     } else {
         &production_device_status
@@ -749,6 +758,7 @@ fn main() -> Result<(), String> {
             .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut input = EvdevInteractiveInput::new(&mut actions);
+        let mut automation = automation_server(&args)?;
         return run_interactive(
             &mut host,
             &mut input,
@@ -765,13 +775,42 @@ fn main() -> Result<(), String> {
             device_status,
             &state_dir,
             JsonRemapStore::at(remap_path),
+            &mut automation,
+            "evdev",
         );
     }
     #[cfg(feature = "wayland")]
     if args.iter().any(|a| a == "--wayland") {
-        let mut host = WaylandHost::connect_with_size(1280, 720).map_err(|e| e.to_string())?;
-        let mut input = WaylandInteractiveInput::new(glyphs.clone());
+        let host = WaylandHost::connect_with_size(1280, 720).map_err(|e| e.to_string())?;
+        let mut host = CapturingWaylandHost::new(host);
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        let mut automation = automation_server(&args)?;
+        if let Some(input_path) = value(&args, "--input") {
+            let (mut source, _) =
+                EvdevActionSource::open_with_map(input_path, &contract, glyphs.clone())
+                    .map_err(|e| format!("input adapter: {e:?}"))?;
+            let mut input = EvdevInteractiveInput::new(&mut source);
+            return run_interactive(
+                &mut host,
+                &mut input,
+                &mut core,
+                footer,
+                preferences,
+                power,
+                glyphs,
+                catalog.expect("wayland catalog"),
+                Path::new(session_socket),
+                network,
+                time,
+                transfer,
+                device_status,
+                &state_dir,
+                JsonRemapStore::at(remap_path),
+                &mut automation,
+                "evdev",
+            );
+        }
+        let mut input = WaylandInteractiveInput::new(glyphs.clone());
         return run_interactive(
             &mut host,
             &mut input,
@@ -788,6 +827,8 @@ fn main() -> Result<(), String> {
             device_status,
             &state_dir,
             JsonRemapStore::at(remap_path),
+            &mut automation,
+            "wayland-keyboard",
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -1032,7 +1073,17 @@ trait InteractiveInput<H> {
     fn next_action(&mut self, host: &mut H, deadline: Deadline) -> Result<ActionPoll, String>;
     fn capture_next_button(&mut self);
     fn apply_effective_map(&mut self, map: &EffectiveMap);
+    fn has_pending(&self) -> bool;
 }
+
+trait EvdevHost {
+    fn service(&mut self) {}
+    fn closed(&self) -> bool {
+        false
+    }
+}
+
+impl EvdevHost for FbdevHost {}
 
 struct EvdevInteractiveInput<'a> {
     source: &'a mut EvdevActionSource,
@@ -1052,12 +1103,12 @@ impl<'a> EvdevInteractiveInput<'a> {
     }
 }
 
-impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
-    fn next_action(
-        &mut self,
-        _host: &mut FbdevHost,
-        deadline: Deadline,
-    ) -> Result<ActionPoll, String> {
+impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
+    fn next_action(&mut self, host: &mut H, deadline: Deadline) -> Result<ActionPoll, String> {
+        host.service();
+        if host.closed() {
+            return Ok(ActionPoll::Closed);
+        }
         let now = self.started.elapsed();
         match self.source.next_input_event(deadline) {
             Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
@@ -1105,6 +1156,9 @@ impl InteractiveInput<FbdevHost> for EvdevInteractiveInput<'_> {
         self.pending.clear();
         self.source.apply_effective_map(map);
     }
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 #[cfg(feature = "wayland")]
@@ -1120,6 +1174,79 @@ trait WaylandInputHost {
     fn is_closed(&self) -> bool;
     fn repeat_info(&self) -> Option<RepeatInfo>;
     fn poll_key_event(&mut self) -> Option<KeyEvent>;
+}
+
+#[cfg(feature = "wayland")]
+struct CapturingWaylandHost {
+    inner: WaylandHost,
+    capture: OffscreenHost,
+}
+
+#[cfg(feature = "wayland")]
+impl CapturingWaylandHost {
+    fn new(inner: WaylandHost) -> Self {
+        Self {
+            capture: OffscreenHost::new(inner.metrics()),
+            inner,
+        }
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl FrameHost for CapturingWaylandHost {
+    fn metrics(&self) -> SurfaceMetrics {
+        self.inner.metrics()
+    }
+    fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+        self.inner.set_theme_base(base);
+        self.capture.set_theme_base(base);
+    }
+    fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+        let ack = self.inner.present(scene)?;
+        self.capture.present(scene)?;
+        Ok(ack)
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl RenderedFrameHost for CapturingWaylandHost {
+    fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+        self.inner
+            .set_text_scale(factor)
+            .map_err(|e| format!("render: {e:?}"))?;
+        self.capture
+            .set_text_scale(factor)
+            .map_err(|e| format!("render: {e:?}"))
+    }
+    fn render_notes(&self) -> Option<&[RenderNote]> {
+        self.capture.frame().map(|f| f.notes.as_slice())
+    }
+    fn raster_frame(&self) -> Option<&RasterFrame> {
+        self.capture.frame()
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl WaylandInputHost for CapturingWaylandHost {
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+    fn repeat_info(&self) -> Option<RepeatInfo> {
+        self.inner.repeat_info()
+    }
+    fn poll_key_event(&mut self) -> Option<KeyEvent> {
+        self.inner.poll_key_event()
+    }
+}
+
+#[cfg(feature = "wayland")]
+impl EvdevHost for CapturingWaylandHost {
+    fn service(&mut self) {
+        while self.inner.poll_key_event().is_some() {}
+    }
+    fn closed(&self) -> bool {
+        self.inner.is_closed()
+    }
 }
 
 #[cfg(feature = "wayland")]
@@ -1202,6 +1329,9 @@ impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
     fn apply_effective_map(&mut self, map: &EffectiveMap) {
         self.map = map.clone();
     }
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1221,6 +1351,8 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     device_status: &dyn DeviceStatusPort,
     state_dir: &Path,
     remap_store: JsonRemapStore,
+    automation: &mut Option<automation::AutomationServer>,
+    input_source: &str,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = SessionClient::new(
@@ -1233,13 +1365,28 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         Err(error) => return Err(format!("session: {error:?}")),
     }
     apply_text_scale(host, core)?;
-    present_interactive(host, core, &activate)?;
+    let mut frames = automation::FrameCounter::default();
+    let mut presented_revision = 0;
+    if present_interactive(host, core, &activate)? {
+        frames.increment();
+        presented_revision = core.revision();
+    }
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     loop {
         let before = redraw_state(core);
-        let poll = actions.next_action(host, deadline)?;
         drive_socket_session(core, &mut session)?;
+        drive_automation(
+            automation,
+            host,
+            core,
+            &activate,
+            frames,
+            presented_revision,
+            input_source,
+            actions.has_pending(),
+        )?;
+        let poll = actions.next_action(host, deadline)?;
         if Instant::now() >= next_device_status_refresh {
             core.load_device_status(device_status);
             next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
@@ -1248,11 +1395,15 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             if matches!(poll, ActionPoll::Closed) {
                 return Ok(());
             }
-            if before != redraw_state(core) {
-                present_interactive(host, core, &activate)?;
+            if before != redraw_state(core) && present_interactive(host, core, &activate)? {
+                frames.increment();
+                presented_revision = core.revision();
             }
             continue;
         };
+        if let Some(server) = automation.as_mut() {
+            server.note_action();
+        }
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
                 request_safe_return_if_active(core, &session);
@@ -1262,7 +1413,10 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 Ok(result) => {
                     core.session_backend_reachable();
                     core.launch_result(&result);
-                    present_interactive(host, core, &activate)?;
+                    if present_interactive(host, core, &activate)? {
+                        frames.increment();
+                        presented_revision = core.revision();
+                    }
                     drive_socket_session(core, &mut session)?;
                 }
                 Err(SessionError::BackendUnavailable) => core.session_backend_unavailable(),
@@ -1374,9 +1528,128 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         if before != redraw_state(core) {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            present_interactive(host, core, &activate)?;
+            if present_interactive(host, core, &activate)? {
+                frames.increment();
+                presented_revision = core.revision();
+            }
         }
     }
+}
+
+fn automation_server(args: &[String]) -> Result<Option<automation::AutomationServer>, String> {
+    value(args, "--automation-socket")
+        .map(|path| automation::AutomationServer::bind(Path::new(path)))
+        .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_automation(
+    server: &mut Option<automation::AutomationServer>,
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+    frames: automation::FrameCounter,
+    presented_revision: u64,
+    input_source: &str,
+    input_pending: bool,
+) -> Result<(), String> {
+    let Some(server) = server.as_mut() else {
+        return Ok(());
+    };
+    let metrics = host.metrics();
+    let route = format!("{:?}", core.route()).to_ascii_lowercase();
+    let requests = {
+        let scene = core.scene(metrics, prompt);
+        let ids = core.search_result_ids();
+        let snapshot = automation::Snapshot {
+            frames,
+            revision: core.revision(),
+            presented_revision,
+            input_pending,
+            route: &route,
+            input_source,
+            metrics,
+            text_scale: core.text_scale(),
+            high_contrast: core.high_contrast(),
+            search_query: core.search_query(),
+            search_result_ids: &ids,
+            scene: scene.as_ref(),
+        };
+        server.poll(&snapshot)?
+    };
+    for request in &requests {
+        let reply = match &request.command {
+            automation::Command::Ping => {
+                let empty: [&str; 0] = [];
+                let snapshot = automation::Snapshot {
+                    frames,
+                    revision: core.revision(),
+                    presented_revision,
+                    input_pending: false,
+                    route: &route,
+                    input_source,
+                    metrics,
+                    text_scale: core.text_scale(),
+                    high_contrast: core.high_contrast(),
+                    search_query: core.search_query(),
+                    search_result_ids: &empty,
+                    scene: None,
+                };
+                automation::ping(&snapshot)
+            }
+            automation::Command::Scene => {
+                let scene = core.scene(metrics, prompt);
+                let ids = core.search_result_ids();
+                let snapshot = automation::Snapshot {
+                    frames,
+                    revision: core.revision(),
+                    presented_revision,
+                    input_pending: false,
+                    route: &route,
+                    input_source,
+                    metrics,
+                    text_scale: core.text_scale(),
+                    high_contrast: core.high_contrast(),
+                    search_query: core.search_query(),
+                    search_result_ids: &ids,
+                    scene: scene.as_ref(),
+                };
+                automation::scene(&snapshot)
+            }
+            automation::Command::Capture { path } => {
+                if let Some(frame) = host.raster_frame() {
+                    FsScreenshotWriter.write_png(path, frame)?;
+                    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+                    serde_json::json!({"ok":true,"path":path,"sha256":hex(&Sha256::digest(bytes))})
+                } else {
+                    serde_json::json!({"ok":false,"error":"no_frame"})
+                }
+            }
+            automation::Command::Text { value } => {
+                core.set_search_query(value);
+                server.note_action();
+                serde_json::json!({"ok":true})
+            }
+            automation::Command::WaitIdle { .. } => continue,
+        };
+        let empty: [&str; 0] = [];
+        let updated = automation::Snapshot {
+            frames,
+            revision: core.revision(),
+            presented_revision,
+            input_pending: false,
+            route: &route,
+            input_source,
+            metrics,
+            text_scale: core.text_scale(),
+            high_contrast: core.high_contrast(),
+            search_query: core.search_query(),
+            search_result_ids: &empty,
+            scene: None,
+        };
+        server.reply(request, &reply, &updated)?;
+    }
+    Ok(())
 }
 
 fn authority_rpc(
@@ -3244,8 +3517,13 @@ fn use_device_fixtures(args: &[String], fixture_mode: bool) -> bool {
     fixture_mode || args.iter().any(|arg| arg == "--device-fixtures")
 }
 
+fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
+    override_root.map_or_else(|| PathBuf::from("/sys/class/power_supply"), PathBuf::from)
+}
+
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 11] = [
+    const VALUE_FLAGS: [&str; 12] = [
+        "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
         "--catalog-snapshot",
@@ -3291,6 +3569,20 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         return Err(
             "usage error: --catalog-root and --catalog-snapshot cannot be used together".into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_automation_gate(args: &[String], gate: Option<&str>) -> Result<(), String> {
+    if value(args, "--automation-socket").is_some() && gate != Some("1") {
+        return Err("usage error: --automation-socket requires PF_SHELL_AUTOMATION=1".into());
+    }
+    if value(args, "--automation-socket").is_some()
+        && !args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--wayland" | "--fbdev"))
+    {
+        return Err("usage error: --automation-socket requires --wayland or --fbdev".into());
     }
     Ok(())
 }
@@ -6122,6 +6414,30 @@ mod durable_tests {
 
     #[cfg(feature = "wayland")]
     #[test]
+    fn wayland_evdev_input_services_closed_host_before_reading_events() {
+        struct ClosedHost;
+        impl EvdevHost for ClosedHost {
+            fn closed(&self) -> bool {
+                true
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events");
+        fs::write(&path, []).unwrap();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        assert_eq!(
+            input
+                .next_action(&mut ClosedHost, Deadline(MonotonicTime::ZERO))
+                .unwrap(),
+            ActionPoll::Closed
+        );
+    }
+
+    #[cfg(feature = "wayland")]
+    #[test]
     fn wayland_synthetic_release_clears_direction_repeat() {
         let info = RepeatInfo {
             rate: 10,
@@ -7399,6 +7715,39 @@ exec="./launch"
             control_bindings(&reset)
                 .iter()
                 .any(|binding| binding.action == "Activate" && binding.binding == "A")
+        );
+    }
+
+    #[test]
+    fn automation_socket_requires_exact_gate_and_interactive_mode() {
+        let args = vec![
+            "--wayland".into(),
+            "--automation-socket".into(),
+            "/tmp/a".into(),
+        ];
+        assert!(
+            validate_automation_gate(&args, None)
+                .unwrap_err()
+                .contains("PF_SHELL_AUTOMATION=1")
+        );
+        assert!(validate_automation_gate(&args, Some("1")).is_ok());
+        let noninteractive = vec!["--automation-socket".into(), "/tmp/a".into()];
+        assert!(
+            validate_automation_gate(&noninteractive, Some("1"))
+                .unwrap_err()
+                .contains("requires --wayland or --fbdev")
+        );
+    }
+
+    #[test]
+    fn power_supply_override_selects_exact_root() {
+        assert_eq!(
+            device_status_root(None),
+            PathBuf::from("/sys/class/power_supply")
+        );
+        assert_eq!(
+            device_status_root(Some(std::ffi::OsStr::new("/tmp/fake-power"))),
+            PathBuf::from("/tmp/fake-power")
         );
     }
 }

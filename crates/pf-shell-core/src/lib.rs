@@ -4144,7 +4144,7 @@ impl ShellCore {
                 node(
                     "search-hint",
                     Role::Text,
-                    "SEARCH · Titles and tags · Back returns to where you were",
+                    "Titles and tags · Back returns to where you were",
                     column_left,
                     hint_top,
                     column_width,
@@ -5096,16 +5096,41 @@ impl ShellCore {
             let row_line_height = scaled_text_box_height(24.0, self.text_scale);
             let row_line_top = 7.0 * scale;
             let row_line_step = 25.0 * scale;
+            let is_toggle = row.id.starts_with("accessibility-")
+                && lines
+                    .last()
+                    .is_some_and(|line| line.starts_with("ON") || line.starts_with("OFF"));
+            let toggle_control_left = is_toggle.then(|| {
+                let state = if lines.last().is_some_and(|line| line.starts_with("ON")) {
+                    "ON"
+                } else {
+                    "OFF"
+                };
+                let state_width = settings_scaled_box_width(44.0, state, self.text_scale);
+                let toggle_gap = SPACE_2 * scale;
+                let track_width = 58.0 * scale;
+                let control_right = content_left + content_width - 26.0;
+                control_right - state_width - toggle_gap - track_width
+            });
+            let label_left = content_left + 16.0;
+            let label_width = toggle_control_left.map_or(content_width - 150.0, |control_left| {
+                (control_left - SPACE_2 * scale - label_left).max(0.0)
+            });
             let mut fills = Vec::new();
             let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
+                let painted_line = if is_toggle {
+                    ellipsize_to_lines(line, label_width / scale, 1)
+                } else {
+                    (*line).to_owned()
+                };
                 let mut label = node(
                     &format!("settings-row-{}-line-{line_index}", row.id),
                     Role::Text,
-                    line,
-                    content_left + 16.0,
+                    &painted_line,
+                    label_left,
                     scene_row.bounds.y + row_line_top + line_index as f32 * row_line_step,
-                    content_width - 150.0,
+                    label_width,
                     row_line_height,
                     row_surface,
                 );
@@ -5115,7 +5140,7 @@ impl ShellCore {
                 if !interactive && lines.len() == 1 && self.text_scale > 100 {
                     label.bounds.height = row_height - 2.0 * row_line_top;
                     label = declared_multiline(label);
-                } else if line_index > 0 && self.text_scale > 100 {
+                } else if line_index > 0 && self.text_scale > 100 && !is_toggle {
                     // Settings descriptions are prose and may wrap as their effective
                     // font grows. Give the declared multiline node the remainder of
                     // its scaled row instead of clipping it to one nominal line box.
@@ -5204,11 +5229,7 @@ impl ShellCore {
                     value_node.state.focused = false;
                     text.push(value_node);
                 }
-            } else if row.id.starts_with("accessibility-")
-                && lines
-                    .last()
-                    .is_some_and(|line| line.starts_with("ON") || line.starts_with("OFF"))
-            {
+            } else if is_toggle {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
                 let state = if on { "ON" } else { "OFF" };
                 let state_width = settings_scaled_box_width(44.0, state, self.text_scale);
@@ -5217,8 +5238,7 @@ impl ShellCore {
                 let track_height = 28.0 * scale;
                 let knob_size = 20.0 * scale;
                 let knob_inset = 4.0 * scale;
-                let control_right = content_left + content_width - 26.0;
-                let control_left = control_right - state_width - toggle_gap - track_width;
+                let control_left = toggle_control_left.expect("toggle control geometry");
                 let group_center_y = scene_row.bounds.y + scene_row.bounds.height / 2.0;
                 let state_height = if self.text_scale == 100 {
                     // Extending the transparent bottom of the text box preserves
@@ -8904,6 +8924,88 @@ mod tests {
         let scene = settings_scene(&core);
         let row = find(scene.root(), "settings-row-accessibility-textScale").unwrap();
         assert!((row.bounds.height - 148.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn settings_toggle_captions_keep_space_2_ink_gap_at_two_hundred_percent() {
+        fn changed_x_extent(rendered: &[u8], without: &[u8], width: usize) -> (usize, usize) {
+            let columns = rendered
+                .chunks_exact(4)
+                .zip(without.chunks_exact(4))
+                .enumerate()
+                .filter_map(|(pixel, (painted, blank))| (painted != blank).then_some(pixel % width))
+                .collect::<Vec<_>>();
+            (
+                *columns.iter().min().expect("node must produce raster ink"),
+                *columns.iter().max().expect("node must produce raster ink"),
+            )
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("200%".into()),
+            stored: PreferenceValue::Text("200%".into()),
+            applied: true,
+        });
+
+        let scene = core.scene(metrics, "").unwrap();
+        let mut rasterizer = Rasterizer::new();
+        rasterizer.set_text_scale(2.0).unwrap();
+        let rendered = rasterizer.render(&scene, metrics).unwrap();
+        for id in ["highContrast", "reduceMotion"] {
+            let caption_id = format!("settings-row-accessibility-{id}-line-1");
+            let state_id = format!("settings-toggle-accessibility-{id}-state");
+
+            let mut without_caption_root = scene.root().clone();
+            assert!(mutate_label(
+                &mut without_caption_root,
+                &caption_id,
+                Some(""),
+                None
+            ));
+            let without_caption = rasterizer
+                .render(
+                    &Scene::new(without_caption_root, scene.default_focus().clone()).unwrap(),
+                    metrics,
+                )
+                .unwrap();
+            let mut without_state_root = scene.root().clone();
+            assert!(mutate_label(
+                &mut without_state_root,
+                &state_id,
+                Some(""),
+                None
+            ));
+            let without_state = rasterizer
+                .render(
+                    &Scene::new(without_state_root, scene.default_focus().clone()).unwrap(),
+                    metrics,
+                )
+                .unwrap();
+
+            let (_, caption_ink_right) = changed_x_extent(
+                &rendered.rgba,
+                &without_caption.rgba,
+                rendered.width as usize,
+            );
+            let (state_ink_left, _) =
+                changed_x_extent(&rendered.rgba, &without_state.rgba, rendered.width as usize);
+            let ink_gap = state_ink_left - caption_ink_right - 1;
+            assert!(
+                ink_gap as f32 >= SPACE_2,
+                "{id} caption-to-value ink gap must be at least SPACE_2: got {ink_gap}px"
+            );
+        }
     }
 
     #[test]

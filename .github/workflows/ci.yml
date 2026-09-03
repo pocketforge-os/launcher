@@ -7,7 +7,10 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, pf-builder-vm]
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -28,8 +31,6 @@ jobs:
       - run: cargo test --workspace --locked
       - name: Soak desktop launch and return against real authority
         run: ./scripts/desktop-sim-soak.sh
-      - name: Install Wayland keyboard dependency
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - run: cargo build -p pf-shell --features wayland --locked
       - run: cargo test -p pf-shell --bin pf-shell --features wayland --locked wayland_
       - run: cargo clippy -p pf-shell --features wayland --all-targets -- -D warnings

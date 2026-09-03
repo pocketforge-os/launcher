@@ -1,0 +1,22 @@
+# cargo-nextest configuration for launcher CI.
+#
+# The workspace test suite has two heavy shapes: (1) tests that spawn a
+# CPU-heavy `pf-shell --offscreen` (or fresh-process) subprocess — the
+# frame_hashes and mockup_diff integration tests and the taffy-spike
+# fresh-process determinism test — and (2) the in-process invariant-matrix /
+# evidence guard sweeps. A subprocess-spawning test occupies a nextest slot
+# AND a full extra core (its child), so running the whole default-width pool on
+# the pf-builder VM oversubscribed the box and starved every heavy test: a
+# matrix cell that runs ~10s in isolation stretched to ~280s, and the
+# byte-identity render pair to ~870s (measured, CI run before this config).
+#
+# Cap the subprocess-spawning tests in their own group so their child processes
+# cannot amplify core demand past the machine, leaving the rest of the pool for
+# the in-process sweeps. Correctness is unchanged — this only bounds
+# concurrency; every test still runs, in its own process, with all assertions.
+[test-groups]
+offscreen-subprocess = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(frame_hashes) + binary(mockup_diff) + test(complete_matrix_is_deterministic_in_fresh_processes)'
+test-group = 'offscreen-subprocess'

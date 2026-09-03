@@ -921,6 +921,7 @@ version = "0.0.0"
 dependencies = [
  "pf-render",
  "pf-scene",
+ "pf-shell-core",
  "sha2",
  "taffy",
 ]

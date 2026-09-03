@@ -2510,10 +2510,118 @@ fn raster_guard_record(
             )
         })
         .and_then(|()| assert_raster_text_legible(scene, metrics, base, text_scale_percent))
+        .and_then(|()| assert_focusable_targets_meet_minimum_size(scene))
     {
         Ok(()) => Ok("PASS".to_owned()),
         Err(error) if baseline_record_only => Ok(format!("FAIL: {error}")),
         Err(error) => Err(error),
+    }
+}
+
+/// Every actionable/focusable node must present a target box of at least
+/// `MIN_TARGET_SIZE_PX` on each edge. The floor is a fixed physical-pixel value: it does
+/// NOT shrink at 100% scale, and actionable targets naturally exceed it as they grow at
+/// 150/200%. The 48px constant is the single source of truth shared with the Taffy
+/// spike's `validate_geometry` (`pf_shell_core::MIN_TARGET_SIZE_PX`).
+///
+/// This is a DOCUMENTED-BASELINE gate (coordinator ruling on tsp-op5a.382, same mechanism
+/// as Gap 3's frozen legacy-record allowlist): the guard's first full sweep found the
+/// owner-gated sub-minimum targets enumerated below, so they are DOCUMENTED here rather
+/// than fixed in this bead (the 40/44px row heights are shipped-look-vs-D011-mockup calls
+/// the owner ratifies). The guard FAILS on any sub-minimum actionable node NOT matched by
+/// the documented set — a new route, a new control, a changed height, or a count excess —
+/// so regressions fail while the known state is documented, never laundered. The entire
+/// documented set (Library + Quick + Search, 19 targets) is tracked in tsp-op5a.387,
+/// which ratifies the 48px minimum (bump + rebaseline) or parameterizes it and removes
+/// these entries.
+fn assert_focusable_targets_meet_minimum_size(scene: &pf_scene::Scene) -> Result<(), String> {
+    // Stable exact-id class: Library toolbar/chips (44px, LIB_TOOLBAR_HEIGHT/CHIP_HEIGHT)
+    // and Quick overlay action rows (40px). Their node ids are stable, so they are keyed
+    // exactly. Each entry carries height + token rationale + the tracking bead on one line
+    // (rustfmt::skip keeps the id and its citation on the same line, per the coord ruling).
+    #[rustfmt::skip]
+    const DOCUMENTED_SUBMIN_TARGET_IDS: &[(&str, &str)] = &[
+        ("library-search", "44px LIB_TOOLBAR_HEIGHT toolbar; tracked: tsp-op5a.387"),
+        ("library-filter-0", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-1", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-2", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-3", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("quick-0", "40px Quick overlay action row; tracked: tsp-op5a.387"),
+        ("quick-1", "40px Quick overlay action row; tracked: tsp-op5a.387"),
+        ("quick-power-power-off", "40px Quick power row; tracked: tsp-op5a.387"),
+        ("quick-power-restart", "40px Quick power row; tracked: tsp-op5a.387"),
+        ("quick-power-idle", "40px Quick power row; tracked: tsp-op5a.387"),
+        ("quick-capture-screenshot", "40px Quick capture row; tracked: tsp-op5a.387"),
+    ];
+
+    // Control-class key for the Search results route (NOT keyed by node id). The eight
+    // search-result rows carry game-slug ids that legitimately change with the fixture /
+    // catalog, so keying by slug would either churn on a rename or launder a real
+    // regression. Instead a sub-minimum node is a documented search result iff its id
+    // starts with `SEARCH_RESULT_PREFIX` AND its height is exactly `SEARCH_RESULT_HEIGHT_PX`,
+    // and the search evidence route renders EXACTLY `SEARCH_RESULT_COUNT` of them. A renamed
+    // slug then passes untouched, but a ninth row (count excess) or any changed height is
+    // NOT matched and FAILS. tracked: tsp-op5a.387
+    const SEARCH_RESULT_PREFIX: &str = "search-result-";
+    const SEARCH_RESULT_HEIGHT_PX: f32 = 44.0;
+    const SEARCH_RESULT_COUNT: usize = 8;
+
+    fn collect_submin<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+        if node.action.is_some()
+            && (node.bounds.width < pf_shell_core::MIN_TARGET_SIZE_PX
+                || node.bounds.height < pf_shell_core::MIN_TARGET_SIZE_PX)
+        {
+            out.push(node);
+        }
+        for child in &node.children {
+            collect_submin(child, out);
+        }
+    }
+
+    let mut submin = Vec::new();
+    collect_submin(scene.root(), &mut submin);
+
+    let mut failures = Vec::new();
+    let mut documented_search_results = 0_usize;
+    for node in &submin {
+        let id = node.id.as_str();
+        if DOCUMENTED_SUBMIN_TARGET_IDS
+            .iter()
+            .any(|(doc, _)| *doc == id)
+        {
+            continue;
+        }
+        if id.starts_with(SEARCH_RESULT_PREFIX)
+            && (node.bounds.height - SEARCH_RESULT_HEIGHT_PX).abs() < f32::EPSILON
+        {
+            documented_search_results += 1;
+            continue;
+        }
+        failures.push(format!(
+            "{id}: focusable target {}x{} is below the {}px minimum and is not a documented sub-minimum target ({:?})",
+            node.bounds.width,
+            node.bounds.height,
+            pf_shell_core::MIN_TARGET_SIZE_PX,
+            node.bounds
+        ));
+    }
+    // The search route documents EXACTLY SEARCH_RESULT_COUNT sub-minimum rows; any other
+    // non-zero count (a ninth row, or a dropped row that needs re-review) fails. A scene
+    // with none present (every other route, and search at 150/200% where rows clear 48px)
+    // is unaffected.
+    if documented_search_results != 0 && documented_search_results != SEARCH_RESULT_COUNT {
+        failures.push(format!(
+            "search-result rows: found {documented_search_results} sub-minimum {SEARCH_RESULT_HEIGHT_PX}px rows, documented count is exactly {SEARCH_RESULT_COUNT} (tracked: tsp-op5a.387)"
+        ));
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "focusable target-size guard failed:\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -4126,33 +4234,259 @@ mod durable_tests {
         validate_baseline_capture(&args, true, true).unwrap();
     }
 
+    /// Frozen legacy-failure allowlist: the pre-Taffy legacy-engine failure captures
+    /// from Spike 0/1. These records intentionally retain a FAIL raster-guard outcome as
+    /// historical evidence and must NOT be regenerated, deleted, or rebaselined
+    /// (coordinator ruling, tsp-op5a.382 Round 2). Each entry maps the record's
+    /// baseline-relative path to a substring of its documented failing node id; a frozen
+    /// record whose FAIL text no longer names that node is rejected, so a silent
+    /// regeneration cannot hide behind the freeze. Same named-exemption discipline as
+    /// `allowed_text_overflow` in the paint-containment guard — no blanket entries.
+    const FROZEN_LEGACY_FAILURE_RECORDS: &[(&str, &str)] = &[
+        // Library action-name captions painted no ink on the legacy engine at the large
+        // surface across every scale. pre-Taffy legacy-engine failure documentation, Spike 0/1.
+        (
+            "large/100/library.json",
+            "action-name-library-item-fern-and-fathom",
+        ),
+        (
+            "large/150/library.json",
+            "action-name-library-item-fern-and-fathom",
+        ),
+        (
+            "large/200/library.json",
+            "action-name-library-item-fern-and-fathom",
+        ),
+        // Home card titles painted no ink on the legacy engine at the small surface across
+        // every scale. pre-Taffy legacy-engine failure documentation, Spike 0/1.
+        ("small/100/home.json", "home-card-title-ridgeline"),
+        ("small/150/home.json", "home-card-title-ridgeline"),
+        ("small/200/home.json", "home-card-title-ridgeline"),
+        // The Quick overlay capture-screenshot action failed the raster floor/occlusion
+        // check on the legacy engine at the small surface across every scale. pre-Taffy
+        // legacy-engine failure documentation, Spike 0/1.
+        (
+            "small/100/overlay.json",
+            "action-name-quick-capture-screenshot",
+        ),
+        (
+            "small/150/overlay.json",
+            "action-name-quick-capture-screenshot",
+        ),
+        (
+            "small/200/overlay.json",
+            "action-name-quick-capture-screenshot",
+        ),
+    ];
+
+    /// Verdict for a single committed baseline record: `Some(reason)` rejects it.
+    /// A record is accepted only if it returned `PASS`, or if it is a frozen legacy failure
+    /// whose FAIL text still names the documented failing node. Any other outcome — a NEW
+    /// FAIL at a non-frozen path, a `NOT_RUN`, or a frozen record whose FAIL text drifted to
+    /// a different node — is rejected, so record-only capture can never launder a NEW
+    /// regression into an accepted committed record.
+    fn committed_baseline_record_rejection(relative_path: &str, outcome: &str) -> Option<String> {
+        if outcome == "PASS" {
+            return None;
+        }
+        match FROZEN_LEGACY_FAILURE_RECORDS
+            .iter()
+            .find(|(path, _)| *path == relative_path)
+        {
+            Some((_, documented_node)) => {
+                if !outcome.starts_with("FAIL: ") {
+                    return Some(format!(
+                        "{relative_path}: frozen legacy-failure record must retain a FAIL outcome, got {outcome:?}"
+                    ));
+                }
+                if !outcome.contains(documented_node) {
+                    return Some(format!(
+                        "{relative_path}: frozen legacy-failure text no longer names documented node {documented_node:?}; regenerate to PASS and drop it from the frozen list, or restore the documented failure"
+                    ));
+                }
+                None
+            }
+            None => Some(format!(
+                "{relative_path}: committed record must be PASS (got {outcome:?}); a new FAIL record can never land"
+            )),
+        }
+    }
+
+    #[test]
+    fn focusable_target_guard_rejects_an_undersized_actionable_node() {
+        let mut action = Node::new(
+            pf_scene::NodeId::new("tiny-action").unwrap(),
+            Role::Button,
+            "Tiny",
+            pf_scene::Bounds::new(0.0, 0.0, 40.0, 40.0),
+            "--color-surface-canvas",
+        );
+        action.action = Some(pf_scene::NodeAction::Activate);
+        let scene =
+            pf_scene::Scene::new(action, pf_scene::NodeId::new("tiny-action").unwrap()).unwrap();
+        let error = assert_focusable_targets_meet_minimum_size(&scene).unwrap_err();
+        assert!(
+            error.contains("tiny-action") && error.contains("below the"),
+            "undersized focusable node must be rejected: {error}"
+        );
+    }
+
+    #[test]
+    fn focusable_target_guard_accepts_a_compliant_actionable_node() {
+        let mut action = Node::new(
+            pf_scene::NodeId::new("ok-action").unwrap(),
+            Role::Button,
+            "Ok",
+            pf_scene::Bounds::new(0.0, 0.0, 48.0, 48.0),
+            "--color-surface-canvas",
+        );
+        action.action = Some(pf_scene::NodeAction::Activate);
+        let scene =
+            pf_scene::Scene::new(action, pf_scene::NodeId::new("ok-action").unwrap()).unwrap();
+        assert!(assert_focusable_targets_meet_minimum_size(&scene).is_ok());
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn search_results_scene(ids: &[&str], height: f32) -> pf_scene::Scene {
+        let mut root = Node::new(
+            pf_scene::NodeId::new("search-results").unwrap(),
+            Role::Group,
+            "results",
+            pf_scene::Bounds::new(0.0, 0.0, 1280.0, 720.0),
+            "--color-surface-canvas",
+        );
+        let mut children = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            let mut row = Node::new(
+                pf_scene::NodeId::new(*id).unwrap(),
+                Role::Button,
+                "Result",
+                pf_scene::Bounds::new(240.0, 180.0 + index as f32 * 56.0, 800.0, height),
+                "--color-surface-canvas",
+            );
+            row.action = Some(pf_scene::NodeAction::Activate);
+            children.push(row);
+        }
+        root.children = children;
+        pf_scene::Scene::new(root, pf_scene::NodeId::new("search-results").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn focusable_target_guard_accepts_renamed_search_slugs_at_the_documented_count() {
+        // Eight sub-minimum search-result rows with ARBITRARY (renamed) slugs pass: the
+        // documented gate keys the search route by control class + height + count, not slug.
+        let scene = search_results_scene(
+            &[
+                "search-result-renamed-a",
+                "search-result-renamed-b",
+                "search-result-renamed-c",
+                "search-result-renamed-d",
+                "search-result-renamed-e",
+                "search-result-renamed-f",
+                "search-result-renamed-g",
+                "search-result-renamed-h",
+            ],
+            44.0,
+        );
+        assert!(assert_focusable_targets_meet_minimum_size(&scene).is_ok());
+    }
+
+    #[test]
+    fn focusable_target_guard_rejects_a_ninth_sub_minimum_search_result() {
+        let ids: Vec<String> = (0..9).map(|i| format!("search-result-{i}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let scene = search_results_scene(&refs, 44.0);
+        let error = assert_focusable_targets_meet_minimum_size(&scene).unwrap_err();
+        assert!(
+            error.contains("documented count is exactly 8"),
+            "a ninth sub-minimum search result must fail as count excess: {error}"
+        );
+    }
+
+    #[test]
+    fn focusable_target_guard_rejects_a_search_result_with_a_changed_height() {
+        // A search-result row at a DIFFERENT sub-minimum height is not matched by the class
+        // key (height != 44) and fails as an undocumented target.
+        let scene = search_results_scene(&["search-result-shrunk"], 40.0);
+        let error = assert_focusable_targets_meet_minimum_size(&scene).unwrap_err();
+        assert!(
+            error.contains("search-result-shrunk") && error.contains("not a documented"),
+            "a search result at a changed height must fail: {error}"
+        );
+    }
+
     #[test]
     fn committed_baseline_records_have_raster_guard_outcomes() {
         let baseline = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/taffy-baseline");
-        let mut incomplete = Vec::new();
+        let mut rejections = Vec::new();
         for surface in ["small", "standard", "portrait", "large"] {
             for scale in ["100", "150", "200"] {
                 for fixture in ["home", "library", "settings", "overlay"] {
-                    let path = baseline
-                        .join(surface)
-                        .join(scale)
-                        .join(format!("{fixture}.json"));
+                    let relative = format!("{surface}/{scale}/{fixture}.json");
+                    let path = baseline.join(&relative);
                     let record = fs::read_to_string(&path)
                         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
                     let record: serde_json::Value = serde_json::from_str(&record)
                         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
-                    let guarded = record["raster_guard"]
-                        .as_str()
-                        .is_some_and(|outcome| outcome == "PASS" || outcome.starts_with("FAIL: "));
-                    if !guarded {
-                        incomplete.push(path);
+                    let outcome = record["raster_guard"].as_str().unwrap_or_else(|| {
+                        panic!("{} has no string raster_guard outcome", path.display())
+                    });
+                    if let Some(rejection) = committed_baseline_record_rejection(&relative, outcome)
+                    {
+                        rejections.push(rejection);
                     }
                 }
             }
         }
         assert!(
-            incomplete.is_empty(),
-            "baseline records without raster-guard outcomes: {incomplete:#?}"
+            rejections.is_empty(),
+            "committed baseline records must be PASS or a documented frozen legacy failure:\n{}",
+            rejections.join("\n")
+        );
+    }
+
+    #[test]
+    fn committed_baseline_record_gate_rejects_a_new_fail_at_a_non_frozen_path() {
+        // A FAIL record at a path not in the frozen legacy allowlist is a NEW regression
+        // and must be rejected — this is the record-only laundering hole the gate closes.
+        let rejection = committed_baseline_record_rejection(
+            "standard/100/home.json",
+            "FAIL: raster ink guard failed:\nsome-node: ink_pixels=0",
+        );
+        assert!(
+            rejection
+                .as_deref()
+                .is_some_and(|message| message.contains("a new FAIL record can never land")),
+            "expected a non-frozen FAIL to be rejected, got {rejection:?}"
+        );
+    }
+
+    #[test]
+    fn committed_baseline_record_gate_rejects_a_frozen_record_with_a_different_failure() {
+        // A frozen-path record whose FAIL text no longer names the documented failing
+        // node is a silent regeneration and must be rejected.
+        let rejection = committed_baseline_record_rejection(
+            "small/100/home.json",
+            "FAIL: raster ink guard failed:\nsome-other-node: ink_pixels=0",
+        );
+        assert!(
+            rejection
+                .as_deref()
+                .is_some_and(|message| message.contains("no longer names documented node")),
+            "expected a drifted frozen record to be rejected, got {rejection:?}"
+        );
+    }
+
+    #[test]
+    fn committed_baseline_record_gate_accepts_pass_and_documented_frozen_failures() {
+        assert!(committed_baseline_record_rejection("standard/100/home.json", "PASS").is_none());
+        assert!(
+            committed_baseline_record_rejection(
+                "small/100/home.json",
+                "FAIL: raster ink guard failed:\nhome-card-title-ridgeline (\"Ridgeline\"): ink_pixels=0",
+            )
+            .is_none(),
+            "a frozen record naming its documented node must be accepted"
         );
     }
 

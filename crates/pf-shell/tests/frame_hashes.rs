@@ -1,11 +1,42 @@
 use std::process::Command;
 
+/// Build the offscreen command that produces frame-hash evidence. EVERY frame-hash
+/// test must go through this helper so the structural raster guard runs on the exact
+/// scenes whose digests we baseline — an expected-digest update can no longer land
+/// without containment / occlusion / target-size firing on the same command.
+fn frame_hash_command(out_dir: &std::path::Path, extra_args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pf-shell"));
+    command
+        .arg("--offscreen")
+        .args(extra_args)
+        .args(["--out", out_dir.to_str().unwrap()])
+        .env("PF_RASTER_INK_GUARD", "1");
+    command
+}
+
+#[test]
+fn frame_hash_commands_always_set_the_raster_ink_guard() {
+    let out = tempfile::tempdir().unwrap();
+    for extra_args in [
+        Vec::<&str>::new(),
+        vec!["--settings-evidence"],
+        vec!["--session-unavailable"],
+    ] {
+        let command = frame_hash_command(out.path(), &extra_args);
+        let guard = command.get_envs().find_map(|(key, value)| {
+            (key == std::ffi::OsStr::new("PF_RASTER_INK_GUARD")).then_some(value)
+        });
+        assert_eq!(
+            guard,
+            Some(Some(std::ffi::OsStr::new("1"))),
+            "frame-hash command for {extra_args:?} must set PF_RASTER_INK_GUARD=1"
+        );
+    }
+}
+
 fn render_offscreen() -> (tempfile::TempDir, String) {
     let out = tempfile::tempdir().unwrap();
-    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
-        .args(["--offscreen", "--out", out.path().to_str().unwrap()])
-        .output()
-        .unwrap();
+    let run = frame_hash_command(out.path(), &[]).output().unwrap();
     assert!(
         run.status.success(),
         "{}",
@@ -239,13 +270,7 @@ fn vertical_slice_frame_hashes_are_stable() {
 #[test]
 fn settings_and_first_run_frame_hashes_are_stable() {
     let out = tempfile::tempdir().unwrap();
-    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
-        .args([
-            "--offscreen",
-            "--settings-evidence",
-            "--out",
-            out.path().to_str().unwrap(),
-        ])
+    let run = frame_hash_command(out.path(), &["--settings-evidence"])
         .output()
         .unwrap();
     assert!(
@@ -293,13 +318,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
 #[test]
 fn degraded_authority_status_indicator_frame_hash_is_stable() {
     let out = tempfile::tempdir().unwrap();
-    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
-        .args([
-            "--offscreen",
-            "--session-unavailable",
-            "--out",
-            out.path().to_str().unwrap(),
-        ])
+    let run = frame_hash_command(out.path(), &["--session-unavailable"])
         .output()
         .unwrap();
     assert!(

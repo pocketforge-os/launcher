@@ -199,7 +199,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         // Details routes rebaseline for the quiet-console layout polish, including
         // the active-variant window, collapsed empty-description slot, and the
         // described fixture's two-line body copy.
-        // Search intentionally rebaselines for its single focus owner and chip-only prompt paint.
+        // Search intentionally rebaselines for tsp-op5a.371's shorter hint after
+        // removing the redundant SEARCH prefix.
         "6f9c658df4def86762e94e126564d9657a5c27c5fe5bf31264ad93cab747b244  ",
         "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
         "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
@@ -210,7 +211,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         // the actual scaled title bottom instead of a shorter duplicate metric.
         "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
         "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
-        "83618428f80c2376d167435dcae5cc11c575a1e09148e2cca650ffe411397c5d  ",
+        "fca16869edeeb475f684838f7564839cd7d8ca63571a80eccefa2b8c352609c4  ",
         "1d524919fe690aefe16595c30785394e876b593392b0abe83c41a1383f0d05ca  ",
         "129850b67760cdbe6c9ec9f167e0140188738474348f7fe1eb86fae48f608156  ",
         "eb3e4049e7b52d92370ca9f7824953835211da8938286313086b44537809e5b3  ",

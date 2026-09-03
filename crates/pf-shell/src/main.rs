@@ -4928,6 +4928,10 @@ mod durable_tests {
         );
         assert!(!search_box.state.focused);
         let hint = find_search_node(root, "search-hint").unwrap();
+        assert_eq!(
+            hint.accessible_label,
+            "Titles and tags · Back returns to where you were"
+        );
         assert_eq!(hint.type_role, pf_scene::TypeRole::Caption);
         assert_eq!(hint.ink_token.as_deref(), Some("--color-text-muted"));
     }

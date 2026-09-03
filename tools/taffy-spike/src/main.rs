@@ -49,10 +49,11 @@ struct RectF {
 
 fn main() {
     if env::args().any(|arg| arg == "--matrix-child") {
-        let (digest, p95) = run_matrix().unwrap_or_else(|error| panic!("{error}"));
+        let (digest, layout_warm_p95_us, shaping_cold_us) =
+            run_matrix().unwrap_or_else(|error| panic!("{error}"));
         let binary_delta = binary_delta_metric();
         eprintln!(
-            "SMOKE cpu_layout_p95_us={p95} peak_rss_kib={} binary_bytes={} {binary_delta}",
+            "SMOKE layout_warm_p95_us={layout_warm_p95_us} shaping_cold_us={shaping_cold_us} peak_rss_kib={} binary_bytes={} {binary_delta}",
             peak_rss_kib(),
             binary_size()
         );
@@ -82,9 +83,10 @@ fn main() {
     print!("{}", String::from_utf8_lossy(&outputs[0]));
 }
 
-fn run_matrix() -> Result<(String, u128), String> {
+fn run_matrix() -> Result<(String, u128, u128), String> {
     let mut matrix_hash = Sha256::new();
     let mut timings = Vec::new();
+    let mut shaping_cold_us = 0;
     for (surface, base_width, base_height) in SURFACES {
         for orientation in [Orientation::Landscape, Orientation::Portrait] {
             let (width, height) = match orientation {
@@ -96,16 +98,21 @@ fn run_matrix() -> Result<(String, u128), String> {
                 }
             };
             for percent in [100_u16, 150, 200] {
-                let (record, layout_us) =
+                let (record, layout_us, cell_shaping_cold_us) =
                     layout_and_paint(surface, width, height, orientation, percent)?;
                 timings.push(layout_us);
+                shaping_cold_us += cell_shaping_cold_us;
                 matrix_hash.update(record.as_bytes());
             }
         }
     }
     timings.sort_unstable();
     let p95_index = (timings.len() * 95).div_ceil(100).saturating_sub(1);
-    Ok((hex(&matrix_hash.finalize()), timings[p95_index]))
+    Ok((
+        hex(&matrix_hash.finalize()),
+        timings[p95_index],
+        shaping_cold_us,
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -115,7 +122,7 @@ fn layout_and_paint(
     height: f32,
     orientation: Orientation,
     scale_percent: u16,
-) -> Result<(String, u128), String> {
+) -> Result<(String, u128, u128), String> {
     let text_scale = f32::from(scale_percent) / 100.0;
     let paint_config = ShapeConfig {
         type_role: TypeRole::Label,
@@ -242,8 +249,10 @@ fn layout_and_paint(
         )
         .map_err(|error| error.to_string())?;
 
-    let started = Instant::now();
     let mut measure_cache = HashMap::new();
+    let mut shaping_cold_us = 0;
+    // Populate every production-shaping result outside the layout timing. The
+    // measured pass below must be a cache-only Taffy layout pass.
     tree.compute_layout_with_measure(
         root,
         Size {
@@ -257,15 +266,54 @@ fn layout_and_paint(
                     "measure and paint shaping config differ"
                 );
                 let key = format!("{:?}:{known:?}:{available:?}", context.config);
-                *measure_cache
-                    .entry((context.id, key))
-                    .or_insert_with(|| measure_with_production_shaper(context, known, available))
+                *measure_cache.entry((context.id, key)).or_insert_with(|| {
+                    let shaping_started = Instant::now();
+                    let measured = measure_with_production_shaper(context, known, available);
+                    shaping_cold_us += shaping_started.elapsed().as_micros();
+                    measured
+                })
+            }
+            None => Size::ZERO,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    // Force Taffy to execute the full layout again instead of returning its own
+    // cached layout. Text measurement remains warm through `measure_cache`.
+    for node in cards.iter().copied().chain([heading, overlay]) {
+        tree.mark_dirty(node).map_err(|error| error.to_string())?;
+    }
+    let started = Instant::now();
+    let mut timed_cache_misses = 0_u32;
+    tree.compute_layout_with_measure(
+        root,
+        Size {
+            width: AvailableSpace::Definite(width),
+            height: AvailableSpace::Definite(height),
+        },
+        |known, available, _, context, _| match context {
+            Some(context) => {
+                assert_eq!(
+                    context.config, paint_config,
+                    "measure and paint shaping config differ"
+                );
+                let key = format!("{:?}:{known:?}:{available:?}", context.config);
+                if let Some(measured) = measure_cache.get(&(context.id, key)) {
+                    *measured
+                } else {
+                    timed_cache_misses += 1;
+                    measure_with_production_shaper(context, known, available)
+                }
             }
             None => Size::ZERO,
         },
     )
     .map_err(|error| error.to_string())?;
     let layout_us = started.elapsed().as_micros();
+    assert_eq!(
+        timed_cache_misses, 0,
+        "timed warm layout pass had text-measure cache misses"
+    );
 
     let mut painted = Vec::new();
     collect_text_nodes(&tree, root, 0.0, 0.0, &paint_config, &mut painted)?;
@@ -310,7 +358,7 @@ fn layout_and_paint(
         .unwrap();
     }
     writeln!(record, "frame={}", hex(&Sha256::digest(&frame.rgba))).unwrap();
-    Ok((record, layout_us))
+    Ok((record, layout_us, shaping_cold_us))
 }
 
 #[allow(

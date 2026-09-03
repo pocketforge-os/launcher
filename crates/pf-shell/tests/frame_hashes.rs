@@ -55,6 +55,11 @@ fn every_presented_evidence_route_has_action_labels_and_rasterized_text_ink() {
                 out.path().join("search.png").is_file(),
                 "the guarded evidence route set must include Search"
             );
+        } else {
+            assert!(
+                out.path().join("settings-edit.png").is_file(),
+                "the guarded Settings evidence set must include value-edit mode"
+            );
         }
     }
 }
@@ -246,22 +251,29 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         String::from_utf8_lossy(&run.stderr)
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
+    // tsp-op5a.369 intentionally repaints Settings values as individual chips and adds the
+    // focused value-edit frame. Round 3 restores semantic focus ownership to that row, so
+    // only the edit frame is repinned; the remaining hashes pin the unchanged route sequence.
     assert!(
-        transcript.contains("793a495db1a8ffee63764e92d8ad10a959c13225bdb9df2ee9f1d8698e3f6b33  ")
+        transcript.contains("e2c6c13e17ea149e9942e7f4158e750f5d2b3b719d8a33e27da84d61d471f7f4  ")
     );
     assert!(
-        transcript.contains("da09b3c191dc879ff6960cded0dc97cd5ad0686fd8ab0d237d68eb506175b365  ")
+        transcript.contains("3837f70659d65037ac0b7bd2267b470c45d70f3046359608f8cbefa8d060ce00  ")
     );
     assert!(
-        transcript.contains("c1e4695389de93a178b51468e78b53e47740704eea704558270933bffdcc1cbd  ")
+        transcript.contains("5df9261925db52c484f7b89ebfa853d38ce68c7dd8eee96c91d3c33ff1ad9f74  ")
     );
     assert!(
-        transcript.contains("e0282ed7cc23199b2acfdf7a7b48ad77f80d05b6fb51378f54fc607167ed0132  ")
+        transcript.contains("d12d4d489e74c69613a3b67d237846a6e497b59f2af0d2923f3d956dff959ea4  ")
+    );
+    assert!(
+        transcript.contains("197e9092bba58f5222bc4f4393d4363ce105be23cd1fac2bf8eb6421ce567064  ")
     );
     assert!(
         transcript.contains("090e9f2e75175128affce48766df3be5974abe4f2f209cc8641989e12f8e48fc  ")
     );
     assert!(out.path().join("settings.png").is_file());
+    assert!(out.path().join("settings-edit.png").is_file());
     assert!(out.path().join("controls.png").is_file());
     assert!(out.path().join("network.png").is_file());
     assert!(out.path().join("system.png").is_file());

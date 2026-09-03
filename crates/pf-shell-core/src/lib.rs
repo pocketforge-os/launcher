@@ -47,11 +47,10 @@ use design_generated::{
     COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
     KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
     LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
-    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SEGMENT_DIVIDER_WIDTH, SPACE_2, SPACE_3,
-    SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7,
+    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
+    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
+    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -5043,13 +5042,13 @@ impl ShellCore {
                     STATE_DISABLED_BORDER_TOKEN
                 },
             );
+            // The row remains the single semantic focus and action owner while
+            // its value affordance carries the visual focus treatment.
             scene_row.state.focused = focused;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
             }
-            let row_surface = if focused {
-                STATE_FOCUSED_RING_TOKEN
-            } else if interactive {
+            let row_surface = if interactive {
                 STATE_REST_SURFACE_TOKEN
             } else {
                 STATE_DISABLED_BORDER_TOKEN
@@ -5085,7 +5084,11 @@ impl ShellCore {
                         row_height - row_line_top - line_index as f32 * row_line_step;
                     label = declared_multiline(label);
                 }
-                label.state.focused = focused;
+                label = label.with_ink_token(if line_index == 0 {
+                    COLOR_TEXT_PRIMARY_TOKEN
+                } else {
+                    COLOR_TEXT_SECONDARY_TOKEN
+                });
                 text.push(label);
             }
             if row.id == "accessibility-textScale" {
@@ -5108,37 +5111,38 @@ impl ShellCore {
                     control_top,
                     control_width,
                     control_height,
-                    STATE_REST_SURFACE_TOKEN,
+                    SCENE_TRANSPARENT_TOKEN,
                 ));
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
                     let x = control_left + segment_widths[..segment].iter().sum::<f32>();
                     let segment_width = segment_widths[segment];
                     let value_width = value_widths[segment];
-                    if selected {
-                        fills.push(node(
-                            &format!("settings-text-scale-selected-{value}"),
-                            Role::Group,
-                            "",
-                            x,
-                            control_top,
-                            segment_width,
-                            control_height,
-                            COLOR_SURFACE_RAISED_TOKEN,
-                        ));
-                    }
-                    if segment > 0 {
-                        fills.push(node(
-                            &format!("settings-text-scale-divider-{segment}"),
-                            Role::Group,
-                            "",
-                            x,
-                            control_top,
-                            SEGMENT_DIVIDER_WIDTH,
-                            control_height,
-                            STATE_DISABLED_BORDER_TOKEN,
-                        ));
-                    }
+                    let mut chip = node(
+                        &format!("settings-text-scale-chip-{value}"),
+                        Role::Group,
+                        "",
+                        x + 2.0,
+                        control_top,
+                        segment_width - 4.0,
+                        control_height,
+                        if selected {
+                            STATE_SELECTED_ACCENT_TOKEN
+                        } else {
+                            STATE_REST_SURFACE_TOKEN
+                        },
+                    )
+                    .with_corner_radius(RADIUS_S * scale)
+                    .with_border(
+                        if focused && selected {
+                            STATE_FOCUSED_RING_TOKEN
+                        } else {
+                            COLOR_BORDER_HAIRLINE_TOKEN
+                        },
+                        if focused && selected { 2.0 } else { 1.0 },
+                    );
+                    chip.state.selected = selected;
+                    fills.push(chip);
                     let mut value_node = node(
                         &format!("settings-text-scale-value-{value}"),
                         Role::Text,
@@ -5148,12 +5152,17 @@ impl ShellCore {
                         value_width,
                         scaled_text_box_height(26.0, self.text_scale),
                         if selected {
-                            COLOR_SURFACE_RAISED_TOKEN
+                            STATE_SELECTED_ACCENT_TOKEN
                         } else {
-                            row_surface
+                            STATE_REST_SURFACE_TOKEN
                         },
-                    );
-                    value_node.state.focused = focused;
+                    )
+                    .with_ink_token(if selected {
+                        COLOR_TEXT_INVERSE_TOKEN
+                    } else {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    });
+                    value_node.state.focused = false;
                     text.push(value_node);
                 }
             } else if row.id.starts_with("accessibility-")
@@ -8427,7 +8436,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scale_control_selects_exactly_one_effective_segment() {
+    fn text_scale_edit_mode_preserves_row_ink_and_styles_value_chips() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
                 .then_some(node)
@@ -8445,22 +8454,113 @@ mod tests {
                 applied: true,
             });
 
+            let resting = settings_scene(&core);
+            let resting_title = find(
+                resting.root(),
+                "settings-row-accessibility-textScale-line-0",
+            )
+            .unwrap();
+            let resting_caption = find(
+                resting.root(),
+                "settings-row-accessibility-textScale-line-1",
+            )
+            .unwrap();
+            assert_eq!(
+                resting_title.ink_token.as_deref(),
+                Some(COLOR_TEXT_PRIMARY_TOKEN)
+            );
+            assert_eq!(
+                resting_caption.ink_token.as_deref(),
+                Some(COLOR_TEXT_SECONDARY_TOKEN)
+            );
+
+            core.enter_settings_rows();
+            core.focus = core
+                .settings_scene_rows()
+                .iter()
+                .position(|row| row.id == "accessibility-textScale")
+                .unwrap();
             let scene = settings_scene(&core);
+            let title = find(scene.root(), "settings-row-accessibility-textScale-line-0").unwrap();
+            let caption =
+                find(scene.root(), "settings-row-accessibility-textScale-line-1").unwrap();
+            assert_eq!(title.style_token, resting_title.style_token);
+            assert_eq!(title.ink_token, resting_title.ink_token);
+            assert_eq!(caption.style_token, resting_caption.style_token);
+            assert_eq!(caption.ink_token, resting_caption.ink_token);
             assert!(find(scene.root(), "settings-text-scale-segmented-control").is_some());
-            let selected_fills = ["100%", "150%", "200%"]
-                .into_iter()
-                .filter(|value| {
-                    find(
-                        scene.root(),
-                        &format!("settings-text-scale-selected-{value}"),
-                    )
-                    .is_some()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(selected_fills, [effective]);
-            assert!(find(scene.root(), "settings-text-scale-divider-1").is_some());
-            assert!(find(scene.root(), "settings-text-scale-divider-2").is_some());
+            for value in ["100%", "150%", "200%"] {
+                let chip =
+                    find(scene.root(), &format!("settings-text-scale-chip-{value}")).unwrap();
+                assert_eq!(
+                    chip.style_token,
+                    if value == effective {
+                        STATE_SELECTED_ACCENT_TOKEN
+                    } else {
+                        STATE_REST_SURFACE_TOKEN
+                    }
+                );
+                assert_eq!(
+                    chip.border_token.as_deref(),
+                    Some(if value == effective {
+                        STATE_FOCUSED_RING_TOKEN
+                    } else {
+                        COLOR_BORDER_HAIRLINE_TOKEN
+                    })
+                );
+                assert!(
+                    (chip.border_width - if value == effective { 2.0 } else { 1.0 }).abs()
+                        < f32::EPSILON
+                );
+                assert_eq!(chip.state.selected, value == effective);
+                let value_text =
+                    find(scene.root(), &format!("settings-text-scale-value-{value}")).unwrap();
+                assert_eq!(
+                    value_text.ink_token.as_deref(),
+                    Some(if value == effective {
+                        COLOR_TEXT_INVERSE_TOKEN
+                    } else {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    })
+                );
+            }
         }
+    }
+
+    #[test]
+    fn settings_edit_mode_keeps_semantic_focus_on_the_active_row() {
+        fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {
+            if node.state.focused {
+                focused.push(node);
+            }
+            for child in &node.children {
+                collect_focused(child, focused);
+            }
+        }
+
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.enter_settings_rows();
+        core.focus = core
+            .settings_scene_rows()
+            .iter()
+            .position(|row| row.id == "accessibility-highContrast")
+            .unwrap();
+
+        let scene = settings_scene(&core);
+        let mut focused = Vec::new();
+        collect_focused(scene.root(), &mut focused);
+
+        assert_eq!(focused.len(), 1);
+        assert_eq!(
+            focused[0].id.as_str(),
+            "settings-row-accessibility-highContrast"
+        );
+        assert_eq!(
+            scene.focused().map(NodeId::as_str),
+            Some("settings-row-accessibility-highContrast")
+        );
     }
 
     #[test]
@@ -15054,7 +15154,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scale_segment_uses_container_dividers_and_selected_fill_without_cursor_bar() {
+    fn text_scale_values_are_individual_bordered_chips() {
         let mut core = core();
         core.load_preferences(&preferences(true), true).unwrap();
         core.go(Route::Settings);
@@ -15071,37 +15171,14 @@ mod tests {
             )
             .unwrap();
         for value in ["100%", "150%", "200%"] {
-            assert!(
-                !node_by_id(scene.root(), &format!("settings-text-scale-value-{value}"))
-                    .unwrap()
-                    .state
-                    .selected
+            let chip =
+                node_by_id(scene.root(), &format!("settings-text-scale-chip-{value}")).unwrap();
+            assert!(chip.corner_radius > 0.0);
+            assert_eq!(
+                chip.border_token.as_deref(),
+                Some(COLOR_BORDER_HAIRLINE_TOKEN)
             );
         }
-        assert!(
-            node_by_id(scene.root(), "settings-text-scale-segmented-control")
-                .unwrap()
-                .corner_radius
-                > 0.0
-        );
-        assert!(
-            (node_by_id(scene.root(), "settings-text-scale-divider-1")
-                .unwrap()
-                .bounds
-                .width
-                - 1.0)
-                .abs()
-                < f32::EPSILON
-        );
-        assert!(
-            (node_by_id(scene.root(), "settings-text-scale-divider-2")
-                .unwrap()
-                .bounds
-                .width
-                - 1.0)
-                .abs()
-                < f32::EPSILON
-        );
     }
 
     #[test]

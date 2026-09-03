@@ -828,6 +828,9 @@ fn main() -> Result<(), String> {
         core.action(&ShellAction::Custom("Room.next".into()));
         core.action(&ShellAction::Custom("Room.next".into()));
         emit(&mut host, &mut core, &footer, out, "settings")?;
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(&mut host, &mut core, &footer, out, "settings-edit")?;
+        core.action(&ShellAction::Back);
         core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
         emit(&mut host, &mut core, &footer, out, "controls")?;
         core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
@@ -852,6 +855,16 @@ fn main() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--high-contrast-evidence") {
         emit(&mut host, &mut core, &footer, out, "high-contrast")?;
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Move(pf_scene::AxisMove::Right));
+        emit(
+            &mut host,
+            &mut core,
+            &footer,
+            out,
+            "settings-edit-high-contrast",
+        )?;
         return Ok(());
     }
     emit(&mut host, &mut core, &footer, out, "boot-home")?;
@@ -3695,6 +3708,16 @@ mod durable_tests {
                 assert_settings_high_contrast_known_defect(&driver, cell);
             } else {
                 assert_cell(&driver, cell, "Settings");
+            }
+
+            // Editing is a distinct painted Settings state: keep it in every
+            // accessibility/safe-inset matrix cell so both the raster-ink and
+            // occlusion guards exercise the value chips, not only the rest row.
+            driver.action(movement(pf_scene::AxisMove::Right));
+            if cell.high_contrast && cell.text_scale == 100 {
+                assert_settings_high_contrast_known_defect(&driver, cell);
+            } else {
+                assert_cell(&driver, cell, "Settings value edit");
             }
         }
     }

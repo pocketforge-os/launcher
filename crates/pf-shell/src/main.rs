@@ -4117,29 +4117,107 @@ mod durable_tests {
         reopened.assert_scene_invariants();
     }
 
-    #[test]
-    fn paint_and_flow_guards_cover_accessibility_and_safe_inset_matrix() {
-        for cell in invariant_matrix() {
-            let mut driver = FlowDriver::new();
-            driver.apply_matrix_cell(cell);
-            assert_cell(&driver, cell, "Home");
+    // One invariant-matrix cell's paint+flow guard sweep, factored out of the
+    // former single `paint_and_flow_guards_cover_accessibility_and_safe_inset_matrix`
+    // loop so each cell is a separately schedulable test. The old single fn ran all
+    // twelve cells x ~7 guard renders serially inside one test, which set the suite's
+    // long-pole floor (a fn is atomic to the runner, so cargo/nextest could not spread
+    // it). The generated per-cell tests below cover exactly the same work; nextest now
+    // schedules them across cores. Coverage-equivalence is proven mechanically by
+    // `invariant_matrix_split_covers_every_cell_exactly`.
+    fn assert_invariant_matrix_cell(cell: MatrixCell) {
+        let mut driver = FlowDriver::new();
+        driver.apply_matrix_cell(cell);
+        assert_cell(&driver, cell, "Home");
 
-            driver.action(custom("Room.next"));
-            for width in [480_u16, 640, 800, 1280] {
-                driver.metrics.logical_width = f32::from(width);
-                assert_cell(&driver, cell, &format!("Library width={width}"));
-            }
-
-            driver.metrics.logical_width = 1280.0;
-            driver.action(custom("Room.next"));
-            assert_cell(&driver, cell, "Settings");
-
-            // Editing is a distinct painted Settings state: keep it in every
-            // accessibility/safe-inset matrix cell so both the raster-ink and
-            // occlusion guards exercise the value chips, not only the rest row.
-            driver.action(movement(pf_scene::AxisMove::Right));
-            assert_cell(&driver, cell, "Settings value edit");
+        driver.action(custom("Room.next"));
+        for width in [480_u16, 640, 800, 1280] {
+            driver.metrics.logical_width = f32::from(width);
+            assert_cell(&driver, cell, &format!("Library width={width}"));
         }
+
+        driver.metrics.logical_width = 1280.0;
+        driver.action(custom("Room.next"));
+        assert_cell(&driver, cell, "Settings");
+
+        // Editing is a distinct painted Settings state: keep it in every
+        // accessibility/safe-inset matrix cell so both the raster-ink and
+        // occlusion guards exercise the value chips, not only the rest row.
+        driver.action(movement(pf_scene::AxisMove::Right));
+        assert_cell(&driver, cell, "Settings value edit");
+    }
+
+    fn matrix_cell(text_scale: u16, high_contrast: bool, notch: bool) -> MatrixCell {
+        MatrixCell {
+            text_scale,
+            high_contrast,
+            safe_insets: if notch {
+                Insets {
+                    top: 32.0,
+                    left: 24.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                }
+            } else {
+                Insets::default()
+            },
+        }
+    }
+
+    macro_rules! invariant_matrix_cell_tests {
+        ($($name:ident => ($scale:expr, $hc:expr, $notch:expr)),* $(,)?) => {
+            // Single source of the split cell set: the coverage guard below reads
+            // this same list, so the generated tests and the guard cannot drift.
+            const SPLIT_MATRIX_CELLS: &[(u16, bool, bool)] = &[$(($scale, $hc, $notch)),*];
+            $(
+                #[test]
+                fn $name() {
+                    assert_invariant_matrix_cell(matrix_cell($scale, $hc, $notch));
+                }
+            )*
+        };
+    }
+
+    invariant_matrix_cell_tests! {
+        paint_and_flow_guards_matrix_100_normal_flush   => (100, false, false),
+        paint_and_flow_guards_matrix_100_normal_notch   => (100, false, true),
+        paint_and_flow_guards_matrix_100_contrast_flush => (100, true,  false),
+        paint_and_flow_guards_matrix_100_contrast_notch => (100, true,  true),
+        paint_and_flow_guards_matrix_150_normal_flush   => (150, false, false),
+        paint_and_flow_guards_matrix_150_normal_notch   => (150, false, true),
+        paint_and_flow_guards_matrix_150_contrast_flush => (150, true,  false),
+        paint_and_flow_guards_matrix_150_contrast_notch => (150, true,  true),
+        paint_and_flow_guards_matrix_200_normal_flush   => (200, false, false),
+        paint_and_flow_guards_matrix_200_normal_notch   => (200, false, true),
+        paint_and_flow_guards_matrix_200_contrast_flush => (200, true,  false),
+        paint_and_flow_guards_matrix_200_contrast_notch => (200, true,  true),
+    }
+
+    #[test]
+    fn invariant_matrix_split_covers_every_cell_exactly() {
+        // Coverage-equivalence guard for the split above: the generated
+        // paint_and_flow_guards_matrix_* tests must enumerate exactly the cells
+        // invariant_matrix() produces — same 3 scale x 2 contrast x 2 inset set, in
+        // the same order — so splitting the former single matrix loop lost no coverage.
+        fn key(cell: MatrixCell) -> (u16, bool, u32, u32, u32, u32) {
+            (
+                cell.text_scale,
+                cell.high_contrast,
+                cell.safe_insets.top.to_bits(),
+                cell.safe_insets.left.to_bits(),
+                cell.safe_insets.right.to_bits(),
+                cell.safe_insets.bottom.to_bits(),
+            )
+        }
+        let expected: Vec<_> = invariant_matrix().map(key).collect();
+        let split: Vec<_> = SPLIT_MATRIX_CELLS
+            .iter()
+            .map(|&(scale, hc, notch)| key(matrix_cell(scale, hc, notch)))
+            .collect();
+        assert_eq!(
+            split, expected,
+            "split matrix cells must reproduce invariant_matrix() exactly"
+        );
     }
 
     #[test]
@@ -5679,8 +5757,10 @@ mod durable_tests {
         .unwrap_or_else(|error| panic!("populated Search containment at {text_scale}%: {error}"));
     }
 
-    #[test]
-    fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_every_scale() {
+    // Split per text scale so the three scales schedule independently (was one fn
+    // looping [100, 150, 200] serially). Each generated test builds its own fresh
+    // core exactly as the former loop iteration did — identical coverage per scale.
+    fn assert_populated_search_evidence_at_scale(text_scale: u16) {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let metrics = SurfaceMetrics {
@@ -5691,38 +5771,53 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         };
 
-        for text_scale in [100, 150, 200] {
-            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
-            core.load_preferences(
-                &FakePreferencePort::new(
-                    [EffectivePreference {
-                        key: PreferenceKey("textScale".into()),
-                        effective: PreferenceValue::Text(format!("{text_scale}%")),
-                        stored: PreferenceValue::Text(format!("{text_scale}%")),
-                        applied: true,
-                    }],
-                    ChangeAuthority("user".into()),
-                ),
-                true,
-            )
-            .unwrap();
-            core.action(&ShellAction::Custom("Room.next".into()));
-            core.action(&ShellAction::Custom("Search".into()));
-            core.set_search_query("e");
-            assert_eq!(core.search_result_ids().len(), 24, "fixture-list drift");
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(
+            &FakePreferencePort::new(
+                [EffectivePreference {
+                    key: PreferenceKey("textScale".into()),
+                    effective: PreferenceValue::Text(format!("{text_scale}%")),
+                    stored: PreferenceValue::Text(format!("{text_scale}%")),
+                    applied: true,
+                }],
+                ChangeAuthority("user".into()),
+            ),
+            true,
+        )
+        .unwrap();
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Search".into()));
+        core.set_search_query("e");
+        assert_eq!(core.search_result_ids().len(), 24, "fixture-list drift");
 
-            let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
-            let root = scene.root();
-            assert_populated_search_query_and_hint(root);
-            assert_populated_search_region_and_rows(root);
-            assert_populated_search_raster_guards(&scene, metrics, text_scale);
-        }
+        let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let root = scene.root();
+        assert_populated_search_query_and_hint(root);
+        assert_populated_search_region_and_rows(root);
+        assert_populated_search_raster_guards(&scene, metrics, text_scale);
     }
 
     #[test]
+    fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_100() {
+        assert_populated_search_evidence_at_scale(100);
+    }
+
+    #[test]
+    fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_150() {
+        assert_populated_search_evidence_at_scale(150);
+    }
+
+    #[test]
+    fn populated_search_evidence_obeys_row_footer_and_raster_guards_at_200() {
+        assert_populated_search_evidence_at_scale(200);
+    }
+
+    // Split per text scale so the three scales schedule independently (was one fn
+    // looping [100,150,200] serially, walking every Settings room per scale). Each
+    // call builds its own fresh core exactly as the former loop iteration did —
+    // identical coverage per scale.
     #[allow(clippy::too_many_lines)]
-    fn complete_settings_evidence_scenes_keep_all_text_contained_complete_and_legible_at_every_scale()
-     {
+    fn assert_complete_settings_evidence_at_scale(text_scale: u16) {
         fn collect_settings_nav_count(node: &Node) -> usize {
             usize::from(
                 node.id.as_str().starts_with("settings-nav-")
@@ -5786,62 +5881,35 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         };
 
-        for text_scale in [100, 150, 200] {
-            let preference = EffectivePreference {
-                key: PreferenceKey("textScale".into()),
-                effective: PreferenceValue::Text(format!("{text_scale}%")),
-                stored: PreferenceValue::Text(format!("{text_scale}%")),
-                applied: true,
-            };
-            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
-            core.load_preferences(
-                &FakePreferencePort::new([preference], ChangeAuthority("user".into())),
-                true,
-            )
-            .unwrap();
-            core.load_device_status(&FakeDeviceStatusPort { attention: false });
-            core.action(&ShellAction::Custom("Room.next".into()));
-            core.action(&ShellAction::Custom("Room.next".into()));
+        let preference = EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text(format!("{text_scale}%")),
+            stored: PreferenceValue::Text(format!("{text_scale}%")),
+            applied: true,
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(
+            &FakePreferencePort::new([preference], ChangeAuthority("user".into())),
+            true,
+        )
+        .unwrap();
+        core.load_device_status(&FakeDeviceStatusPort { attention: false });
+        core.action(&ShellAction::Custom("Room.next".into()));
+        core.action(&ShellAction::Custom("Room.next".into()));
 
-            let initial_scene = core.scene(metrics, "").unwrap();
-            let settings_room_count = collect_settings_nav_count(initial_scene.root());
-            let mut visited_rooms = std::collections::BTreeSet::new();
-            for room_index in 0..settings_room_count {
-                let scene = core.scene(metrics, "").unwrap();
-                let room = find_node(scene.root(), "settings-section-title")
-                    .expect("every Settings room has a section title")
-                    .accessible_label
-                    .clone();
-                assert!(
-                    visited_rooms.insert(room.clone()),
-                    "visited Settings room {room} twice"
-                );
-                assert_raster_text_paint_contained_and_complete(
-                    &scene,
-                    metrics,
-                    pf_theme::Base::Dusk,
-                    text_scale,
-                )
-                .unwrap_or_else(|error| {
-                    panic!("{room} at {text_scale}% failed paint containment: {error}")
-                });
-                assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
-                    .unwrap_or_else(|error| {
-                        panic!("{room} at {text_scale}% failed rendered legibility: {error}")
-                    });
-                assert_toggle_geometry(scene.root(), text_scale);
-                if room_index + 1 < settings_room_count {
-                    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-                }
-            }
-            assert_eq!(
-                visited_rooms.len(),
-                settings_room_count,
-                "the enforcing guard must visit every room exposed by the Settings nav model"
-            );
-
-            core.reset_first_run();
+        let initial_scene = core.scene(metrics, "").unwrap();
+        let settings_room_count = collect_settings_nav_count(initial_scene.root());
+        let mut visited_rooms = std::collections::BTreeSet::new();
+        for room_index in 0..settings_room_count {
             let scene = core.scene(metrics, "").unwrap();
+            let room = find_node(scene.root(), "settings-section-title")
+                .expect("every Settings room has a section title")
+                .accessible_label
+                .clone();
+            assert!(
+                visited_rooms.insert(room.clone()),
+                "visited Settings room {room} twice"
+            );
             assert_raster_text_paint_contained_and_complete(
                 &scene,
                 metrics,
@@ -5849,17 +5917,60 @@ mod durable_tests {
                 text_scale,
             )
             .unwrap_or_else(|error| {
-                panic!("first-run at {text_scale}% failed paint containment: {error}")
+                panic!("{room} at {text_scale}% failed paint containment: {error}")
             });
             assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
                 .unwrap_or_else(|error| {
-                    panic!("first-run at {text_scale}% failed rendered legibility: {error}")
+                    panic!("{room} at {text_scale}% failed rendered legibility: {error}")
                 });
+            assert_toggle_geometry(scene.root(), text_scale);
+            if room_index + 1 < settings_room_count {
+                core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+            }
         }
+        assert_eq!(
+            visited_rooms.len(),
+            settings_room_count,
+            "the enforcing guard must visit every room exposed by the Settings nav model"
+        );
+
+        core.reset_first_run();
+        let scene = core.scene(metrics, "").unwrap();
+        assert_raster_text_paint_contained_and_complete(
+            &scene,
+            metrics,
+            pf_theme::Base::Dusk,
+            text_scale,
+        )
+        .unwrap_or_else(|error| {
+            panic!("first-run at {text_scale}% failed paint containment: {error}")
+        });
+        assert_raster_text_legible(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+            .unwrap_or_else(|error| {
+                panic!("first-run at {text_scale}% failed rendered legibility: {error}")
+            });
     }
 
     #[test]
-    fn first_run_evidence_covers_both_themes_at_every_supported_scale() {
+    fn complete_settings_evidence_at_100() {
+        assert_complete_settings_evidence_at_scale(100);
+    }
+
+    #[test]
+    fn complete_settings_evidence_at_150() {
+        assert_complete_settings_evidence_at_scale(150);
+    }
+
+    #[test]
+    fn complete_settings_evidence_at_200() {
+        assert_complete_settings_evidence_at_scale(200);
+    }
+
+    // Split per (scale, high-contrast) so the six theme/scale combos schedule
+    // independently (was one fn nesting [100,150,200] x [false,true] serially). Each
+    // generated test builds its own fresh core exactly as the former inner iteration
+    // did — identical coverage per combo.
+    fn assert_first_run_evidence(text_scale: u16, high_contrast: bool) {
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let metrics = SurfaceMetrics {
@@ -5870,47 +5981,67 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         };
 
-        for text_scale in [100, 150, 200] {
-            for high_contrast in [false, true] {
-                let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
-                core.load_preferences(
-                    &FakePreferencePort::new(
-                        [
-                            EffectivePreference {
-                                key: PreferenceKey("textScale".into()),
-                                effective: PreferenceValue::Text(format!("{text_scale}%")),
-                                stored: PreferenceValue::Text(format!("{text_scale}%")),
-                                applied: true,
-                            },
-                            EffectivePreference {
-                                key: PreferenceKey("highContrast".into()),
-                                effective: PreferenceValue::Bool(high_contrast),
-                                stored: PreferenceValue::Bool(high_contrast),
-                                applied: true,
-                            },
-                        ],
-                        ChangeAuthority("user".into()),
-                    ),
-                    true,
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.load_preferences(
+            &FakePreferencePort::new(
+                [
+                    EffectivePreference {
+                        key: PreferenceKey("textScale".into()),
+                        effective: PreferenceValue::Text(format!("{text_scale}%")),
+                        stored: PreferenceValue::Text(format!("{text_scale}%")),
+                        applied: true,
+                    },
+                    EffectivePreference {
+                        key: PreferenceKey("highContrast".into()),
+                        effective: PreferenceValue::Bool(high_contrast),
+                        stored: PreferenceValue::Bool(high_contrast),
+                        applied: true,
+                    },
+                ],
+                ChangeAuthority("user".into()),
+            ),
+            true,
+        )
+        .unwrap();
+        core.load_device_status(&FakeDeviceStatusPort { attention: false });
+        core.reset_first_run();
+        let scene = core.scene(metrics, "A Open").unwrap();
+        raster_guard_record(&scene, metrics, core.theme_base(), text_scale, false)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "first-run evidence failed at {text_scale}% high_contrast={high_contrast}: {error}"
                 )
-                .unwrap();
-                core.load_device_status(&FakeDeviceStatusPort { attention: false });
-                core.reset_first_run();
-                let scene = core.scene(metrics, "A Open").unwrap();
-                raster_guard_record(
-                    &scene,
-                    metrics,
-                    core.theme_base(),
-                    text_scale,
-                    false,
-                )
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "first-run evidence failed at {text_scale}% high_contrast={high_contrast}: {error}"
-                    )
-                });
-            }
-        }
+            });
+    }
+
+    #[test]
+    fn first_run_evidence_at_100_normal() {
+        assert_first_run_evidence(100, false);
+    }
+
+    #[test]
+    fn first_run_evidence_at_100_contrast() {
+        assert_first_run_evidence(100, true);
+    }
+
+    #[test]
+    fn first_run_evidence_at_150_normal() {
+        assert_first_run_evidence(150, false);
+    }
+
+    #[test]
+    fn first_run_evidence_at_150_contrast() {
+        assert_first_run_evidence(150, true);
+    }
+
+    #[test]
+    fn first_run_evidence_at_200_normal() {
+        assert_first_run_evidence(200, false);
+    }
+
+    #[test]
+    fn first_run_evidence_at_200_contrast() {
+        assert_first_run_evidence(200, true);
     }
 
     #[test]

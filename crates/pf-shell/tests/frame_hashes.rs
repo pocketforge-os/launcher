@@ -65,34 +65,32 @@ fn two_fresh_process_offscreen_runs_are_byte_identical() {
     }
 }
 
+// Split per evidence route-set so the two subprocess renders schedule as separate
+// tests (was one fn looping both arg-sets, spawning them back-to-back). Routing
+// through `frame_hash_command` keeps the exact command the old inline build produced
+// AND centralizes the PF_RASTER_INK_GUARD=1 invariant every frame-hash test must set.
+fn assert_presented_evidence_route(extra_args: &[&str], expected_file: &str) {
+    let out = tempfile::tempdir().unwrap();
+    let run = frame_hash_command(out.path(), extra_args).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        out.path().join(expected_file).is_file(),
+        "the guarded evidence set for {extra_args:?} must include {expected_file}"
+    );
+}
+
 #[test]
-fn every_presented_evidence_route_has_action_labels_and_rasterized_text_ink() {
-    for extra_args in [Vec::<&str>::new(), vec!["--settings-evidence"]] {
-        let out = tempfile::tempdir().unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pf-shell"));
-        command
-            .arg("--offscreen")
-            .args(&extra_args)
-            .args(["--out", out.path().to_str().unwrap()])
-            .env("PF_RASTER_INK_GUARD", "1");
-        let run = command.output().unwrap();
-        assert!(
-            run.status.success(),
-            "{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        if extra_args.is_empty() {
-            assert!(
-                out.path().join("search.png").is_file(),
-                "the guarded evidence route set must include Search"
-            );
-        } else {
-            assert!(
-                out.path().join("settings-edit.png").is_file(),
-                "the guarded Settings evidence set must include value-edit mode"
-            );
-        }
-    }
+fn presented_default_evidence_route_set_has_action_labels_and_rasterized_text_ink() {
+    assert_presented_evidence_route(&[], "search.png");
+}
+
+#[test]
+fn presented_settings_evidence_route_set_has_action_labels_and_rasterized_text_ink() {
+    assert_presented_evidence_route(&["--settings-evidence"], "settings-edit.png");
 }
 
 #[test]

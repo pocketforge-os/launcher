@@ -28,7 +28,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Score offscreen routes against approved design renders
         run: cargo test -p pf-shell --test mockup_diff --locked -- --nocapture
-      - run: cargo test --workspace --locked
+      - name: Ensure cargo-nextest is on PATH (idempotent; no-op once the VM toolset provides it)
+        run: |
+          # Prefer a runner-resident cargo-nextest (installed by the rust-ci-toolset
+          # drop-in on the pf-builder VM — pocketforge-automation). This guarded install
+          # is a self-heal for a runner that predates that toolset change; it downloads a
+          # prebuilt binary (~seconds) only when nextest is absent, then is a no-op every
+          # run thereafter because ~/.cargo/bin persists on the self-hosted runner.
+          command -v cargo-nextest >/dev/null 2>&1 || \
+            curl -LsSf https://get.nexte.st/0.9.143/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+      - name: Test workspace (nextest — global parallel pool across all test binaries)
+        run: cargo nextest run --workspace --locked
+      - name: Doc-tests (nextest does not run doc-tests; keep them from silently dropping)
+        run: cargo test --workspace --locked --doc
       - name: Soak desktop launch and return against real authority
         run: ./scripts/desktop-sim-soak.sh
       - run: cargo build -p pf-shell --features wayland --locked

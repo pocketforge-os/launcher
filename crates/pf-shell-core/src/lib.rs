@@ -13742,8 +13742,11 @@ mod tests {
         label_ink(&generous, id, metrics, text_scale).0
     }
 
-    #[test]
-    fn statusbar_text_is_complete_on_one_row_for_every_route() {
+    // Split per text scale so the three scales schedule independently (was one fn
+    // nesting [100,150,200] x 7 routes, each route rasterizing status-strip ink,
+    // serially in a single test). Each call builds its own fresh core with the same
+    // fixture and clock, then walks every route at the one scale — identical coverage.
+    fn assert_statusbar_text_complete_on_one_row_at_scale(text_scale: u16) {
         let mut core = fixture_core(vec![item(
             "many",
             "Many Moons",
@@ -13761,7 +13764,7 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
-        for text_scale in [100, 150, 200] {
+        {
             core.text_scale = text_scale;
             for route in [
                 Route::Home,
@@ -13797,6 +13800,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route_at_100() {
+        assert_statusbar_text_complete_on_one_row_at_scale(100);
+    }
+
+    #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route_at_150() {
+        assert_statusbar_text_complete_on_one_row_at_scale(150);
+    }
+
+    #[test]
+    fn statusbar_text_is_complete_on_one_row_for_every_route_at_200() {
+        assert_statusbar_text_complete_on_one_row_at_scale(200);
     }
 
     #[test]

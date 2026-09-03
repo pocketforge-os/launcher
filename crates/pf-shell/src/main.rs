@@ -2537,22 +2537,28 @@ fn raster_guard_record(
 fn assert_focusable_targets_meet_minimum_size(scene: &pf_scene::Scene) -> Result<(), String> {
     // Stable exact-id class: Library toolbar/chips (44px, LIB_TOOLBAR_HEIGHT/CHIP_HEIGHT)
     // and Quick overlay action rows (40px). Their node ids are stable, so they are keyed
-    // exactly. Each entry carries height + token rationale + the tracking bead on one line
-    // (rustfmt::skip keeps the id and its citation on the same line, per the coord ruling).
+    // exactly — AND pinned to their documented height: an entry matches only at exactly its
+    // documented height, so a target that shrinks FURTHER (e.g. 44 -> 36) is no longer
+    // exempt and fails. Each entry is (id, documented height px, token rationale + tracking
+    // bead) on one line (rustfmt::skip keeps the id and its citation together, per the coord
+    // ruling).
     #[rustfmt::skip]
-    const DOCUMENTED_SUBMIN_TARGET_IDS: &[(&str, &str)] = &[
-        ("library-search", "44px LIB_TOOLBAR_HEIGHT toolbar; tracked: tsp-op5a.387"),
-        ("library-filter-0", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
-        ("library-filter-1", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
-        ("library-filter-2", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
-        ("library-filter-3", "44px CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
-        ("quick-0", "40px Quick overlay action row; tracked: tsp-op5a.387"),
-        ("quick-1", "40px Quick overlay action row; tracked: tsp-op5a.387"),
-        ("quick-power-power-off", "40px Quick power row; tracked: tsp-op5a.387"),
-        ("quick-power-restart", "40px Quick power row; tracked: tsp-op5a.387"),
-        ("quick-power-idle", "40px Quick power row; tracked: tsp-op5a.387"),
-        ("quick-capture-screenshot", "40px Quick capture row; tracked: tsp-op5a.387"),
+    const DOCUMENTED_SUBMIN_TARGET_IDS: &[(&str, f32, &str)] = &[
+        ("library-search",           44.0, "LIB_TOOLBAR_HEIGHT toolbar; tracked: tsp-op5a.387"),
+        ("library-filter-0",         44.0, "CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-1",         44.0, "CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-2",         44.0, "CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("library-filter-3",         44.0, "CHIP_HEIGHT filter chip; tracked: tsp-op5a.387"),
+        ("quick-0",                  40.0, "Quick overlay action row; tracked: tsp-op5a.387"),
+        ("quick-1",                  40.0, "Quick overlay action row; tracked: tsp-op5a.387"),
+        ("quick-power-power-off",    40.0, "Quick power row; tracked: tsp-op5a.387"),
+        ("quick-power-restart",      40.0, "Quick power row; tracked: tsp-op5a.387"),
+        ("quick-power-idle",         40.0, "Quick power row; tracked: tsp-op5a.387"),
+        ("quick-capture-screenshot", 40.0, "Quick capture row; tracked: tsp-op5a.387"),
     ];
+    // Height match tolerance (px): documented heights are exact token values (44/40); this
+    // small band absorbs float noise while still failing any real dimensional drift.
+    const DOCUMENTED_HEIGHT_TOLERANCE_PX: f32 = 0.5;
 
     // Control-class key for the Search results route (NOT keyed by node id). The eight
     // search-result rows carry game-slug ids that legitimately change with the fixture /
@@ -2585,14 +2591,14 @@ fn assert_focusable_targets_meet_minimum_size(scene: &pf_scene::Scene) -> Result
     let mut documented_search_results = 0_usize;
     for node in &submin {
         let id = node.id.as_str();
-        if DOCUMENTED_SUBMIN_TARGET_IDS
-            .iter()
-            .any(|(doc, _)| *doc == id)
-        {
+        if DOCUMENTED_SUBMIN_TARGET_IDS.iter().any(|(doc, height, _)| {
+            *doc == id && (node.bounds.height - height).abs() <= DOCUMENTED_HEIGHT_TOLERANCE_PX
+        }) {
             continue;
         }
         if id.starts_with(SEARCH_RESULT_PREFIX)
-            && (node.bounds.height - SEARCH_RESULT_HEIGHT_PX).abs() < f32::EPSILON
+            && (node.bounds.height - SEARCH_RESULT_HEIGHT_PX).abs()
+                <= DOCUMENTED_HEIGHT_TOLERANCE_PX
         {
             documented_search_results += 1;
             continue;
@@ -4238,53 +4244,66 @@ mod durable_tests {
     /// from Spike 0/1. These records intentionally retain a FAIL raster-guard outcome as
     /// historical evidence and must NOT be regenerated, deleted, or rebaselined
     /// (coordinator ruling, tsp-op5a.382 Round 2). Each entry maps the record's
-    /// baseline-relative path to a substring of its documented failing node id; a frozen
-    /// record whose FAIL text no longer names that node is rejected, so a silent
-    /// regeneration cannot hide behind the freeze. Same named-exemption discipline as
-    /// `allowed_text_overflow` in the paint-containment guard — no blanket entries.
-    const FROZEN_LEGACY_FAILURE_RECORDS: &[(&str, &str)] = &[
+    /// baseline-relative path to the EXACT set of failing node ids documented for it. The
+    /// record's failing-node set must equal that set — a frozen record that gained an
+    /// ADDITIONAL failing node (a new regression rendered inside a legacy FAIL) or lost a
+    /// documented one is rejected, so a silent regeneration cannot hide behind the freeze.
+    /// Same named-exemption discipline as `allowed_text_overflow` — no blanket entries.
+    const FROZEN_LEGACY_FAILURE_RECORDS: &[(&str, &[&str])] = &[
         // Library action-name captions painted no ink on the legacy engine at the large
         // surface across every scale. pre-Taffy legacy-engine failure documentation, Spike 0/1.
-        (
-            "large/100/library.json",
-            "action-name-library-item-fern-and-fathom",
-        ),
-        (
-            "large/150/library.json",
-            "action-name-library-item-fern-and-fathom",
-        ),
-        (
-            "large/200/library.json",
-            "action-name-library-item-fern-and-fathom",
-        ),
+        ("large/100/library.json", LIBRARY_LEGACY_FAILING_NODES),
+        ("large/150/library.json", LIBRARY_LEGACY_FAILING_NODES),
+        ("large/200/library.json", LIBRARY_LEGACY_FAILING_NODES),
         // Home card titles painted no ink on the legacy engine at the small surface across
         // every scale. pre-Taffy legacy-engine failure documentation, Spike 0/1.
-        ("small/100/home.json", "home-card-title-ridgeline"),
-        ("small/150/home.json", "home-card-title-ridgeline"),
-        ("small/200/home.json", "home-card-title-ridgeline"),
+        ("small/100/home.json", HOME_LEGACY_FAILING_NODES),
+        ("small/150/home.json", HOME_LEGACY_FAILING_NODES),
+        ("small/200/home.json", HOME_LEGACY_FAILING_NODES),
         // The Quick overlay capture-screenshot action failed the raster floor/occlusion
         // check on the legacy engine at the small surface across every scale. pre-Taffy
         // legacy-engine failure documentation, Spike 0/1.
-        (
-            "small/100/overlay.json",
-            "action-name-quick-capture-screenshot",
-        ),
-        (
-            "small/150/overlay.json",
-            "action-name-quick-capture-screenshot",
-        ),
-        (
-            "small/200/overlay.json",
-            "action-name-quick-capture-screenshot",
-        ),
+        ("small/100/overlay.json", OVERLAY_LEGACY_FAILING_NODES),
+        ("small/150/overlay.json", OVERLAY_LEGACY_FAILING_NODES),
+        ("small/200/overlay.json", OVERLAY_LEGACY_FAILING_NODES),
     ];
+    const LIBRARY_LEGACY_FAILING_NODES: &[&str] = &[
+        "action-name-library-item-fern-and-fathom",
+        "action-name-library-item-signal-decay",
+        "action-name-library-item-quiet-machines",
+        "action-name-library-item-redshift-alley",
+        "action-name-library-item-bellwether",
+        "action-name-library-item-milewide",
+    ];
+    const HOME_LEGACY_FAILING_NODES: &[&str] = &[
+        "home-card-title-ridgeline",
+        "home-card-title-hollow-tides",
+        "home-card-title-sunwake",
+        "home-card-title-moth-and-lantern",
+    ];
+    const OVERLAY_LEGACY_FAILING_NODES: &[&str] = &["action-name-quick-capture-screenshot"];
+
+    /// Extract the set of failing node ids named in a raster-guard FAIL outcome. Each
+    /// failing line has the shape `<node-id> ("<label>", Bounds { .. }): <metrics>`, so the
+    /// node id is the token before the first ` (`; the `FAIL: raster ink guard failed:`
+    /// header and any other line without ` (` is skipped.
+    fn outcome_failing_nodes(outcome: &str) -> Vec<&str> {
+        let mut nodes: Vec<&str> = outcome
+            .lines()
+            .filter_map(|line| line.split_once(" (").map(|(id, _)| id.trim()))
+            .filter(|id| !id.is_empty())
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
+    }
 
     /// Verdict for a single committed baseline record: `Some(reason)` rejects it.
     /// A record is accepted only if it returned `PASS`, or if it is a frozen legacy failure
-    /// whose FAIL text still names the documented failing node. Any other outcome — a NEW
-    /// FAIL at a non-frozen path, a `NOT_RUN`, or a frozen record whose FAIL text drifted to
-    /// a different node — is rejected, so record-only capture can never launder a NEW
-    /// regression into an accepted committed record.
+    /// whose failing-node set is EXACTLY its documented set. Any other outcome — a NEW FAIL
+    /// at a non-frozen path, a `NOT_RUN`, a frozen record that dropped a documented node, or
+    /// a frozen record that gained an undocumented failing node — is rejected, so record-only
+    /// capture can never launder a NEW regression into an accepted committed record.
     fn committed_baseline_record_rejection(relative_path: &str, outcome: &str) -> Option<String> {
         if outcome == "PASS" {
             return None;
@@ -4293,15 +4312,31 @@ mod durable_tests {
             .iter()
             .find(|(path, _)| *path == relative_path)
         {
-            Some((_, documented_node)) => {
+            Some((_, documented_nodes)) => {
                 if !outcome.starts_with("FAIL: ") {
                     return Some(format!(
                         "{relative_path}: frozen legacy-failure record must retain a FAIL outcome, got {outcome:?}"
                     ));
                 }
-                if !outcome.contains(documented_node) {
+                let found = outcome_failing_nodes(outcome);
+                let extra: Vec<&str> = found
+                    .iter()
+                    .copied()
+                    .filter(|node| !documented_nodes.contains(node))
+                    .collect();
+                if !extra.is_empty() {
                     return Some(format!(
-                        "{relative_path}: frozen legacy-failure text no longer names documented node {documented_node:?}; regenerate to PASS and drop it from the frozen list, or restore the documented failure"
+                        "{relative_path}: frozen legacy-failure record names undocumented failing node(s) {extra:?}; a regenerated record cannot add new failures to the freeze"
+                    ));
+                }
+                let missing: Vec<&str> = documented_nodes
+                    .iter()
+                    .copied()
+                    .filter(|node| !found.contains(node))
+                    .collect();
+                if !missing.is_empty() {
+                    return Some(format!(
+                        "{relative_path}: frozen legacy-failure text no longer names documented node(s) {missing:?}; regenerate to PASS and drop it from the frozen list, or restore the documented failure"
                     ));
                 }
                 None
@@ -4344,6 +4379,37 @@ mod durable_tests {
         let scene =
             pf_scene::Scene::new(action, pf_scene::NodeId::new("ok-action").unwrap()).unwrap();
         assert!(assert_focusable_targets_meet_minimum_size(&scene).is_ok());
+    }
+
+    fn single_action_scene(id: &str, width: f32, height: f32) -> pf_scene::Scene {
+        let mut action = Node::new(
+            pf_scene::NodeId::new(id).unwrap(),
+            Role::Button,
+            "Action",
+            pf_scene::Bounds::new(0.0, 0.0, width, height),
+            "--color-surface-canvas",
+        );
+        action.action = Some(pf_scene::NodeAction::Activate);
+        pf_scene::Scene::new(action, pf_scene::NodeId::new(id).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn focusable_target_guard_accepts_a_documented_id_at_its_documented_height() {
+        // library-search is documented at 44px; at its documented height it is exempt.
+        let scene = single_action_scene("library-search", 384.0, 44.0);
+        assert!(assert_focusable_targets_meet_minimum_size(&scene).is_ok());
+    }
+
+    #[test]
+    fn focusable_target_guard_rejects_a_documented_id_at_a_different_height() {
+        // Finding 1: a documented exact-id target that shrinks FURTHER (44 -> 36) is no
+        // longer exempt — the exemption is pinned to its documented height.
+        let scene = single_action_scene("library-search", 384.0, 36.0);
+        let error = assert_focusable_targets_meet_minimum_size(&scene).unwrap_err();
+        assert!(
+            error.contains("library-search") && error.contains("not a documented"),
+            "a documented id at a shrunk height must fail: {error}"
+        );
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -4461,19 +4527,50 @@ mod durable_tests {
         );
     }
 
+    /// Build a raster-guard FAIL outcome naming exactly `nodes`, in the real line shape
+    /// (`<id> ("<label>", Bounds { .. }): <metrics>`) the parser reads.
+    fn fail_outcome(nodes: &[&str]) -> String {
+        use std::fmt::Write as _;
+        let mut outcome = String::from("FAIL: raster ink guard failed:");
+        for node in nodes {
+            let _ = write!(
+                outcome,
+                "\n{node} (\"Label\", Bounds {{ x: 0.0, y: 0.0 }}): ink_pixels=0, raster_contrast=0.00, required=4.5"
+            );
+        }
+        outcome
+    }
+
     #[test]
-    fn committed_baseline_record_gate_rejects_a_frozen_record_with_a_different_failure() {
-        // A frozen-path record whose FAIL text no longer names the documented failing
-        // node is a silent regeneration and must be rejected.
+    fn committed_baseline_record_gate_rejects_a_frozen_record_with_an_extra_failure() {
+        // Finding 2: a regenerated frozen record carrying the documented failures PLUS a new
+        // one is a laundered regression and must be rejected.
+        let mut nodes = HOME_LEGACY_FAILING_NODES.to_vec();
+        nodes.push("home-card-title-new-regression");
+        let rejection =
+            committed_baseline_record_rejection("small/100/home.json", &fail_outcome(&nodes));
+        assert!(
+            rejection.as_deref().is_some_and(|message| {
+                message.contains("undocumented failing node")
+                    && message.contains("home-card-title-new-regression")
+            }),
+            "a frozen record with an extra failing node must be rejected: {rejection:?}"
+        );
+    }
+
+    #[test]
+    fn committed_baseline_record_gate_rejects_a_frozen_record_missing_a_documented_failure() {
+        // A frozen record that dropped a documented failing node (drifted toward PASS) must
+        // be rejected, not silently accepted.
         let rejection = committed_baseline_record_rejection(
             "small/100/home.json",
-            "FAIL: raster ink guard failed:\nsome-other-node: ink_pixels=0",
+            &fail_outcome(&HOME_LEGACY_FAILING_NODES[..2]),
         );
         assert!(
             rejection
                 .as_deref()
                 .is_some_and(|message| message.contains("no longer names documented node")),
-            "expected a drifted frozen record to be rejected, got {rejection:?}"
+            "a frozen record missing a documented failure must be rejected: {rejection:?}"
         );
     }
 
@@ -4483,10 +4580,10 @@ mod durable_tests {
         assert!(
             committed_baseline_record_rejection(
                 "small/100/home.json",
-                "FAIL: raster ink guard failed:\nhome-card-title-ridgeline (\"Ridgeline\"): ink_pixels=0",
+                &fail_outcome(HOME_LEGACY_FAILING_NODES),
             )
             .is_none(),
-            "a frozen record naming its documented node must be accepted"
+            "a frozen record naming exactly its documented failing-node set must be accepted"
         );
     }
 

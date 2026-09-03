@@ -56,6 +56,13 @@ use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
 };
 
+/// Minimum focusable/touch-target edge, in physical pixels. This is the Spike 1 norm
+/// (48px) and is the single source of truth shared by the production raster guard
+/// (`assert_focusable_targets_meet_minimum_size` in `pf-shell`) and the Taffy spike's
+/// `validate_geometry`. It is a fixed physical-pixel floor: it does not shrink at 100%
+/// scale, and actionable targets naturally exceed it as they grow at 150/200%.
+pub const MIN_TARGET_SIZE_PX: f32 = 48.0;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceStatus {
     pub battery_percent: u8,

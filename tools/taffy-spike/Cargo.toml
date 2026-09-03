@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 pf-render.workspace = true
 pf-scene.workspace = true
+pf-shell-core = { path = "../../crates/pf-shell-core" }
 sha2 = "0.10.9"
 taffy.workspace = true
 

@@ -491,10 +491,15 @@ fn validate_geometry(
     nodes: &[(TextContext, RectF)],
 ) -> Result<(), String> {
     for (context, rect) in nodes {
-        if rect.width < 48.0 || rect.height < 48.0 {
+        if rect.width < pf_shell_core::MIN_TARGET_SIZE_PX
+            || rect.height < pf_shell_core::MIN_TARGET_SIZE_PX
+        {
             return Err(format!(
-                "{} misses 48px target: {}x{}",
-                context.id, rect.width, rect.height
+                "{} misses {}px target: {}x{}",
+                context.id,
+                pf_shell_core::MIN_TARGET_SIZE_PX,
+                rect.width,
+                rect.height
             ));
         }
         if rect.x < 0.0

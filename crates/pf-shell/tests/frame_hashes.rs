@@ -252,12 +252,13 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.369 intentionally repaints Settings values as individual chips and adds the
-    // focused value-edit frame; the remaining hashes pin the unchanged route sequence.
+    // focused value-edit frame. Round 3 restores semantic focus ownership to that row, so
+    // only the edit frame is repinned; the remaining hashes pin the unchanged route sequence.
     assert!(
         transcript.contains("e2c6c13e17ea149e9942e7f4158e750f5d2b3b719d8a33e27da84d61d471f7f4  ")
     );
     assert!(
-        transcript.contains("ed5543f46f96a30e36522c3e0a8edbfb4987992a94bd2fc8909bf59ffe54ee3e  ")
+        transcript.contains("3837f70659d65037ac0b7bd2267b470c45d70f3046359608f8cbefa8d060ce00  ")
     );
     assert!(
         transcript.contains("5df9261925db52c484f7b89ebfa853d38ce68c7dd8eee96c91d3c33ff1ad9f74  ")

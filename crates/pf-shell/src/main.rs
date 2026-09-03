@@ -2481,6 +2481,19 @@ fn evaluate_occlusion_pair(
     base: pf_theme::Base,
     failures: &mut Vec<String>,
 ) {
+    let modal_node = |node: &Node| {
+        node.id.as_str().starts_with("first-run-")
+            || node.id.as_str().starts_with("comfort-")
+            || matches!(
+                node.id.as_str(),
+                "safe-return-teach" | "continue" | "continue-label" | "continue-keycap-start"
+            )
+    };
+    // The declared first-run dim establishes a modal paint layer. Its sheet and
+    // descendants are intentionally above the inactive route beneath it.
+    if modal_node(later.node) && !modal_node(earlier.node) {
+        return;
+    }
     if occlusion_nodes_related(earlier, later) {
         return;
     }
@@ -2865,6 +2878,22 @@ fn assert_raster_text_legible(
                 child.id.as_str().starts_with("library-item-") && contains(child, &node.id)
             })
     }
+    fn intentionally_dimmed_by_modal(scene: &pf_scene::Scene, node: &Node) -> bool {
+        fn contains(root: &Node, target: &pf_scene::NodeId) -> bool {
+            &root.id == target || root.children.iter().any(|child| contains(child, target))
+        }
+
+        let children = &scene.root().children;
+        let Some(dim_index) = children
+            .iter()
+            .position(|child| child.id.as_str() == "first-run-backdrop-dim")
+        else {
+            return false;
+        };
+        children[..dim_index]
+            .iter()
+            .any(|child| contains(child, &node.id))
+    }
     fn luminance(color: [u8; 3]) -> f64 {
         let channel = |value: u8| {
             let value = f64::from(value) / 255.0;
@@ -2913,6 +2942,7 @@ fn assert_raster_text_legible(
         if matches!(node.role, Role::Text | Role::Heading)
             && !node.accessible_label.trim().is_empty()
             && !intentionally_dimmed_by_library_fade(scene, node)
+            && !intentionally_dimmed_by_modal(scene, node)
         {
             let mut root = scene.root().clone();
             suppress_text(&mut root, &node.id);
@@ -5142,6 +5172,61 @@ mod durable_tests {
                 .unwrap_or_else(|error| {
                     panic!("first-run at {text_scale}% failed rendered legibility: {error}")
                 });
+        }
+    }
+
+    #[test]
+    fn first_run_evidence_covers_both_themes_at_every_supported_scale() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for text_scale in [100, 150, 200] {
+            for high_contrast in [false, true] {
+                let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+                core.load_preferences(
+                    &FakePreferencePort::new(
+                        [
+                            EffectivePreference {
+                                key: PreferenceKey("textScale".into()),
+                                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                                applied: true,
+                            },
+                            EffectivePreference {
+                                key: PreferenceKey("highContrast".into()),
+                                effective: PreferenceValue::Bool(high_contrast),
+                                stored: PreferenceValue::Bool(high_contrast),
+                                applied: true,
+                            },
+                        ],
+                        ChangeAuthority("user".into()),
+                    ),
+                    true,
+                )
+                .unwrap();
+                core.load_device_status(&FakeDeviceStatusPort { attention: false });
+                core.reset_first_run();
+                let scene = core.scene(metrics, "A Open").unwrap();
+                raster_guard_record(
+                    &scene,
+                    metrics,
+                    core.theme_base(),
+                    text_scale,
+                    false,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "first-run evidence failed at {text_scale}% high_contrast={high_contrast}: {error}"
+                    )
+                });
+            }
         }
     }
 

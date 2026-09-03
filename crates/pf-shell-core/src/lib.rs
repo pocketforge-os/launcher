@@ -3084,7 +3084,24 @@ impl ShellCore {
             ));
         }
         match self.presentation {
-            Presentation::FirstRun => self.first_run_nodes(&mut children, w),
+            Presentation::FirstRun => {
+                self.route_nodes(&mut children, metrics);
+                children.push(
+                    node(
+                        "first-run-backdrop-dim",
+                        Role::Group,
+                        "",
+                        0.0,
+                        0.0,
+                        w,
+                        h,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_image(first_run_dim_source(), ImageFit::Cover)
+                    .with_ink_token("--scene-overlay-role"),
+                );
+                self.first_run_nodes(&mut children, w, h);
+            }
             Presentation::Crash => self.crash_nodes(&mut children, w, h),
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, metrics),
@@ -3187,16 +3204,18 @@ impl ShellCore {
             }
             _ => supplied_footer,
         };
-        children.push(node(
-            "prompt-bar",
-            Role::Group,
-            "",
-            0.0,
-            h - PROMPTS_AREA_HEIGHT,
-            w,
-            PROMPTS_AREA_HEIGHT,
-            SCENE_TRANSPARENT_TOKEN,
-        ));
+        if self.presentation != Presentation::FirstRun {
+            children.push(node(
+                "prompt-bar",
+                Role::Group,
+                "",
+                0.0,
+                h - PROMPTS_AREA_HEIGHT,
+                w,
+                PROMPTS_AREA_HEIGHT,
+                SCENE_TRANSPARENT_TOKEN,
+            ));
+        }
         let prompt_height = scaled_text_box_height(32.0, self.text_scale);
         let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
         let prompt_label = if matches!(self.route, Route::Search | Route::Details) {
@@ -3238,7 +3257,9 @@ impl ShellCore {
         ) {
             prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
         }
-        children.push(prompt_node);
+        if self.presentation != Presentation::FirstRun {
+            children.push(prompt_node);
+        }
         wrap_system_layout(&mut children, w, self.text_scale);
         let radius_scale = f32::from(self.text_scale) / 100.0;
         for child in &mut children {
@@ -5650,83 +5671,235 @@ impl ShellCore {
         }
     }
 
-    fn first_run_nodes(&self, out: &mut Vec<Node>, w: f32) {
-        out.push(node(
-            "first-run-panel",
-            Role::Group,
-            "",
-            w / 2.0 - 364.0,
-            32.0,
-            728.0,
-            584.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
-        ));
-        out.push(node(
-            "first-run-title",
-            Role::Heading,
-            "FIRST RUN · Make it comfortable",
-            w / 2.0 - 340.0,
-            54.0,
-            680.0,
-            56.0,
-            COLOR_SURFACE_SCRIM_TOKEN,
-        ));
-        out.push(declared_multiline(node(
-            "first-run-copy",
-            Role::Text,
-            "All of this lives in Settings → Accessibility and can change any time.",
-            w / 2.0 - 340.0,
-            112.0,
-            680.0,
-            scaled_text_box_height(48.0, self.text_scale),
-            COLOR_SURFACE_SCRIM_TOKEN,
-        )));
+    fn first_run_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
+        let scale = f32::from(self.text_scale) / 100.0;
+        let sheet_width = (728.0 * scale.min(1.35)).min(w - 2.0 * SPACE_5);
+        let sheet_height = (h - 2.0 * SPACE_5).min(640.0);
+        let sheet_left = (w - sheet_width) / 2.0;
+        let sheet_top = (h - sheet_height) / 2.0;
+        let content_left = sheet_left + SPACE_5;
+        let content_width = sheet_width - 2.0 * SPACE_5;
+        let compact = self.text_scale >= 200;
+        let row_height = (52.0 * scale).min(if compact { 76.0 } else { 92.0 });
+        let row_gap = if compact { 4.0 } else { SPACE_2 };
+        let eyebrow_height = scaled_text_box_height(22.0, self.text_scale);
+        let title_height = scaled_text_box_height(34.0, self.text_scale);
+        let mut cursor = sheet_top + SPACE_5;
+
+        out.push(
+            node(
+                "first-run-panel",
+                Role::Group,
+                "First-run preferences",
+                sheet_left,
+                sheet_top,
+                sheet_width,
+                sheet_height,
+                COLOR_SURFACE_RAISED_TOKEN,
+            )
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+            .with_elevation(Elevation::Elev2)
+            .with_ink_token("--scene-overlay-role"),
+        );
+        out.push(
+            node(
+                "first-run-eyebrow",
+                Role::Text,
+                "FIRST RUN",
+                content_left,
+                cursor,
+                content_width,
+                eyebrow_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+        );
+        cursor += eyebrow_height + 4.0;
+        out.push(
+            node(
+                "first-run-title",
+                Role::Heading,
+                "Make it comfortable",
+                content_left,
+                cursor,
+                content_width,
+                title_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+        );
+        cursor += title_height + SPACE_2;
+        if !compact {
+            let copy_height = scaled_text_box_height(28.0, self.text_scale);
+            out.push(declared_multiline(
+                node(
+                    "first-run-copy",
+                    Role::Text,
+                    "All of this lives in Settings → Accessibility and can change any time.",
+                    content_left,
+                    cursor,
+                    content_width,
+                    copy_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            ));
+            cursor += copy_height + SPACE_3;
+        }
         let rows = self.first_run_preferences();
         for (i, row) in rows.iter().enumerate() {
+            let focused = i == self.focus;
+            let label = Self::preference_label(row);
             let mut n = node(
                 &format!("comfort-{i}"),
                 Role::Button,
-                &Self::preference_label(row),
-                w / 2.0 - 340.0,
-                180.0 + i as f32 * 64.0,
-                680.0,
-                52.0,
-                if i == self.focus {
+                &label,
+                content_left,
+                cursor,
+                content_width,
+                row_height,
+                STATE_REST_SURFACE_TOKEN,
+            )
+            .with_border(
+                if focused {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
-                    STATE_REST_SURFACE_TOKEN
+                    COLOR_BORDER_HAIRLINE_TOKEN
                 },
-            );
-            n.state.focused = i == self.focus;
+                if focused { 2.0 } else { 1.0 },
+            )
+            .with_ink_token("--scene-overlay-role");
+            n.state.focused = focused;
             n.action = Some(NodeAction::Activate);
+            let value = label.split(" · ").nth(1).unwrap_or("");
+            let title = label
+                .split_once(" · ")
+                .map_or(label.as_str(), |(title, _)| title);
+            n.children.push(
+                node(
+                    &format!("comfort-{i}-label"),
+                    Role::Text,
+                    title,
+                    content_left + SPACE_4,
+                    cursor + (row_height - scaled_text_box_height(28.0, self.text_scale)) / 2.0,
+                    content_width * 0.52,
+                    scaled_text_box_height(28.0, self.text_scale),
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+            );
+            let chip_width = settings_scaled_box_width(72.0, value, self.text_scale);
+            let chip_height = scaled_text_box_height(34.0, self.text_scale).min(row_height - 8.0);
+            let chip_left = content_left + content_width - SPACE_4 - chip_width;
+            let chip_top = cursor + (row_height - chip_height) / 2.0;
+            n.children.push(
+                node(
+                    &format!("comfort-{i}-value-chip"),
+                    Role::Group,
+                    "",
+                    chip_left,
+                    chip_top,
+                    chip_width,
+                    chip_height,
+                    STATE_SELECTED_ACCENT_TOKEN,
+                )
+                .with_border(
+                    if focused {
+                        STATE_FOCUSED_RING_TOKEN
+                    } else {
+                        COLOR_BORDER_HAIRLINE_TOKEN
+                    },
+                    if focused { 2.0 } else { 1.0 },
+                )
+                .with_ink_token("--scene-overlay-role"),
+            );
+            n.children.push(
+                node(
+                    &format!("comfort-{i}-value"),
+                    Role::Text,
+                    value,
+                    chip_left,
+                    chip_top,
+                    chip_width,
+                    chip_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
+            );
             out.push(n);
+            cursor += row_height + row_gap;
         }
-        out.push(declared_multiline(node(
-            "safe-return-teach",
-            Role::Text,
-            &format!("{} returns you here.", self.safe_return_binding),
-            w / 2.0 - 340.0,
-            470.0,
-            680.0,
-            scaled_text_box_height(48.0, self.text_scale),
-            COLOR_SURFACE_CANVAS_TOKEN,
-        )));
+        let teach_height = scaled_text_box_height(28.0, self.text_scale);
+        out.push(declared_multiline(
+            node(
+                "safe-return-teach",
+                Role::Text,
+                &format!("{} returns you here.", self.safe_return_binding),
+                content_left,
+                cursor,
+                content_width,
+                teach_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+        ));
+        cursor += teach_height + row_gap;
+        let continue_height = (54.0 * scale).min(64.0);
         let mut continue_node = node(
             "continue",
             Role::Button,
             "Continue · START",
-            w / 2.0 - 340.0,
-            540.0,
-            680.0,
-            54.0,
+            content_left,
+            cursor,
+            content_width,
+            continue_height,
+            STATE_SELECTED_ACCENT_TOKEN,
+        )
+        .with_border(
             if self.focus == rows.len() {
                 STATE_FOCUSED_RING_TOKEN
             } else {
-                STATE_REST_SURFACE_TOKEN
+                STATE_SELECTED_ACCENT_TOKEN
             },
-        );
+            if self.focus == rows.len() { 2.0 } else { 0.0 },
+        )
+        .with_ink_token("--scene-overlay-role");
         continue_node.state.focused = self.focus == rows.len();
         continue_node.action = Some(NodeAction::Activate);
+        continue_node.children.push(
+            node(
+                "continue-label",
+                Role::Text,
+                "Continue",
+                content_left + SPACE_4,
+                cursor + (continue_height - scaled_text_box_height(28.0, self.text_scale)) / 2.0,
+                content_width - 140.0,
+                scaled_text_box_height(28.0, self.text_scale),
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Label)
+            .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
+        );
+        continue_node.children.push(
+            node(
+                "continue-keycap-start",
+                Role::Text,
+                "START",
+                content_left + content_width - 144.0,
+                cursor + 4.0,
+                120.0,
+                continue_height - 8.0,
+                COLOR_SURFACE_RAISED_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+        );
         out.push(continue_node);
     }
     fn quick_nodes(&self, out: &mut Vec<Node>, w: f32, h: f32) {
@@ -7519,6 +7692,25 @@ fn library_footer_fade_source(surface_width: f32) -> ImageSource {
     ImageSource::new(id, bytes)
 }
 
+fn first_run_dim_source() -> ImageSource {
+    static DIM: OnceLock<Arc<[u8]>> = OnceLock::new();
+    let bytes = DIM.get_or_init(|| {
+        const WIDTH: u32 = 2;
+        const HEIGHT: u32 = 2;
+        // A subtly graded scrim keeps the modal's occlusion contract explicit while
+        // following the launch surface's declared-image treatment.
+        encoded_png(
+            WIDTH,
+            HEIGHT,
+            &[
+                0x17, 0x15, 0x12, 174, 0x17, 0x15, 0x12, 186, 0x17, 0x15, 0x12, 186, 0x17, 0x15,
+                0x12, 198,
+            ],
+        )
+    });
+    ImageSource::new("quiet-console:first-run-backdrop-dim", bytes.clone())
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn hero_wash_source() -> ImageSource {
     static WASH: OnceLock<Arc<[u8]>> = OnceLock::new();
@@ -8454,6 +8646,77 @@ mod tests {
         let after = format!("{:?}", settings_scene(&core));
         assert!(after.contains("Reduce motion"));
         assert!(after.contains("accessible_label: \"ON\""));
+    }
+
+    #[test]
+    fn first_run_uses_modal_sheet_rows_honest_affordances_and_one_primary_action() {
+        fn collect<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(node);
+            for child in &node.children {
+                collect(child, out);
+            }
+        }
+
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.reset_first_run();
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "SELECT Search · X Quick · A Open · PF Safe Return",
+            )
+            .unwrap();
+        let mut nodes = Vec::new();
+        collect(scene.root(), &mut nodes);
+        let find = |id: &str| nodes.iter().copied().find(|node| node.id.as_str() == id);
+
+        let panel = find("first-run-panel").unwrap();
+        assert_eq!(panel.style_token, COLOR_SURFACE_RAISED_TOKEN);
+        assert_eq!(panel.elevation, Elevation::Elev2);
+        assert!((panel.corner_radius - RADIUS_L).abs() < f32::EPSILON);
+        let dim = find("first-run-backdrop-dim").unwrap();
+        assert_eq!(dim.ink_token.as_deref(), Some("--scene-overlay-role"));
+        assert!(matches!(dim.content, pf_scene::NodeContent::Image { .. }));
+        assert!(find("prompt-bar").is_none());
+        assert!(find("prompts").is_none());
+
+        let comfort_rows = nodes
+            .iter()
+            .filter(|node| {
+                node.id
+                    .as_str()
+                    .strip_prefix("comfort-")
+                    .is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_digit()))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(!comfort_rows.is_empty());
+        assert!(comfort_rows.iter().all(|row| {
+            row.style_token == STATE_REST_SURFACE_TOKEN
+                && row.corner_radius == RADIUS_M
+                && row
+                    .children
+                    .iter()
+                    .any(|child| child.id.as_str().ends_with("-value-chip"))
+        }));
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| {
+                    node.action.is_some() && node.style_token == STATE_SELECTED_ACCENT_TOKEN
+                })
+                .count(),
+            1,
+            "Continue is the only filled primary action"
+        );
+        assert!(find("continue-keycap-start").is_some());
+        assert!(find("safe-return-teach").is_some_and(|node| node.action.is_none()));
     }
 
     #[test]

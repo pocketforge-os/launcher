@@ -254,8 +254,9 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.369 intentionally repaints Settings values as individual chips and adds the
-    // focused value-edit frame. Round 3 restores semantic focus ownership to that row, so
-    // only the edit frame is repinned; the remaining hashes pin the unchanged route sequence.
+    // focused value-edit frame. Round 3 restores semantic focus ownership to that row.
+    // tsp-op5a.370 repins only first-run for its raised sheet, dim backdrop, value chips,
+    // suppressed Home footer, and filled Continue action; the other route hashes stay fixed.
     assert!(
         transcript.contains("e2c6c13e17ea149e9942e7f4158e750f5d2b3b719d8a33e27da84d61d471f7f4  ")
     );
@@ -272,7 +273,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("197e9092bba58f5222bc4f4393d4363ce105be23cd1fac2bf8eb6421ce567064  ")
     );
     assert!(
-        transcript.contains("090e9f2e75175128affce48766df3be5974abe4f2f209cc8641989e12f8e48fc  ")
+        transcript.contains("2d0ce0960560a8fbda8d0190ddfcb48a53754f344a16bf1fa3b83d7109643f1b  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

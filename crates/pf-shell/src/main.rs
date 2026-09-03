@@ -3858,42 +3858,6 @@ mod durable_tests {
         );
     }
 
-    fn assert_settings_high_contrast_known_defect(driver: &FlowDriver, cell: MatrixCell) {
-        eprintln!("invariant matrix cell: Settings: {cell:?} [tsp-hyqb]");
-        let scene = driver.scene();
-        ensure_action_labels(&scene).unwrap();
-        assert_raster_text_paint_contained_and_complete(
-            &scene,
-            driver.metrics,
-            driver.core.theme_base(),
-            driver.core.text_scale(),
-        )
-        .unwrap();
-
-        // Known defect tsp-hyqb: disabled remap content uses 3.45:1 paint in the
-        // high-contrast theme instead of the guard's required 7:1. Preserve the
-        // complete guard and require the exact affected nodes until it is fixed.
-        let error = assert_raster_text_legible(
-            &scene,
-            driver.metrics,
-            driver.core.theme_base(),
-            driver.core.text_scale(),
-        )
-        .expect_err("tsp-hyqb was fixed; remove the known-defect annotation");
-        for node in [
-            "settings-row-accessibility-remap-line-0",
-            "settings-row-accessibility-remap-line-1",
-            "settings-row-accessibility-remap-control",
-        ] {
-            assert!(
-                error.contains(node) && error.contains("raster_contrast=3.45, required=7.0"),
-                "Settings high-contrast failure changed under tsp-hyqb: {error}: {cell:?}"
-            );
-        }
-        assert_eq!(driver.core.text_scale(), cell.text_scale);
-        assert!(driver.core.high_contrast());
-    }
-
     fn assert_unavailable_details_known_defect(driver: &FlowDriver) {
         let scene = driver.scene();
         ensure_action_labels(&scene).unwrap();
@@ -4054,21 +4018,13 @@ mod durable_tests {
 
             driver.metrics.logical_width = 1280.0;
             driver.action(custom("Room.next"));
-            if cell.high_contrast && cell.text_scale == 100 {
-                assert_settings_high_contrast_known_defect(&driver, cell);
-            } else {
-                assert_cell(&driver, cell, "Settings");
-            }
+            assert_cell(&driver, cell, "Settings");
 
             // Editing is a distinct painted Settings state: keep it in every
             // accessibility/safe-inset matrix cell so both the raster-ink and
             // occlusion guards exercise the value chips, not only the rest row.
             driver.action(movement(pf_scene::AxisMove::Right));
-            if cell.high_contrast && cell.text_scale == 100 {
-                assert_settings_high_contrast_known_defect(&driver, cell);
-            } else {
-                assert_cell(&driver, cell, "Settings value edit");
-            }
+            assert_cell(&driver, cell, "Settings value edit");
         }
     }
 

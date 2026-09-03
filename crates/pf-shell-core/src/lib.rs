@@ -827,7 +827,15 @@ struct SettingsSceneRow {
     id: String,
     label: String,
     accessible_label: String,
+    read_only: Option<ReadOnlySettingsFields>,
     action: Option<SettingsRowAction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReadOnlySettingsFields {
+    title: String,
+    caption: Option<String>,
+    value: String,
 }
 
 #[derive(Clone, Debug)]
@@ -2611,11 +2619,24 @@ impl ShellCore {
     }
 
     fn settings_scene_rows(&self) -> Vec<SettingsSceneRow> {
-        let disabled = |id: &str, label: String| SettingsSceneRow {
-            id: id.into(),
-            label,
-            accessible_label: String::new(),
-            action: None,
+        let disabled = |id: &str, title: &str, caption: Option<&str>, value: Option<&str>| {
+            let value = value.unwrap_or("—");
+            let accessible_label = [Some(title), caption, Some(value)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            SettingsSceneRow {
+                id: id.into(),
+                label: String::new(),
+                accessible_label,
+                read_only: Some(ReadOnlySettingsFields {
+                    title: title.into(),
+                    caption: caption.map(Into::into),
+                    value: value.into(),
+                }),
+                action: None,
+            }
         };
         match self.settings_room {
             SettingsRoom::Accessibility => self
@@ -2656,6 +2677,7 @@ impl ShellCore {
                         } else {
                             format!("{}\nStored, but this build cannot apply it\n—", row.label)
                         },
+                        read_only: None,
                         action: row
                             .interactive
                             .then_some(SettingsRowAction::Preference(index)),
@@ -2664,12 +2686,15 @@ impl ShellCore {
                 .chain([
                     disabled(
                         "accessibility-remap",
-                        "Button remap\nThe remap flow is not available here yet\n—".into(),
+                        "Button remap",
+                        Some("The remap flow is not available here yet"),
+                        None,
                     ),
                     disabled(
                         "accessibility-diagnostic",
-                        "ⓘ Mono audio and brightness controls are not available on this device."
-                            .into(),
+                        "ⓘ Mono audio and brightness controls are not available on this device.",
+                        None,
+                        None,
                     ),
                 ])
                 .collect(),
@@ -2686,18 +2711,21 @@ impl ShellCore {
                 vec![
                     disabled(
                         "controls-remap",
-                        format!("Remap buttons\nCurrent map: {preview}\n—"),
+                        "Remap buttons",
+                        Some(&format!("Current map: {preview}")),
+                        None,
                     ),
                     disabled(
                         "controls-safe-return",
-                        format!(
-                            "Safe Return button\nReturns safely from any game\n{}  —",
-                            self.safe_return_binding
-                        ),
+                        "Safe Return button",
+                        Some("Returns safely from any game"),
+                        Some(&self.safe_return_binding),
                     ),
                     disabled(
                         "controls-source",
-                        "ⓘ Input source facts come from the active device descriptor.".into(),
+                        "ⓘ Input source facts come from the active device descriptor.",
+                        None,
+                        None,
                     ),
                 ]
             }
@@ -2711,6 +2739,7 @@ impl ShellCore {
                     "Appearance\nChanges the room palette; High Contrast composes over it\nDusk / Day · {}",
                     if self.appearance_day { "Day" } else { "Dusk" }
                 ),
+                read_only: None,
                 action: Some(SettingsRowAction::Appearance),
             }],
             SettingsRoom::Network => {
@@ -2721,14 +2750,15 @@ impl ShellCore {
                 vec![
                     disabled(
                         "network-ssid",
-                        format!(
-                            "SSID\nObserved connected network\n{}\n—",
-                            state.connected_ssid.as_deref().unwrap_or("Not connected")
-                        ),
+                        "SSID",
+                        Some("Observed connected network"),
+                        Some(state.connected_ssid.as_deref().unwrap_or("Not connected")),
                     ),
                     disabled(
                         "network-signal",
-                        "ⓘ Signal and address are not reported by this authority.\n—".into(),
+                        "ⓘ Signal and address are not reported by this authority.",
+                        None,
+                        None,
                     ),
                 ]
             }
@@ -2736,18 +2766,21 @@ impl ShellCore {
                 let mut rows = vec![
                     disabled(
                         "system-about",
-                        format!(
-                            "About\nPocketForge shell version\n{}\n—",
-                            env!("CARGO_PKG_VERSION")
-                        ),
+                        "About",
+                        Some("PocketForge shell version"),
+                        Some(env!("CARGO_PKG_VERSION")),
                     ),
                     disabled(
                         "system-device",
-                        "Device and storage\nDesktop simulator fixture\nSimulated device · storage not reported\n—".into(),
+                        "Device and storage",
+                        Some("Desktop simulator fixture"),
+                        Some("Simulated device · storage not reported"),
                     ),
                     disabled(
                         "system-licenses",
-                        "Licenses\nOpen-source notices\n—".into(),
+                        "Licenses",
+                        Some("Open-source notices"),
+                        None,
                     ),
                 ];
                 if self.recovery_available {
@@ -2755,6 +2788,7 @@ impl ShellCore {
                         id: "system-recovery".into(),
                         label: "Recovery\nOpen the independent recovery entry\n›".into(),
                         accessible_label: "Recovery".into(),
+                        read_only: None,
                         action: Some(SettingsRowAction::Recovery),
                     });
                 }
@@ -5066,7 +5100,7 @@ impl ShellCore {
                 if interactive {
                     Role::Button
                 } else {
-                    Role::Text
+                    Role::Group
                 },
                 &row.accessible_label,
                 content_left,
@@ -5076,7 +5110,7 @@ impl ShellCore {
                 if interactive {
                     STATE_REST_SURFACE_TOKEN
                 } else {
-                    STATE_DISABLED_BORDER_TOKEN
+                    COLOR_SURFACE_RAISED_TOKEN
                 },
             );
             // The row remains the single semantic focus and action owner while
@@ -5084,13 +5118,22 @@ impl ShellCore {
             scene_row.state.focused = focused;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
+            } else {
+                scene_row = scene_row.with_border(STATE_DISABLED_BORDER_TOKEN, 1.0);
             }
             let row_surface = if interactive {
                 STATE_REST_SURFACE_TOKEN
             } else {
-                STATE_DISABLED_BORDER_TOKEN
+                COLOR_SURFACE_RAISED_TOKEN
             };
-            let lines = row.label.lines().collect::<Vec<_>>();
+            let lines = if let Some(fields) = &row.read_only {
+                [Some(fields.title.as_str()), fields.caption.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            } else {
+                row.label.lines().collect::<Vec<_>>()
+            };
             let row_line_height = scaled_text_box_height(24.0, self.text_scale);
             let row_line_top = 7.0 * scale;
             let row_line_step = 25.0 * scale;
@@ -5111,13 +5154,19 @@ impl ShellCore {
                 control_right - state_width - toggle_gap - track_width
             });
             let label_left = content_left + 16.0;
-            let label_width = toggle_control_left.map_or(content_width - 150.0, |control_left| {
-                (control_left - SPACE_2 * scale - label_left).max(0.0)
+            let read_only_control_left = row.read_only.as_ref().map(|_| {
+                let control_width = 104.0 * scale;
+                content_left + content_width - 16.0 - control_width
             });
+            let label_width = toggle_control_left
+                .or(read_only_control_left)
+                .map_or(content_width - 150.0, |control_left| {
+                    (control_left - SPACE_2 * scale - label_left).max(0.0)
+                });
             let mut fills = Vec::new();
             let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
-                let painted_line = if is_toggle {
+                let painted_line = if is_toggle || row.read_only.is_some() {
                     ellipsize_to_lines(line, label_width / scale, 1)
                 } else {
                     (*line).to_owned()
@@ -5184,7 +5233,9 @@ impl ShellCore {
                     label = declared_multiline(label);
                 }
                 if !semantic_paint_split {
-                    label = label.with_ink_token(if line_index == 0 {
+                    label = label.with_ink_token(if !interactive {
+                        STATE_UNAVAILABLE_TEXT_TOKEN
+                    } else if line_index == 0 {
                         COLOR_TEXT_PRIMARY_TOKEN
                     } else {
                         COLOR_TEXT_SECONDARY_TOKEN
@@ -5351,7 +5402,12 @@ impl ShellCore {
                     knob_size,
                     knob_token,
                 ));
-            } else if let Some(control) = lines.get(2) {
+            } else if let Some(control) = row
+                .read_only
+                .as_ref()
+                .map(|fields| fields.value.as_str())
+                .or_else(|| lines.get(2).copied())
+            {
                 let appearance = row.id == "display-appearance";
                 let control_width = if appearance {
                     text_node_box_width(settings_value_advance(control, self.text_scale))
@@ -5369,16 +5425,24 @@ impl ShellCore {
                 } else {
                     scene_row.bounds.y + 24.0 * scale
                 };
+                let painted_control = if row.read_only.is_some() {
+                    ellipsize_to_lines(control, control_width / scale, 1)
+                } else {
+                    (*control).to_owned()
+                };
                 let mut control_node = node(
                     &format!("settings-row-{}-control", row.id),
                     Role::Text,
-                    control,
+                    &painted_control,
                     content_left + content_width - 16.0 - control_width,
                     control_top,
                     control_width,
                     control_height,
                     row_surface,
                 );
+                if !interactive {
+                    control_node = control_node.with_ink_token(STATE_UNAVAILABLE_TEXT_TOKEN);
+                }
                 control_node.state.focused = focused;
                 text.push(control_node);
             }
@@ -9007,6 +9071,179 @@ mod tests {
         assert_eq!(dash.accessible_label, "—");
         assert!(dash.bounds.x + dash.bounds.width <= row.bounds.x + row.bounds.width);
         assert!(dash.bounds.x >= row.bounds.x + row.bounds.width - 120.0);
+    }
+
+    #[test]
+    fn read_only_settings_rows_keep_full_semantics_and_ellipsize_long_value_paint() {
+        for text_scale in [100, 150, 200] {
+            let mut core = core();
+            core.load_preferences(&preferences(true), true).unwrap();
+            core.go(Route::Settings);
+            core.settings_room = SettingsRoom::Controls;
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            });
+
+            let scene = settings_scene(&core);
+            let row = node_by_id(scene.root(), "settings-row-controls-safe-return").unwrap();
+            let value = node_by_id(row, "settings-row-controls-safe-return-control").unwrap();
+            assert_eq!(
+                row.accessible_label,
+                "Safe Return button · Returns safely from any game · PF · the button below the d-pad"
+            );
+            assert!(value.accessible_label.ends_with('…'));
+            assert!(!row.accessible_label.ends_with('…'));
+        }
+    }
+
+    #[test]
+    fn read_only_settings_rows_use_structured_value_slots_and_nonempty_labels() {
+        fn visit(node: &Node) {
+            if node.accessible_label == "—" {
+                assert!(
+                    node.id.as_str().ends_with("-control"),
+                    "bare em dash escaped its structured value slot: {}",
+                    node.id.as_str()
+                );
+            }
+            for child in &node.children {
+                visit(child);
+            }
+        }
+
+        let (mut network, _, _) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.load_network(&mut network);
+        core.go(Route::Settings);
+        for room in [
+            SettingsRoom::Accessibility,
+            SettingsRoom::Controls,
+            SettingsRoom::Network,
+            SettingsRoom::System,
+        ] {
+            core.settings_room = room;
+            for row in core
+                .settings_scene_rows()
+                .iter()
+                .filter(|row| row.action.is_none())
+            {
+                assert!(!row.accessible_label.trim().is_empty(), "{}", row.id);
+                let fields = row.read_only.as_ref().expect("read-only fields");
+                assert!(row.accessible_label.contains(&fields.title));
+                assert!(row.accessible_label.contains(&fields.value));
+            }
+            visit(settings_scene(&core).root());
+        }
+    }
+
+    #[test]
+    fn read_only_settings_value_slots_do_not_intersect_labels_at_any_text_scale() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let (mut network, _, _) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.load_network(&mut network);
+        core.go(Route::Settings);
+
+        for text_scale in [100, 150, 200] {
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            });
+            for room in [
+                SettingsRoom::Accessibility,
+                SettingsRoom::Controls,
+                SettingsRoom::Network,
+                SettingsRoom::System,
+            ] {
+                core.settings_room = room;
+                let rows = core.settings_scene_rows();
+                for (index, row) in rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.read_only.is_some())
+                {
+                    core.focus = index;
+                    let scene = settings_scene(&core);
+                    let scene_row =
+                        node_by_id(scene.root(), &format!("settings-row-{}", row.id)).unwrap();
+                    let value =
+                        node_by_id(scene_row, &format!("settings-row-{}-control", row.id)).unwrap();
+                    for line_index in 0..2 {
+                        if let Some(label) = node_by_id(
+                            scene_row,
+                            &format!("settings-row-{}-line-{line_index}", row.id),
+                        ) {
+                            assert!(
+                                !intersects(label.bounds, value.bounds),
+                                "{room:?} {} line {line_index} {:?} intersects value {:?} at {text_scale}%",
+                                row.id,
+                                label.bounds,
+                                value.bounds
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn high_contrast_read_only_settings_tokens_clear_seven_to_one() {
+        fn luminance(hex: &str) -> f64 {
+            let channel = |offset| {
+                let value =
+                    f64::from(u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap()) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+        }
+        let contrast = |a: &str, b: &str| {
+            let (light, dark) = if luminance(a) > luminance(b) {
+                (luminance(a), luminance(b))
+            } else {
+                (luminance(b), luminance(a))
+            };
+            (light + 0.05) / (dark + 0.05)
+        };
+
+        let theme = pf_theme::flagship();
+        let ink = theme
+            .resolve(Base::HighContrast, STATE_UNAVAILABLE_TEXT_TOKEN)
+            .unwrap();
+        let surface = theme
+            .resolve(Base::HighContrast, COLOR_SURFACE_RAISED_TOKEN)
+            .unwrap();
+        assert!(contrast(ink, surface) >= 7.0);
+
+        let mut core = core();
+        core.go(Route::Settings);
+        core.settings_room = SettingsRoom::Controls;
+        let scene = settings_scene(&core);
+        let row = node_by_id(scene.root(), "settings-row-controls-remap").unwrap();
+        assert_eq!(row.style_token, COLOR_SURFACE_RAISED_TOKEN);
+        assert_eq!(
+            row.border_token.as_deref(),
+            Some(STATE_DISABLED_BORDER_TOKEN)
+        );
+        assert!(row.action.is_none());
+        assert_ne!(row.style_token, STATE_REST_SURFACE_TOKEN);
     }
 
     #[test]

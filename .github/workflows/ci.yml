@@ -38,10 +38,14 @@ jobs:
           command -v cargo-nextest >/dev/null 2>&1 || \
             curl -LsSf https://get.nexte.st/0.9.143/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
           cargo nextest --version
-      - name: Test workspace (nextest — global parallel pool across all test binaries)
+      - name: Probe one offscreen render cost (diagnostic)
         run: |
           echo "runner cores: nproc=$(nproc) nproc-all=$(nproc --all)"
-          cargo nextest run --workspace --locked
+          cargo build -p pf-shell --locked
+          /usr/bin/time -v ./target/debug/pf-shell --offscreen --out "$RUNNER_TEMP/render-probe" 2>&1 \
+            | grep -E "User time|System time|wall clock|Percent of CPU|Maximum resident" || true
+      - name: Test workspace (nextest — global parallel pool across all test binaries)
+        run: cargo nextest run --workspace --locked
       - name: Doc-tests (nextest does not run doc-tests; keep them from silently dropping)
         run: cargo test --workspace --locked --doc
       - name: Soak desktop launch and return against real authority

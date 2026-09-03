@@ -76,7 +76,8 @@ const LIBRARY_SEARCH_MIN_WIDTH: f32 = 320.0;
 const CARD_LABEL_GAP: f32 = 12.0;
 const CARD_CAPTION_GAP: f32 = 2.0;
 const HOME_STACK_BUDGET: f32 = 664.0;
-const HOME_STACK_HARD_LIMIT: f32 = 720.0;
+const HOME_FOCUS_RING_OVERSHOOT: f32 = 4.0;
+const HOME_PROMPT_BAND_TOP: f32 = 720.0 - PROMPTS_AREA_HEIGHT;
 const HOME_TOP_SPACER: f32 = 144.0;
 const HOME_TOP_SPACER_FLOOR: f32 = 96.0;
 const HOME_AIR_SPACER: f32 = 88.0;
@@ -177,6 +178,7 @@ struct HomeVerticalLayout {
     status_y: f32,
     shelf_label_y: f32,
     card_row_y: f32,
+    card_art_height: f32,
     card_height: f32,
     show_card_caption: bool,
 }
@@ -204,8 +206,11 @@ fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
     let top_spacer = HOME_TOP_SPACER - shrink * top_slack / total_slack;
     let air_spacer = HOME_AIR_SPACER - shrink * air_slack / total_slack;
     let bottom_with_caption = top_spacer + air_spacer + fixed_height;
-    let show_card_caption = bottom_with_caption <= HOME_STACK_HARD_LIMIT;
-    let card_height = card_primary_height
+    // The footer owns the final prompt-area band. Once the stack has exhausted both
+    // spacers, yield captions and then card art to that edge rather than treating the
+    // physical 720 px surface bottom as usable Home content.
+    let show_card_caption = text_scale < 200 || bottom_with_caption <= HOME_PROMPT_BAND_TOP;
+    let mut card_height = card_primary_height
         + if show_card_caption {
             card_caption_height
         } else {
@@ -215,12 +220,21 @@ fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
     let status_y = title_y + title_height + 8.0;
     let shelf_label_y = status_y + status_height + air_spacer;
     let card_row_y = shelf_label_y + shelf_label_height + 16.0;
+    let required_clearance = SPACE_2 + HOME_FOCUS_RING_OVERSHOOT;
+    let overflow_into_prompts = if show_card_caption {
+        0.0
+    } else {
+        (card_row_y + card_height + required_clearance - HOME_PROMPT_BAND_TOP).max(0.0)
+    };
+    let card_art_height = (CARD_ART_HEIGHT - overflow_into_prompts).max(0.0);
+    card_height -= overflow_into_prompts;
 
     HomeVerticalLayout {
         title_y,
         status_y,
         shelf_label_y,
         card_row_y,
+        card_art_height,
         card_height,
         show_card_caption,
     }
@@ -3622,7 +3636,7 @@ impl ShellCore {
                     x,
                     vertical.card_row_y,
                     card_width,
-                    CARD_ART_HEIGHT,
+                    vertical.card_art_height,
                     i == self.focus,
                     self.text_scale,
                 );
@@ -3634,14 +3648,16 @@ impl ShellCore {
                     x,
                     vertical.card_row_y,
                     card_width,
-                    CARD_ART_HEIGHT,
+                    vertical.card_art_height,
                     Some(h - PROMPTS_AREA_HEIGHT),
                     self.text_scale,
                     vertical.show_card_caption,
+                    true,
                 );
                 if item.favorite {
-                    let (pin_width, pin_height) =
-                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    // The star is artwork inside the fixed card box, so accessible text
+                    // scaling applies only to the caption/status carrier below the art.
+                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = x + card_width - 18.0;
                     let pin_center_y = vertical.card_row_y + 20.0;
                     n.children.push(
@@ -3655,7 +3671,8 @@ impl ShellCore {
                             pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
-                        .with_type_role(TypeRole::Caption),
+                        .with_type_role(TypeRole::Caption)
+                        .with_fixed_paint_scale(),
                     );
                 }
                 content.push(n);
@@ -3912,10 +3929,13 @@ impl ShellCore {
                 }
             }
             let library_title_height = scaled_text_box_height(34.0, self.text_scale);
-            let library_cue_slot_height = if self.text_scale == 100 {
+            // The reason caption follows the scaled title. Reserve that complete
+            // below-art stack in both the cell extent and row pitch; reserving a
+            // pre-title cue slot let the independently-sized title paint over it.
+            let library_reason_slot_height = if self.text_scale == 100 {
                 0.0
             } else {
-                scaled_text_box_height(28.0, self.text_scale) + CARD_CAPTION_GAP
+                scaled_text_box_height(20.0, self.text_scale) + CARD_CAPTION_GAP
             };
             let card_top =
                 chrome_bottom + (geometry.scaled_card_top(self.text_scale) - STATUS_BAR_HEIGHT);
@@ -3926,20 +3946,20 @@ impl ShellCore {
                 (h - PROMPTS_AREA_HEIGHT
                     - card_top
                     - CARD_LABEL_GAP
-                    - library_cue_slot_height
+                    - library_reason_slot_height
                     - library_title_height)
                     .max(0.0),
             );
             let row_height = library_card_art_height
                 + CARD_LABEL_GAP
-                + library_cue_slot_height
                 + library_title_height
+                + library_reason_slot_height
                 + SPACE_5;
             let mut visible_rows: usize = 1;
             let card_content_height = library_card_art_height
                 + CARD_LABEL_GAP
-                + library_cue_slot_height
-                + library_title_height;
+                + library_title_height
+                + library_reason_slot_height;
             while if geometry.columns == 6
                 && self.text_scale == 100
                 && metrics.safe_insets.top == 0.0
@@ -4002,6 +4022,7 @@ impl ShellCore {
                     None,
                     self.text_scale,
                     true,
+                    true,
                 );
                 card.children.retain(|child| {
                     !child.id.as_str().contains("-title-")
@@ -4017,8 +4038,7 @@ impl ShellCore {
                     art.state.focused = true;
                 }
                 if item.favorite {
-                    let (pin_width, pin_height) =
-                        scaled_centered_text_box(20.0, 20.0, self.text_scale);
+                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
                     let pin_center_y = card.bounds.y + 18.0;
                     card.children.push(
@@ -4032,13 +4052,11 @@ impl ShellCore {
                             pin_height,
                             COLOR_SURFACE_SCRIM_TOKEN,
                         )
-                        .with_type_role(TypeRole::Caption),
+                        .with_type_role(TypeRole::Caption)
+                        .with_fixed_paint_scale(),
                     );
                 }
-                let title_y = card.bounds.y
-                    + library_card_art_height
-                    + CARD_LABEL_GAP
-                    + library_cue_slot_height;
+                let title_y = card.bounds.y + library_card_art_height + CARD_LABEL_GAP;
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
@@ -6465,17 +6483,13 @@ fn plate_art_nodes(
     );
     let mut nodes = vec![art];
     let home = context == "home-card";
-    let scale_aware_card = !favorite && !detail;
-    let stack_scale = if scale_aware_card {
-        f32::from(text_scale) / 100.0
-    } else {
-        1.0
-    };
-    let initial_width = (72.0 * stack_scale).min(art_width);
-    let initial_height = 56.0 * stack_scale;
-    let kind_width = (88.0 * stack_scale).min(art_width);
-    let kind_height = 24.0 * stack_scale;
-    let stack_gap = 8.0 * stack_scale;
+    // Identity-plate lettering belongs to the fixed-size artwork, not the accessible
+    // text flow below it. Keep its layout at the authored 100% metrics at every scale.
+    let initial_width = 72.0_f32.min(art_width);
+    let initial_height = 56.0;
+    let kind_width = 88.0_f32.min(art_width);
+    let kind_height = 24.0;
+    let stack_gap = 8.0;
     let stack_top = art_y + (art_height - initial_height - stack_gap - kind_height) / 2.0;
     nodes.push(
         node(
@@ -6490,7 +6504,8 @@ fn plate_art_nodes(
         )
         .with_type_role(TypeRole::Plate)
         .with_ink_token(plate_ink)
-        .with_text_align(TextAlign::Center),
+        .with_text_align(TextAlign::Center)
+        .with_fixed_paint_scale(),
     );
     nodes.push(
         node(
@@ -6505,7 +6520,8 @@ fn plate_art_nodes(
         )
         .with_type_role(TypeRole::Eyebrow)
         .with_ink_token(plate_ink)
-        .with_text_align(TextAlign::Center),
+        .with_text_align(TextAlign::Center)
+        .with_fixed_paint_scale(),
     );
     if !detail {
         let title = if home {
@@ -6619,23 +6635,26 @@ fn add_unavailable_card_cues(
     footer_top: Option<f32>,
     text_scale: u16,
     show_reason: bool,
+    fixed_scale_on_art_cues: bool,
 ) {
+    let mark_on_art = |node: Node| {
+        if fixed_scale_on_art_cues {
+            node.with_fixed_paint_scale()
+        } else {
+            node
+        }
+    };
     let home = context == "home-card";
     let scale_aware_card = context != "favorite-card" && context != "detail-art";
-    let library_cue_slot_height = if scale_aware_card && !home && text_scale != 100 {
-        scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
-    } else {
-        0.0
-    };
-    let title_y = y + art_height + CARD_LABEL_GAP + library_cue_slot_height;
+    let title_y = y + art_height + CARD_LABEL_GAP;
     let title_height = if scale_aware_card {
-        scaled_text_box_height(28.0, text_scale)
+        scaled_text_box_height(if home { 28.0 } else { 34.0 }, text_scale)
     } else {
         28.0
     };
     let reason_y = title_y + title_height + CARD_CAPTION_GAP;
     let cue_box = |text: &str, base_width: f32, base_height: f32| {
-        if scale_aware_card && text_scale != 100 {
+        if !fixed_scale_on_art_cues && scale_aware_card && !home && text_scale != 100 {
             (
                 measured_text_advance(base_width, text_scale)
                     .max(text_node_box_width(caption_text_width(text, text_scale)))
@@ -6649,7 +6668,7 @@ fn add_unavailable_card_cues(
     let badge_top = |badge_height: f32| {
         if home {
             y + art_height - 46.0
-        } else if scale_aware_card && text_scale != 100 {
+        } else if !fixed_scale_on_art_cues && scale_aware_card && text_scale != 100 {
             y + art_height + CARD_LABEL_GAP
         } else {
             y + art_height - 18.0 - badge_height
@@ -6663,9 +6682,14 @@ fn add_unavailable_card_cues(
                 .any(|requirement| !requirement.optional && requirement.capability == "network")
         })
     {
-        let badge = scale_aware_single_line("⊘ Network", width - 20.0, text_scale);
+        let badge_scale = if fixed_scale_on_art_cues {
+            100
+        } else {
+            text_scale
+        };
+        let badge = scale_aware_single_line("⊘ Network", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 92.0, 28.0);
-        nodes.push(
+        nodes.push(mark_on_art(
             node(
                 &format!("{context}-badge-{}", item.id),
                 Role::Text,
@@ -6677,10 +6701,10 @@ fn add_unavailable_card_cues(
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Caption),
-        );
+        ));
         if show_reason {
             let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
-            let (_, reason_height) = cue_box(&reason, width, 20.0);
+            let reason_height = scaled_text_box_height(20.0, text_scale);
             nodes.push(
                 node(
                     &format!("{context}-reason-{}", item.id),
@@ -6697,9 +6721,14 @@ fn add_unavailable_card_cues(
         }
     }
     if matches!(availability, Availability::IncompatibleRuntime { .. }) {
-        let badge = scale_aware_single_line("◉ Update", width - 20.0, text_scale);
+        let badge_scale = if fixed_scale_on_art_cues {
+            100
+        } else {
+            text_scale
+        };
+        let badge = scale_aware_single_line("◉ Update", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
-        nodes.push(
+        nodes.push(mark_on_art(
             node(
                 &format!("{context}-badge-{}", item.id),
                 Role::Text,
@@ -6711,7 +6740,7 @@ fn add_unavailable_card_cues(
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
             .with_type_role(TypeRole::Caption),
-        );
+        ));
         return;
     }
     if matches!(availability, Availability::Ready) {
@@ -6724,7 +6753,12 @@ fn add_unavailable_card_cues(
         Availability::UnsupportedCapability { .. } => "Unavailable",
         Availability::Ready => return,
     };
-    let badge = scale_aware_single_line(&format!("⊘ {badge}"), width - 20.0, text_scale);
+    let badge_scale = if fixed_scale_on_art_cues {
+        100
+    } else {
+        text_scale
+    };
+    let badge = scale_aware_single_line(&format!("⊘ {badge}"), width - 20.0, badge_scale);
     let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
     // Illustrated covers receive a dimming veil. Identity plates already encode their
     // unavailable state with the art badge; veiling the plate would erase its mono/kind identity.
@@ -6740,7 +6774,7 @@ fn add_unavailable_card_cues(
             STATE_UNAVAILABLE_VEIL_TOKEN,
         ));
     }
-    nodes.push(
+    nodes.push(mark_on_art(
         node(
             &format!("{context}-badge-{}", item.id),
             Role::Text,
@@ -6752,7 +6786,7 @@ fn add_unavailable_card_cues(
             COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Caption),
-    );
+    ));
     if !show_reason {
         return;
     }
@@ -9959,6 +9993,51 @@ mod tests {
     }
 
     #[test]
+    fn library_reason_is_derived_below_scaled_title() {
+        let unavailable = item(
+            "steam-link",
+            "Steam Link",
+            vec![variant(
+                "stream",
+                "steam-link",
+                Availability::NeedsNetwork {
+                    reason: "network required".into(),
+                },
+            )],
+        );
+
+        for text_scale in [150, 200] {
+            let mut core = fixture_core(vec![unavailable.clone()]);
+            core.text_scale = text_scale;
+            core.go(Route::Library);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let card = node_by_id(scene.root(), "library-item-steam-link").unwrap();
+            let title = node_by_id(card, "library-title-steam-link").unwrap();
+            let reason = node_by_id(card, "library-card-reason-steam-link").unwrap();
+            let gap = reason.bounds.y - (title.bounds.y + title.bounds.height);
+            assert!(
+                gap >= CARD_CAPTION_GAP,
+                "{text_scale}% title-to-reason gap must be at least {CARD_CAPTION_GAP}px, got {gap}px"
+            );
+            assert!(
+                reason.bounds.y + reason.bounds.height <= card.bounds.y + card.bounds.height,
+                "{text_scale}% reason must fit inside the grown card cell"
+            );
+        }
+    }
+
+    #[test]
     fn identity_plate_centers_its_initial_and_kind_stack_without_an_inner_box() {
         let mut plate = item(
             "steam-link",
@@ -10011,6 +10090,112 @@ mod tests {
                 && !id.contains("plate-motif")
                 && !id.contains("plate-frame")
         }));
+    }
+
+    #[test]
+    fn on_card_plate_and_badge_bounds_ignore_accessible_text_scale() {
+        let mut ready = variant("stream", "steam-link", Availability::Ready);
+        ready.requirements.push(Requirement {
+            capability: "network".into(),
+            optional: false,
+        });
+        let mut plate = item("steam-link", "Steam Link", vec![ready]);
+        plate.kind = AppKind::Stream;
+        plate.tags.push("kind-label:Stream".into());
+        let core = fixture_core(vec![plate]);
+        let plate = &core.items[0];
+
+        let card_nodes = |context, text_scale| {
+            let mut nodes = plate_art_nodes(
+                plate,
+                context,
+                48.0,
+                40.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+                text_scale,
+            );
+            add_unavailable_card_cues(
+                &mut nodes,
+                plate,
+                &Availability::Ready,
+                context,
+                48.0,
+                40.0,
+                CARD_ART_WIDTH,
+                CARD_ART_HEIGHT,
+                Some(HOME_PROMPT_BAND_TOP),
+                text_scale,
+                true,
+                true,
+            );
+            nodes
+        };
+        let metrics = SurfaceMetrics {
+            logical_width: 400.0,
+            logical_height: 500.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        for context in ["home-card", "library-card"] {
+            let at_100 = card_nodes(context, 100);
+            let at_200 = card_nodes(context, 200);
+            for suffix in ["initial-plate", "plate-kind", "badge"] {
+                let id = format!("{context}-{suffix}-steam-link");
+                let bounds_at = |nodes: &[Node]| {
+                    nodes
+                        .iter()
+                        .find(|node| node.id.as_str() == id)
+                        .unwrap()
+                        .bounds
+                };
+                assert_eq!(
+                    bounds_at(&at_100),
+                    bounds_at(&at_200),
+                    "{id} must retain 100% on-card metrics"
+                );
+            }
+
+            let scene_at = |nodes| {
+                let root_id = NodeId::new(format!("{context}-scale-test")).unwrap();
+                Scene::new(
+                    Node::new(
+                        root_id.clone(),
+                        Role::Group,
+                        "",
+                        Bounds::new(0.0, 0.0, 400.0, 500.0),
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_children(nodes),
+                    root_id,
+                )
+                .unwrap()
+            };
+            let scene_100 = scene_at(at_100);
+            let scene_200 = scene_at(at_200);
+            let badge_id = format!("{context}-badge-steam-link");
+            assert_eq!(
+                label_ink(&scene_100, &badge_id, metrics, 100),
+                label_ink(&scene_200, &badge_id, metrics, 200),
+                "{badge_id} on-art ink must retain 100% paint metrics"
+            );
+            let reason_id = format!("{context}-reason-steam-link");
+            assert!(
+                label_ink(&scene_200, &reason_id, metrics, 200).1
+                    > label_ink(&scene_100, &reason_id, metrics, 100).1,
+                "{reason_id} below-art ink must grow with accessible text scale"
+            );
+        }
+        assert_eq!(
+            card_nodes("home-card", 200)
+                .iter()
+                .find(|node| node.id.as_str() == "home-card-badge-steam-link")
+                .unwrap()
+                .accessible_label,
+            "⊘ Network"
+        );
     }
 
     #[test]
@@ -14096,10 +14281,7 @@ mod tests {
                 );
             }
             let card_bottom = card.bounds.y + card.bounds.height;
-            assert!(card_bottom <= HOME_STACK_HARD_LIMIT);
-            if text_scale <= 150 {
-                assert!(card_bottom <= HOME_STACK_BUDGET);
-            }
+            assert!(card_bottom <= HOME_STACK_BUDGET);
 
             let mut card_text = Vec::new();
             collect_matching(
@@ -14152,6 +14334,81 @@ mod tests {
         core.text_scale = 200;
         let scene = core.scene(metrics, "A Open · X Details").unwrap();
         assert!(node_by_id(scene.root(), "home-card-reason-network-game").is_none());
+    }
+
+    #[test]
+    fn full_home_fixture_keeps_the_card_row_clear_of_prompts_at_200_percent() {
+        struct AttentionStatus;
+        impl DeviceStatusPort for AttentionStatus {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Ok(DeviceStatus {
+                    battery_percent: 25,
+                    attention_message: Some("Controller battery low".to_owned()),
+                })
+            }
+        }
+
+        let items = (0..HOME_SHELF_LIMIT)
+            .map(|index| {
+                let mut ready =
+                    variant("stream", &format!("ready-app-{index}"), Availability::Ready);
+                ready.requirements.push(Requirement {
+                    capability: "network".into(),
+                    optional: false,
+                });
+                item(
+                    &format!("ready-{index}"),
+                    &format!("Ready Game {index}"),
+                    vec![ready],
+                )
+            })
+            .collect();
+        let mut core = fixture_core(items);
+        core.load_device_status(&AttentionStatus);
+        core.text_scale = 200;
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open · X Details",
+            )
+            .unwrap();
+        assert!(node_by_id(scene.root(), "attention-pill").is_some());
+        assert_eq!(
+            scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("item-"))
+                .count(),
+            HOME_SHELF_LIMIT
+        );
+
+        let prompt_top = 720.0 - PROMPTS_AREA_HEIGHT;
+        let row: Vec<_> = scene
+            .root()
+            .children
+            .iter()
+            .filter(|node| node.id.as_str().starts_with("item-"))
+            .cloned()
+            .collect();
+        let (_, row_bottom) = home_row_vertical_extent(&row);
+        let focused_ring_bottom = row
+            .iter()
+            .find(|node| node.state.focused)
+            .map_or(row_bottom, |node| {
+                node.bounds.y + node.bounds.height + HOME_FOCUS_RING_OVERSHOOT
+            });
+        assert!(
+            row_bottom.max(focused_ring_bottom) + SPACE_2 <= prompt_top,
+            "full Home card row bottom {} does not leave space-2 before prompts at {prompt_top}",
+            row_bottom.max(focused_ring_bottom)
+        );
     }
 
     #[test]

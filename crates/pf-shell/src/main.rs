@@ -3430,6 +3430,34 @@ mod durable_tests {
                 false,
             )
             .unwrap();
+            // The raster occlusion guard compares painted ink and opaque fills; it
+            // cannot detect a focused card ring merely entering the footer's reserved
+            // band when no individual prompt glyph shares those pixels. Keep that
+            // route-level geometry invariant in the composed matrix too.
+            if self.core.route() == pf_shell_core::Route::Home && self.core.text_scale() == 200 {
+                const PROMPT_BAND_HEIGHT: f32 = 60.0;
+                const REQUIRED_GAP: f32 = 8.0;
+                const FOCUS_RING_OVERSHOOT: f32 = 4.0;
+                let prompt_band_top = self.metrics.logical_height - PROMPT_BAND_HEIGHT;
+                for card in scene
+                    .root()
+                    .children
+                    .iter()
+                    .filter(|node| node.id.as_str().starts_with("item-"))
+                {
+                    let ring_overshoot = if card.state.focused {
+                        FOCUS_RING_OVERSHOOT
+                    } else {
+                        0.0
+                    };
+                    assert!(
+                        card.bounds.y + card.bounds.height + ring_overshoot + REQUIRED_GAP
+                            <= prompt_band_top,
+                        "Home card {} enters the reserved prompt band at 200%",
+                        card.id.as_str()
+                    );
+                }
+            }
         }
 
         fn into_state_dir(self) -> tempfile::TempDir {

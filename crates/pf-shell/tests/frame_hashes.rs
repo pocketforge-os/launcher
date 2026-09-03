@@ -206,8 +206,10 @@ fn vertical_slice_frame_hashes_are_stable() {
         "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
         // Quick intentionally rebaselines after flowing its notes below the action rows.
         "cbe491df596ca152b0f850e9f241e34958ac2ab207735adf7f4463d1f620cbcb  ",
-        "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
-        "8f4b67846de0c3450531fa7064874e2187bf914f75ac8fd9804bf8222328c836  ",
+        // Library intentionally rebaselines after deriving the reason caption from
+        // the actual scaled title bottom instead of a shorter duplicate metric.
+        "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
+        "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
         "83618428f80c2376d167435dcae5cc11c575a1e09148e2cca650ffe411397c5d  ",
         "1d524919fe690aefe16595c30785394e876b593392b0abe83c41a1383f0d05ca  ",
         "129850b67760cdbe6c9ec9f167e0140188738474348f7fe1eb86fae48f608156  ",

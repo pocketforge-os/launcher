@@ -5154,9 +5154,15 @@ impl ShellCore {
                 control_right - state_width - toggle_gap - track_width
             });
             let label_left = content_left + 16.0;
-            let label_width = toggle_control_left.map_or(content_width - 150.0, |control_left| {
-                (control_left - SPACE_2 * scale - label_left).max(0.0)
+            let read_only_control_left = row.read_only.as_ref().map(|_| {
+                let control_width = 104.0 * scale;
+                content_left + content_width - 16.0 - control_width
             });
+            let label_width = toggle_control_left
+                .or(read_only_control_left)
+                .map_or(content_width - 150.0, |control_left| {
+                    (control_left - SPACE_2 * scale - label_left).max(0.0)
+                });
             let mut fills = Vec::new();
             let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
@@ -9131,6 +9137,66 @@ mod tests {
                 assert!(row.accessible_label.contains(&fields.value));
             }
             visit(settings_scene(&core).root());
+        }
+    }
+
+    #[test]
+    fn read_only_settings_value_slots_do_not_intersect_labels_at_any_text_scale() {
+        fn intersects(a: Bounds, b: Bounds) -> bool {
+            a.x < b.x + b.width
+                && a.x + a.width > b.x
+                && a.y < b.y + b.height
+                && a.y + a.height > b.y
+        }
+
+        let (mut network, _, _) = device_ports(NtpState::Inactive);
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.load_network(&mut network);
+        core.go(Route::Settings);
+
+        for text_scale in [100, 150, 200] {
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            });
+            for room in [
+                SettingsRoom::Accessibility,
+                SettingsRoom::Controls,
+                SettingsRoom::Network,
+                SettingsRoom::System,
+            ] {
+                core.settings_room = room;
+                let rows = core.settings_scene_rows();
+                for (index, row) in rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.read_only.is_some())
+                {
+                    core.focus = index;
+                    let scene = settings_scene(&core);
+                    let scene_row =
+                        node_by_id(scene.root(), &format!("settings-row-{}", row.id)).unwrap();
+                    let value =
+                        node_by_id(scene_row, &format!("settings-row-{}-control", row.id)).unwrap();
+                    for line_index in 0..2 {
+                        if let Some(label) = node_by_id(
+                            scene_row,
+                            &format!("settings-row-{}-line-{line_index}", row.id),
+                        ) {
+                            assert!(
+                                !intersects(label.bounds, value.bounds),
+                                "{room:?} {} line {line_index} {:?} intersects value {:?} at {text_scale}%",
+                                row.id,
+                                label.bounds,
+                                value.bounds
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

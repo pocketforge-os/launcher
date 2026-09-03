@@ -38,13 +38,8 @@ jobs:
           command -v cargo-nextest >/dev/null 2>&1 || \
             curl -LsSf https://get.nexte.st/0.9.143/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
           cargo nextest --version
-      - name: Report effective CPU budget (diagnostic)
-        run: |
-          echo "nproc=$(nproc) affinity=$(python3 -c 'import os;print(len(os.sched_getaffinity(0)))') available_parallelism=$(python3 -c 'import os;print(os.cpu_count())')"
-          echo "nextest env:"; env | grep -i nextest || echo "(no NEXTEST_* env)"
-          for f in "$HOME/.config/nextest.toml" /etc/nextest.toml; do [ -f "$f" ] && { echo "global nextest config at $f:"; cat "$f"; }; done; true
       - name: Test workspace (nextest — global parallel pool across all test binaries)
-        run: cargo nextest run --workspace --locked --test-threads "$(nproc)"
+        run: cargo nextest run --workspace --locked
       - name: Doc-tests (nextest does not run doc-tests; keep them from silently dropping)
         run: cargo test --workspace --locked --doc
       - name: Soak desktop launch and return against real authority

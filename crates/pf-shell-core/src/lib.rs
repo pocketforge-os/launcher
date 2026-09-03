@@ -3930,10 +3930,13 @@ impl ShellCore {
                 }
             }
             let library_title_height = scaled_text_box_height(34.0, self.text_scale);
-            let library_cue_slot_height = if self.text_scale == 100 {
+            // The reason caption follows the scaled title. Reserve that complete
+            // below-art stack in both the cell extent and row pitch; reserving a
+            // pre-title cue slot let the independently-sized title paint over it.
+            let library_reason_slot_height = if self.text_scale == 100 {
                 0.0
             } else {
-                scaled_text_box_height(28.0, self.text_scale) + CARD_CAPTION_GAP
+                scaled_text_box_height(20.0, self.text_scale) + CARD_CAPTION_GAP
             };
             let card_top =
                 chrome_bottom + (geometry.scaled_card_top(self.text_scale) - STATUS_BAR_HEIGHT);
@@ -3944,20 +3947,20 @@ impl ShellCore {
                 (h - PROMPTS_AREA_HEIGHT
                     - card_top
                     - CARD_LABEL_GAP
-                    - library_cue_slot_height
+                    - library_reason_slot_height
                     - library_title_height)
                     .max(0.0),
             );
             let row_height = library_card_art_height
                 + CARD_LABEL_GAP
-                + library_cue_slot_height
                 + library_title_height
+                + library_reason_slot_height
                 + SPACE_5;
             let mut visible_rows: usize = 1;
             let card_content_height = library_card_art_height
                 + CARD_LABEL_GAP
-                + library_cue_slot_height
-                + library_title_height;
+                + library_title_height
+                + library_reason_slot_height;
             while if geometry.columns == 6
                 && self.text_scale == 100
                 && metrics.safe_insets.top == 0.0
@@ -4054,10 +4057,7 @@ impl ShellCore {
                         .with_fixed_paint_scale(),
                     );
                 }
-                let title_y = card.bounds.y
-                    + library_card_art_height
-                    + CARD_LABEL_GAP
-                    + library_cue_slot_height;
+                let title_y = card.bounds.y + library_card_art_height + CARD_LABEL_GAP;
                 card.children.push(
                     node(
                         &format!("library-title-{}", item.id),
@@ -6637,15 +6637,9 @@ fn add_unavailable_card_cues(
     };
     let home = context == "home-card";
     let scale_aware_card = context != "favorite-card" && context != "detail-art";
-    let library_cue_slot_height =
-        if !fixed_scale_on_art_cues && scale_aware_card && !home && text_scale != 100 {
-            scaled_text_box_height(28.0, text_scale) + CARD_CAPTION_GAP
-        } else {
-            0.0
-        };
-    let title_y = y + art_height + CARD_LABEL_GAP + library_cue_slot_height;
+    let title_y = y + art_height + CARD_LABEL_GAP;
     let title_height = if scale_aware_card {
-        scaled_text_box_height(28.0, text_scale)
+        scaled_text_box_height(if home { 28.0 } else { 34.0 }, text_scale)
     } else {
         28.0
     };
@@ -9896,6 +9890,51 @@ mod tests {
                 .accessible_label,
             "⊘ Finish setup — choose a profile"
         );
+    }
+
+    #[test]
+    fn library_reason_is_derived_below_scaled_title() {
+        let unavailable = item(
+            "steam-link",
+            "Steam Link",
+            vec![variant(
+                "stream",
+                "steam-link",
+                Availability::NeedsNetwork {
+                    reason: "network required".into(),
+                },
+            )],
+        );
+
+        for text_scale in [150, 200] {
+            let mut core = fixture_core(vec![unavailable.clone()]);
+            core.text_scale = text_scale;
+            core.go(Route::Library);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            let card = node_by_id(scene.root(), "library-item-steam-link").unwrap();
+            let title = node_by_id(card, "library-title-steam-link").unwrap();
+            let reason = node_by_id(card, "library-card-reason-steam-link").unwrap();
+            let gap = reason.bounds.y - (title.bounds.y + title.bounds.height);
+            assert!(
+                gap >= CARD_CAPTION_GAP,
+                "{text_scale}% title-to-reason gap must be at least {CARD_CAPTION_GAP}px, got {gap}px"
+            );
+            assert!(
+                reason.bounds.y + reason.bounds.height <= card.bounds.y + card.bounds.height,
+                "{text_scale}% reason must fit inside the grown card cell"
+            );
+        }
     }
 
     #[test]

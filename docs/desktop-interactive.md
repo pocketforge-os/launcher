@@ -66,6 +66,36 @@ with Ctrl-C. Remove the temporary directory after all three processes have exite
 find "$desktop_state" -depth -delete
 ```
 
+## Automation seam
+
+Interactive `--wayland` may take `--input /dev/input/eventN`; when present, evdev is the only
+action source and every controller event passes through the real `pf-input-map`. Compositor
+keyboard events are drained but ignored. Without `--input`, Wayland keyboard behavior is
+unchanged. `--fbdev` continues to use evdev (default `/dev/input/event0`).
+
+For simulator control, set `PF_SHELL_AUTOMATION=1` and pass `--automation-socket /absolute/path`
+to either interactive mode. The flag is rejected unless that exact environment gate is set. The
+Unix socket accepts newline-delimited JSON objects, keeps connections open, and emits one JSON
+response line per command. Every response includes the current `frames` counter and shell
+`revision`.
+
+- `{"op":"ping"}` reports `ok`, the current `route`, and `input_source` (`evdev` or
+  `wayland-keyboard`).
+- `{"op":"scene"}` reports surface `metrics`, `text_scale`, `high_contrast`, `search_query`,
+  `search_result_ids`, focus IDs, and the complete recursive semantic node tree. A foreground
+  session is represented by `"scene":null`.
+- `{"op":"capture","path":"/absolute/frame.png"}` writes the latest composed frame at exactly
+  that path and reports its SHA-256; it reports `error:"no_frame"` before any frame exists.
+- `{"op":"text","value":"ridge"}` replaces the Search query and schedules a redraw.
+- `{"op":"wait_idle","quiet_ms":150,"timeout_ms":5000}` waits asynchronously until the input
+  quiet period has elapsed and the latest revision has been presented. Both durations are
+  optional and use the shown defaults; timeout reports `ok:false,error:"timeout"`.
+
+Malformed JSON, unknown operations, and absent required fields report `invalid_json`,
+`unknown_op`, or `missing_field:<name>`. For deterministic battery/controller status, set
+`PF_POWER_SUPPLY_ROOT` to a fake sysfs tree containing `<root>/<name>/{type,capacity,status,scope}`;
+in interactive modes this override takes precedence over `--device-fixtures`.
+
 ## Troubleshooting
 
 - `xkbcommon` build or linker errors: install the `libxkbcommon-dev` package and rebuild.

@@ -2574,18 +2574,16 @@ impl ShellCore {
         }
         let rows = self.settings_scene_rows();
         let saved = self.settings_saved_focus[Self::settings_room_slot(self.settings_room)];
-        self.settings_in_rows = true;
         let row_focus = rows
             .iter()
             .enumerate()
             .filter(|(_, row)| row.action.is_some())
             .min_by_key(|(index, _)| index.abs_diff(saved))
             .map(|(index, _)| index);
+        self.settings_in_rows = row_focus.is_some();
         self.settings_row_focused = row_focus.is_some();
         if let Some(index) = row_focus {
             self.focus = index;
-        } else {
-            self.focus = 0;
         }
     }
 
@@ -8242,6 +8240,75 @@ mod tests {
     }
 
     #[test]
+    fn static_settings_sections_keep_focus_on_their_own_nav_row_and_remain_navigable() {
+        for (room, expected_nav_id) in [
+            (SettingsRoom::Controls, "settings-nav-controls"),
+            (SettingsRoom::Network, "settings-nav-network"),
+            (SettingsRoom::System, "settings-nav-system"),
+        ] {
+            let mut core = core();
+            core.network_state = Ok(NetworkState {
+                interface_present: true,
+                enabled: true,
+                connected_ssid: Some("Workshop".into()),
+                signal: Some(64),
+            });
+            core.go(Route::Settings);
+            while core.settings_room != room {
+                core.action(&ShellAction::Move(AxisMove::Down));
+            }
+
+            assert_eq!(core.action(&ShellAction::Activate), None);
+            assert!(!core.settings_in_rows);
+            assert_eq!(
+                settings_scene(&core).focused().map(NodeId::as_str),
+                Some(expected_nav_id)
+            );
+
+            let selected = core.settings_room;
+            core.action(&ShellAction::Move(AxisMove::Down));
+            let rooms = core.settings_rooms();
+            let selected_index = rooms
+                .iter()
+                .position(|candidate| *candidate == selected)
+                .unwrap();
+            assert_eq!(
+                core.settings_room,
+                rooms[(selected_index + 1).min(rooms.len() - 1)]
+            );
+            if selected_index + 1 == rooms.len() {
+                core.action(&ShellAction::Move(AxisMove::Up));
+                assert_eq!(core.settings_room, rooms[selected_index - 1]);
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_settings_sections_still_transfer_focus_to_their_first_row() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert!(core.settings_in_rows);
+        assert_eq!(
+            settings_scene(&core).focused().map(NodeId::as_str),
+            Some("settings-row-accessibility-textScale")
+        );
+
+        core.action(&ShellAction::Back);
+        while core.settings_room != SettingsRoom::Display {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert!(core.settings_in_rows);
+        assert_eq!(
+            settings_scene(&core).focused().map(NodeId::as_str),
+            Some("settings-row-display-appearance")
+        );
+    }
+
+    #[test]
     fn controls_and_licenses_are_honest_disabled_rows_for_any_binding_count() {
         for bindings in [
             vec![ControlBinding {
@@ -8272,7 +8339,7 @@ mod tests {
             core.settings_in_rows = false;
 
             assert_eq!(core.action(&ShellAction::Activate), None);
-            assert!(core.settings_in_rows, "disabled sections still open");
+            assert!(!core.settings_in_rows, "disabled sections keep nav focus");
             assert!(
                 !core.settings_row_focused,
                 "disabled rows cannot receive focus"
@@ -8283,10 +8350,12 @@ mod tests {
             assert!(scene.contains("settings-row-controls-remap"));
             assert!(scene.contains("settings-row-controls-safe-return"));
             assert!(scene.contains(STATE_DISABLED_BORDER_TOKEN));
-            for focus in 0..core.settings_scene_rows().len() {
-                core.focus = focus;
-                assert_eq!(core.action(&ShellAction::Activate), None);
-            }
+            assert!(
+                core.settings_scene_rows()
+                    .iter()
+                    .all(|row| row.action.is_none()),
+                "Controls rows remain non-interactive"
+            );
             assert_eq!(core.controls_flow, ControlsFlow::Rows);
         }
 
@@ -8295,9 +8364,11 @@ mod tests {
         core.settings_room = SettingsRoom::System;
         core.settings_in_rows = false;
         assert_eq!(core.action(&ShellAction::Activate), None);
-        assert!(core.settings_in_rows, "System still opens without Recovery");
+        assert!(
+            !core.settings_in_rows,
+            "System without Recovery keeps nav focus"
+        );
         assert!(!core.settings_row_focused, "Licenses cannot receive focus");
-        core.focus = 2;
         let scene = format!("{:?}", settings_scene(&core));
         assert!(scene.contains("settings-row-system-licenses"));
         assert!(scene.contains("Licenses"));
@@ -8378,20 +8449,16 @@ mod tests {
         assert_eq!(portrait.settings_room, SettingsRoom::Controls);
 
         portrait.action(&ShellAction::Activate);
-        assert!(portrait.settings_in_rows);
+        assert!(!portrait.settings_in_rows);
         assert!(!portrait.settings_row_focused);
         let section = format!("{:?}", portrait_settings_scene(&portrait));
-        assert!(section.contains("settings-row-controls-remap"));
-        assert!(section.contains("settings-row-controls-source"));
-        assert!(!section.contains("focused: true"));
+        assert!(section.contains("settings-nav-controls"));
+        assert!(!section.contains("settings-row-controls-remap"));
+        assert!(section.contains("focused: true"));
         assert_eq!(portrait.action(&ShellAction::Activate), None);
 
         portrait.action(&ShellAction::Back);
-        assert!(!portrait.settings_in_rows);
-        assert_eq!(portrait.focus, 1, "section position is held on Back");
-        let nav = format!("{:?}", portrait_settings_scene(&portrait));
-        assert!(nav.contains("settings-nav-controls"));
-        assert!(!nav.contains("settings-row-controls-remap"));
+        assert_eq!(portrait.route, Route::Home);
 
         let mut wide = core();
         wide.go(Route::Settings);

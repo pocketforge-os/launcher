@@ -5124,16 +5124,53 @@ impl ShellCore {
                 } else {
                     (*line).to_owned()
                 };
+                let semantic_paint_split = is_toggle && line_index > 0;
+                let label_id = format!("settings-row-{}-line-{line_index}", row.id);
                 let mut label = node(
-                    &format!("settings-row-{}-line-{line_index}", row.id),
-                    Role::Text,
-                    &painted_line,
+                    &label_id,
+                    if semantic_paint_split {
+                        Role::Group
+                    } else {
+                        Role::Text
+                    },
+                    if semantic_paint_split {
+                        line
+                    } else {
+                        &painted_line
+                    },
                     label_left,
                     scene_row.bounds.y + row_line_top + line_index as f32 * row_line_step,
                     label_width,
                     row_line_height,
-                    row_surface,
+                    if semantic_paint_split {
+                        SCENE_TRANSPARENT_TOKEN
+                    } else {
+                        row_surface
+                    },
                 );
+                if semantic_paint_split {
+                    label = label
+                        .with_ink_token(SCENE_TRANSPARENT_TOKEN)
+                        .with_children(vec![
+                            node(
+                                &format!("{label_id}-paint"),
+                                Role::Text,
+                                &painted_line,
+                                label_left,
+                                scene_row.bounds.y
+                                    + row_line_top
+                                    + line_index as f32 * row_line_step,
+                                label_width,
+                                row_line_height,
+                                row_surface,
+                            )
+                            .with_ink_token(if line_index == 0 {
+                                COLOR_TEXT_PRIMARY_TOKEN
+                            } else {
+                                COLOR_TEXT_SECONDARY_TOKEN
+                            }),
+                        ]);
+                }
                 // Single-line source/status notices are prose, not compact row
                 // labels. At enlarged text scales they intentionally wrap within
                 // the row and carry the scene's explicit multiline declaration.
@@ -5148,11 +5185,13 @@ impl ShellCore {
                         row_height - row_line_top - line_index as f32 * row_line_step;
                     label = declared_multiline(label);
                 }
-                label = label.with_ink_token(if line_index == 0 {
-                    COLOR_TEXT_PRIMARY_TOKEN
-                } else {
-                    COLOR_TEXT_SECONDARY_TOKEN
-                });
+                if !semantic_paint_split {
+                    label = label.with_ink_token(if line_index == 0 {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    } else {
+                        COLOR_TEXT_SECONDARY_TOKEN
+                    });
+                }
                 text.push(label);
             }
             if row.id == "accessibility-textScale" {
@@ -8963,7 +9002,7 @@ mod tests {
         rasterizer.set_text_scale(2.0).unwrap();
         let rendered = rasterizer.render(&scene, metrics).unwrap();
         for id in ["highContrast", "reduceMotion"] {
-            let caption_id = format!("settings-row-accessibility-{id}-line-1");
+            let caption_id = format!("settings-row-accessibility-{id}-line-1-paint");
             let state_id = format!("settings-toggle-accessibility-{id}-state");
 
             let mut without_caption_root = scene.root().clone();
@@ -9006,6 +9045,38 @@ mod tests {
                 "{id} caption-to-value ink gap must be at least SPACE_2: got {ink_gap}px"
             );
         }
+    }
+
+    #[test]
+    fn scaled_settings_toggle_caption_keeps_full_accessible_label_when_paint_is_ellipsized() {
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("textScale".into()),
+            effective: PreferenceValue::Text("200%".into()),
+            stored: PreferenceValue::Text("200%".into()),
+            applied: true,
+        });
+
+        let scene = settings_scene(&core);
+        let caption = node_by_id(
+            scene.root(),
+            "settings-row-accessibility-highContrast-line-1",
+        )
+        .unwrap();
+        let painted = node_by_id(
+            caption,
+            "settings-row-accessibility-highContrast-line-1-paint",
+        )
+        .unwrap();
+
+        assert_eq!(
+            caption.accessible_label,
+            "Uses the strongest text and focus contrast"
+        );
+        assert!(painted.accessible_label.ends_with('…'));
+        assert!(painted.accessible_label.len() < caption.accessible_label.len());
     }
 
     #[test]

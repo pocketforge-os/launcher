@@ -77,7 +77,8 @@ For simulator control, set `PF_SHELL_AUTOMATION=1` and pass `--automation-socket
 to either interactive mode. The flag is rejected unless that exact environment gate is set. The
 Unix socket accepts newline-delimited JSON objects, keeps connections open, and emits one JSON
 response line per command. Every response includes the current `frames` counter and shell
-`revision`.
+`revision`. The shell refuses a non-socket path or a socket with a live listener; it reclaims a
+stale socket.
 
 - `{"op":"ping"}` reports `ok`, the current `route`, and `input_source` (`evdev` or
   `wayland-keyboard`).

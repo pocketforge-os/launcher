@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -76,8 +77,36 @@ impl AutomationServer {
     }
 
     fn bind_with_clock(path: &Path, now: impl Fn() -> Instant + 'static) -> Result<Self, String> {
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| format!("automation socket: {e}"))?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_socket() => {
+                return Err(format!(
+                    "automation socket: {} exists and is not a socket",
+                    path.display()
+                ));
+            }
+            Ok(_) => match UnixStream::connect(path) {
+                Ok(_) => {
+                    return Err(format!(
+                        "automation socket: {} is already in use",
+                        path.display()
+                    ));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                    ) =>
+                {
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == ErrorKind::NotFound => {}
+                        Err(error) => return Err(format!("automation socket: {error}")),
+                    }
+                }
+                Err(error) => return Err(format!("automation socket: {error}")),
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("automation socket: {error}")),
         }
         let listener = UnixListener::bind(path).map_err(|e| format!("automation socket: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -418,6 +447,49 @@ mod tests {
             search_result_ids: &[],
             scene: None,
         }
+    }
+
+    #[test]
+    fn bind_refuses_regular_file_without_modifying_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto.sock");
+        fs::write(&path, b"keep me").unwrap();
+
+        let error = AutomationServer::bind(&path).err().unwrap();
+
+        assert_eq!(
+            error,
+            format!(
+                "automation socket: {} exists and is not a socket",
+                path.display()
+            )
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn bind_reclaims_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        let _server = AutomationServer::bind(&path).unwrap();
+    }
+
+    #[test]
+    fn bind_refuses_live_socket_without_unlinking_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auto.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let error = AutomationServer::bind(&path).err().unwrap();
+
+        assert_eq!(
+            error,
+            format!("automation socket: {} is already in use", path.display())
+        );
+        let (_stream, _) = listener.accept().unwrap();
     }
 
     #[test]

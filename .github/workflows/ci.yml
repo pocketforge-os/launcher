@@ -12,6 +12,13 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, pf-builder-vm]
     timeout-minutes: 60
+    # Single source of the cargo-nextest pin within this repo (the install AND the
+    # assert below both read it). It must match NEXTEST_VERSION in pocketforge-automation
+    # scripts/install-rust-ci-toolset.sh — bump both together (cross-repo; they cannot
+    # share a file). The assert step fails loudly if the runner ever runs a different
+    # version than this pin.
+    env:
+      NEXTEST_VERSION: "0.9.143"
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -28,16 +35,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Score offscreen routes against approved design renders
         run: cargo test -p pf-shell --test mockup_diff --locked -- --nocapture
-      - name: Ensure cargo-nextest is on PATH (idempotent; no-op once the VM toolset provides it)
+      - name: Ensure the PINNED cargo-nextest is on PATH (assert exact version)
         run: |
-          # Prefer a runner-resident cargo-nextest (installed by the rust-ci-toolset
-          # drop-in on the pf-builder VM — pocketforge-automation). This guarded install
-          # is a self-heal for a runner that predates that toolset change; it downloads a
-          # prebuilt binary (~seconds) only when nextest is absent, then is a no-op every
-          # run thereafter because ~/.cargo/bin persists on the self-hosted runner.
-          command -v cargo-nextest >/dev/null 2>&1 || \
-            curl -LsSf https://get.nexte.st/0.9.143/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
-          cargo nextest --version
+          # The pf-builder VM toolset (pocketforge-automation install-rust-ci-toolset.sh)
+          # is meant to provide cargo-nextest resident. This step is the self-heal AND the
+          # guard: it (re)installs the pinned prebuilt when the present version differs, and
+          # then ASSERTS the exact pin — a stale runner binary must never survive silently.
+          need="$NEXTEST_VERSION"
+          have="$(cargo-nextest nextest --version 2>/dev/null | awk 'NR==1{print $2}' || true)"
+          if [ "$have" != "$need" ]; then
+            echo "cargo-nextest $need not on PATH (found: ${have:-none}); installing pinned prebuilt"
+            curl -LsSf "https://get.nexte.st/$need/linux" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+            have="$(cargo-nextest nextest --version 2>/dev/null | awk 'NR==1{print $2}' || true)"
+          fi
+          if [ "$have" != "$need" ]; then
+            echo "::error::cargo-nextest version mismatch: found '${have:-none}', expected '$need'. A stale runner binary is shadowing the pin — re-provision the runner with pocketforge-automation scripts/install-rust-ci-toolset.sh --target runner (it installs cargo-nextest $need into the runner's ~/.cargo/bin)."
+            exit 1
+          fi
+          echo "cargo-nextest $have (pinned) on PATH"
       - name: Test workspace (nextest — global parallel pool across all test binaries)
         run: cargo nextest run --workspace --locked
       - name: Doc-tests (nextest does not run doc-tests; keep them from silently dropping)

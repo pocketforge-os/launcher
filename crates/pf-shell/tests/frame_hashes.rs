@@ -254,13 +254,13 @@ fn vertical_slice_frame_hashes_are_stable() {
         // a real glyph; and the Network/Update badges take the globe / info-i glyphs.
         // search and variant-chooser carry none of those and keep their digests.
         // All raster guards pass with PF_RASTER_INK_GUARD=1.
-        "4f400f9096f738bc79b825f5ba475b2c0d078af7c1e4d9ff85780e6f08b00b40  ",
-        "e98a8ad59417b0b3193f177e4de5b22da22cf2fab7467fda6c791f7a2b90d103  ",
-        "29ec76ec1a49b2f9ec7d8197d2a992a174fbf8c68a8d9c2594a1a0f0d581b29a  ",
-        "0ae2c9cf3f55cea387d26abd59b998168b8ff20301a856ad9930e13b0e925309  ",
+        "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
+        "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
+        "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
+        "63bcd820e33b4b0e440dee6c269fab7ac360ec4af77cc00de293c2486ab38298  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
-        "a7c1625ea3e771025709afcfd7cfd929c179df6d2fb6788df37b0689777b8ee2  ",
-        "a7c1625ea3e771025709afcfd7cfd929c179df6d2fb6788df37b0689777b8ee2  ",
+        "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
+        "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
         "b0e1e9b4bbfbdad1057e18bf22bf4251e81123d34922908fa6466d0acbf995e1  ",
         "e61ece9c15e9ac63151f97fbc77c412de90ad41bd1f0984b53c438cdd1881dfc  ",
         "412b9447ef8950e8d2be473402e5cb7525fbd3c3d19c9b0acd9c8e045178db08  ",
@@ -268,9 +268,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("e98a8ad"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("0ae2c9cf"),
+        lines.lines().nth(3).unwrap().starts_with("63bcd820"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -362,7 +362,7 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
     assert!(
-        transcript.contains("841499bf3b2b5098a9a0be8d38daef6deeaf4bd2f811b2f9a036fc4c6a702179  ")
+        transcript.contains("8edba36cfeb1c7732087ce6c7d486d5a8411e8c4e63f49fd0c47028eb0f05841  ")
     );
 }
 

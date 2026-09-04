@@ -18,15 +18,18 @@ const HEIGHT: u32 = 720;
 // corrected render for the status-cluster change), pinned at 1.0.
 // Thresholds are the achieved scores truncated to 6 decimals so the floor sits just
 // below the exact (deterministic) score — the ratchet forbids a regression without
-// tripping on the last-ULP round-trip of a full-precision literal. Achieved scores:
-// home 0.940135991, library 0.978004998, detail 0.940679632, settings 0.969325054,
-// high-contrast 0.915241251, quick 1.0.
+// tripping on the last-ULP round-trip of a full-precision literal. Achieved scores
+// (with the theme-aware chrome glyphs, tsp-op5a.390 review r1): home 0.940137971,
+// library 0.978014684, detail 0.940679632, settings 0.969325054, high-contrast
+// 0.915236572, quick 1.0. High-contrast dips ~5e-6 vs the Dusk-baked star it replaces
+// (the HC star is now white per --state-selected-accent) yet stays far above the
+// pre-Family-D 0.911737 floor.
 const SCREENS: [(&str, &str, f64); 6] = [
-    ("home", "boot-home.png", 0.940_135),
-    ("library", "library.png", 0.978_004),
+    ("home", "boot-home.png", 0.940_137),
+    ("library", "library.png", 0.978_014),
     ("detail", "details.png", 0.940_679),
     ("settings", "settings.png", 0.969_325),
-    ("high-contrast", "high-contrast.png", 0.915_241),
+    ("high-contrast", "high-contrast.png", 0.915_236),
     ("quick", "quick-power.png", 1.0),
 ];
 

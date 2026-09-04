@@ -186,8 +186,9 @@ fn status_dot_node(id: &str, center_x: f32, center_y: f32, color_token: &str) ->
 /// codepoint exists only in the CJK fallback face, which paints it ~11px and pushed
 /// off the box centre (glyph bearing/baseline), so it sat high-right in the disc. A
 /// centered star image lands the mockup's ~8px star DEAD-CENTRE. One helper, so both
-/// the Home and Library card pips fix as a system.
-fn favorite_pin_node(item_id: &str, center_x: f32, center_y: f32) -> Node {
+/// the Home and Library card pips fix as a system. `star_ink` is the resolved
+/// `--state-selected-accent` for the active base (dark on Day, white in High Contrast).
+fn favorite_pin_node(item_id: &str, center_x: f32, center_y: f32, star_ink: [u8; 4]) -> Node {
     const DISC: f32 = 20.0;
     const STAR: f32 = 8.0;
     let mut pip = node(
@@ -213,7 +214,7 @@ fn favorite_pin_node(item_id: &str, center_x: f32, center_y: f32) -> Node {
             STAR,
             SCENE_TRANSPARENT_TOKEN,
         )
-        .with_image(star_glyph_source(), ImageFit::Contain)
+        .with_image(star_glyph_source(star_ink), ImageFit::Contain)
         .with_fixed_paint_scale(),
     );
     pip
@@ -3003,7 +3004,10 @@ impl ShellCore {
                     7.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(wifi_glyph_source(), ImageFit::Contain),
+                .with_image(
+                    wifi_glyph_source(resolved_ink(self.theme_base(), COLOR_TEXT_SECONDARY_TOKEN)),
+                    ImageFit::Contain,
+                ),
             );
         }
         if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
@@ -3861,8 +3865,12 @@ impl ShellCore {
                     // scaling applies only to the caption/status carrier below the art.
                     let pin_center_x = x + card_width - 18.0;
                     let pin_center_y = vertical.card_row_y + 20.0;
-                    n.children
-                        .push(favorite_pin_node(&item.id, pin_center_x, pin_center_y));
+                    n.children.push(favorite_pin_node(
+                        &item.id,
+                        pin_center_x,
+                        pin_center_y,
+                        resolved_ink(self.theme_base(), STATE_SELECTED_ACCENT_TOKEN),
+                    ));
                 }
                 content.push(n);
             }
@@ -3942,14 +3950,19 @@ impl ShellCore {
                 node(
                     "library-search-glyph",
                     Role::Group,
-                    "Search",
+                    // Decorative — the containing button already announces "Search N
+                    // titles", so an empty label avoids a redundant "Search" readout.
+                    "",
                     LIBRARY_SIDE_MARGIN + SPACE_4,
                     library_head_top + (search_height - 14.0) / 2.0,
                     14.0,
                     14.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(magnifier_glyph_source(), ImageFit::Contain),
+                .with_image(
+                    magnifier_glyph_source(resolved_ink(self.theme_base(), COLOR_TEXT_MUTED_TOKEN)),
+                    ImageFit::Contain,
+                ),
             );
             search.children.push(
                 node(
@@ -4242,8 +4255,12 @@ impl ShellCore {
                 if item.favorite {
                     let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
                     let pin_center_y = card.bounds.y + 18.0;
-                    card.children
-                        .push(favorite_pin_node(&item.id, pin_center_x, pin_center_y));
+                    card.children.push(favorite_pin_node(
+                        &item.id,
+                        pin_center_x,
+                        pin_center_y,
+                        resolved_ink(self.theme_base(), STATE_SELECTED_ACCENT_TOKEN),
+                    ));
                 }
                 let title_y = card.bounds.y + library_card_art_height + CARD_LABEL_GAP;
                 card.children.push(
@@ -8080,10 +8097,52 @@ fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
     bytes.into()
 }
 
-/// Ink tone shared by the mono chrome glyph images (wifi, magnifier). A single baked
-/// tone reads on every status/search surface across themes because those surfaces are
-/// all dark grounds; matches the prior wifi tone.
-const CHROME_GLYPH_INK: [u8; 4] = [0xc9, 0xc2, 0xb4, 0xff];
+/// Fallback ink if a token cannot be resolved (should never happen for a known token).
+const CHROME_GLYPH_INK_FALLBACK: [u8; 4] = [0xc9, 0xc2, 0xb4, 0xff];
+
+/// Per-tint cache of a drawn chrome glyph's encoded PNG, keyed by its RGBA ink so each
+/// theme base gets its own rasterized image (the renderer caches images by id).
+type GlyphInkCache = OnceLock<Mutex<HashMap<[u8; 4], Arc<[u8]>>>>;
+
+/// Resolve a semantic ink token to a concrete RGBA for the active theme base, so the
+/// drawn chrome glyph images (wifi, magnifier, star) follow the theme instead of baking
+/// one Dusk-only tone. On Day the status/search surfaces are LIGHT and its accent is
+/// DARK, so a Dusk-light glyph would go near-invisible; High Contrast wants the strongest
+/// ink. Resolves through the same flagship theme + token chain the renderer uses for node
+/// token strings, so a glyph image matches the ink a text node in the same role would get.
+fn resolved_ink(base: Base, token: &str) -> [u8; 4] {
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    THEME
+        .get_or_init(pf_theme::flagship)
+        .resolve(base, token)
+        .ok()
+        .map_or(CHROME_GLYPH_INK_FALLBACK, parse_hex_rgba)
+}
+
+/// Parse a resolved `#rrggbb` / `#rrggbbaa` color into RGBA (the semantic ink tokens all
+/// resolve to hex); a non-hex value falls back to an opaque neutral.
+fn parse_hex_rgba(hex: &str) -> [u8; 4] {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() < 6 {
+        return CHROME_GLYPH_INK_FALLBACK;
+    }
+    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2).unwrap_or("cc"), 16).unwrap_or(0xcc);
+    [
+        byte(0),
+        byte(2),
+        byte(4),
+        if h.len() >= 8 { byte(6) } else { 0xff },
+    ]
+}
+
+/// A per-tint `ImageSource` id. The renderer caches images by id, so two differently tinted
+/// renders of the same glyph MUST carry distinct ids (else the first-cached tint wins).
+fn chrome_glyph_id(name: &str, ink: [u8; 4]) -> String {
+    format!(
+        "quiet-console:{name}/{:02x}{:02x}{:02x}{:02x}",
+        ink[0], ink[1], ink[2], ink[3]
+    )
+}
 
 /// Perpendicular distance from point (px,py) to the segment (ax,ay)-(bx,by).
 fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -8102,32 +8161,39 @@ fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32
 /// its ink midline on the status centerline. The old form drew a ~14x11 glyph with its
 /// origin near the buffer bottom, which painted low (ink midline y=34 vs the text's 28).
 #[allow(clippy::cast_possible_truncation)]
-fn wifi_glyph_source() -> ImageSource {
-    static WIFI: OnceLock<Arc<[u8]>> = OnceLock::new();
-    let bytes = WIFI.get_or_init(|| {
-        // Drawn at 4x (36:28 == 9:7) so `ImageFit::Contain`'s downscale antialiases
-        // the two thin fan arcs into a legible little glyph instead of merging them.
-        let (bw, bh) = (36usize, 28usize);
-        let mut rgba = vec![0_u8; bw * bh * 4];
-        let (ox, oy) = (18.0_f32, 20.4_f32);
-        for y in 0..bh {
-            for x in 0..bw {
-                let dx = x as f32 + 0.5 - ox;
-                let dy = oy - (y as f32 + 0.5);
-                let radius = dx.hypot(dy);
-                let in_upper_fan = dy > -1.4 && dx.abs() <= (dy + 1.4) * 1.5;
-                let painted = radius <= 2.6
-                    || in_upper_fan
-                        && ((5.4..=7.4).contains(&radius) || (10.6..=12.6).contains(&radius));
-                if painted {
-                    let offset = (y * bw + x) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&CHROME_GLYPH_INK);
+fn wifi_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static WIFI: GlyphInkCache = OnceLock::new();
+    WIFI.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("wifi glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            // Drawn at 4x (36:28 == 9:7) so `ImageFit::Contain`'s downscale antialiases
+            // the two thin fan arcs into a legible little glyph instead of merging them.
+            let (bw, bh) = (36usize, 28usize);
+            let mut rgba = vec![0_u8; bw * bh * 4];
+            let (ox, oy) = (18.0_f32, 20.4_f32);
+            for y in 0..bh {
+                for x in 0..bw {
+                    let dx = x as f32 + 0.5 - ox;
+                    let dy = oy - (y as f32 + 0.5);
+                    let radius = dx.hypot(dy);
+                    let in_upper_fan = dy > -1.4 && dx.abs() <= (dy + 1.4) * 1.5;
+                    let painted = radius <= 2.6
+                        || in_upper_fan
+                            && ((5.4..=7.4).contains(&radius) || (10.6..=12.6).contains(&radius));
+                    if painted {
+                        let offset = (y * bw + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
                 }
             }
-        }
-        encoded_png(bw as u32, bh as u32, &rgba)
-    });
-    ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+            encoded_png(bw as u32, bh as u32, &rgba)
+        })
+        .clone()
+}
+fn wifi_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-wifi", ink), wifi_glyph_png(ink))
 }
 
 /// The g-search magnifier (shell.css): a thin open ring with a lower-left handle,
@@ -8136,66 +8202,80 @@ fn wifi_glyph_source() -> ImageSource {
 /// tofu box. A drawn ring+handle restores the real glyph (not a placeholder rect),
 /// centered in a square buffer so `ImageFit::Contain` keeps it optically centered.
 #[allow(clippy::cast_possible_truncation)]
-fn magnifier_glyph_source() -> ImageSource {
-    static MAG: OnceLock<Arc<[u8]>> = OnceLock::new();
-    let bytes = MAG.get_or_init(|| {
-        let side = 20usize;
-        let mut rgba = vec![0_u8; side * side * 4];
-        let (cx, cy) = (11.5_f32, 8.2_f32);
-        let (outer, inner) = (5.9_f32, 3.9_f32);
-        // Handle springs from the ring's lower-left (225°) toward the corner.
-        let hx0 = cx - outer * 0.707;
-        let hy0 = cy + outer * 0.707;
-        let (hx1, hy1) = (3.0_f32, 16.8_f32);
-        for y in 0..side {
-            for x in 0..side {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let radius = (fx - cx).hypot(fy - cy);
-                let on_ring = (inner..=outer).contains(&radius);
-                let on_handle =
-                    segment_distance(fx, fy, hx0, hy0, hx1, hy1) <= 1.15 && radius >= inner - 0.3;
-                if on_ring || on_handle {
-                    let offset = (y * side + x) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&CHROME_GLYPH_INK);
+fn magnifier_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static MAG: GlyphInkCache = OnceLock::new();
+    MAG.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("magnifier glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            let side = 20usize;
+            let mut rgba = vec![0_u8; side * side * 4];
+            let (cx, cy) = (11.5_f32, 8.2_f32);
+            let (outer, inner) = (5.9_f32, 3.9_f32);
+            // Handle springs from the ring's lower-left (225°) toward the corner.
+            let hx0 = cx - outer * 0.707;
+            let hy0 = cy + outer * 0.707;
+            let (hx1, hy1) = (3.0_f32, 16.8_f32);
+            for y in 0..side {
+                for x in 0..side {
+                    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let radius = (fx - cx).hypot(fy - cy);
+                    let on_ring = (inner..=outer).contains(&radius);
+                    let on_handle = segment_distance(fx, fy, hx0, hy0, hx1, hy1) <= 1.15
+                        && radius >= inner - 0.3;
+                    if on_ring || on_handle {
+                        let offset = (y * side + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
                 }
             }
-        }
-        encoded_png(side as u32, side as u32, &rgba)
-    });
-    ImageSource::new("quiet-console:g-search.svg-path", bytes.clone())
+            encoded_png(side as u32, side as u32, &rgba)
+        })
+        .clone()
+}
+fn magnifier_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-search", ink), magnifier_glyph_png(ink))
 }
 
 /// The g-star glyph (shell.css) as a filled 5-point star image. `★` (U+2605) only
 /// exists in the CJK fallback face, which paints it ~11px and off its box centre
 /// (bearing/baseline offset); a drawn star fills a small square buffer edge-to-edge so
 /// `ImageFit::Contain` yields the mockup's ~7-8px star sitting DEAD-CENTRE in its scrim
-/// disc. Baked warm tone approximates `--state-selected-accent` on the dark scrim.
+/// disc. Tinted with the resolved `--state-selected-accent` for the active base.
 #[allow(clippy::cast_possible_truncation)]
-fn star_glyph_source() -> ImageSource {
-    static STAR: OnceLock<Arc<[u8]>> = OnceLock::new();
-    let bytes = STAR.get_or_init(|| {
-        let side = 16usize;
-        let mut rgba = vec![0_u8; side * side * 4];
-        let (cx, cy) = (8.0_f32, 8.2_f32);
-        let (outer, inner) = (7.4_f32, 3.05_f32);
-        let mut verts = [(0.0_f32, 0.0_f32); 10];
-        for (i, v) in verts.iter_mut().enumerate() {
-            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-            let rad = if i % 2 == 0 { outer } else { inner };
-            *v = (cx + rad * angle.cos(), cy + rad * angle.sin());
-        }
-        for y in 0..side {
-            for x in 0..side {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                if point_in_polygon(fx, fy, &verts) {
-                    let offset = (y * side + x) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&[0xea, 0xcf, 0x9c, 0xff]);
+fn star_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static STAR: GlyphInkCache = OnceLock::new();
+    STAR.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("star glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            let side = 16usize;
+            let mut rgba = vec![0_u8; side * side * 4];
+            let (cx, cy) = (8.0_f32, 8.2_f32);
+            let (outer, inner) = (7.4_f32, 3.05_f32);
+            let mut verts = [(0.0_f32, 0.0_f32); 10];
+            for (i, v) in verts.iter_mut().enumerate() {
+                let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let rad = if i % 2 == 0 { outer } else { inner };
+                *v = (cx + rad * angle.cos(), cy + rad * angle.sin());
+            }
+            for y in 0..side {
+                for x in 0..side {
+                    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    if point_in_polygon(fx, fy, &verts) {
+                        let offset = (y * side + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
                 }
             }
-        }
-        encoded_png(side as u32, side as u32, &rgba)
-    });
-    ImageSource::new("quiet-console:g-star.svg-path", bytes.clone())
+            encoded_png(side as u32, side as u32, &rgba)
+        })
+        .clone()
+}
+fn star_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-star", ink), star_glyph_png(ink))
 }
 
 /// Even-odd point-in-polygon test.
@@ -8514,6 +8594,99 @@ mod tests {
         ]);
 
         assert!(totals.is_empty());
+    }
+
+    /// Family-D theme-aware chrome glyphs (tsp-op5a.390 review r1). The Codex review's two
+    /// blocking findings were that the drawn wifi/magnifier/star glyph images baked
+    /// Dusk-only ink (wifi+magnifier `#c9c2b4`, star `#eacf9c`): Day's search/status
+    /// surfaces are LIGHT so a Dusk-light glyph goes near-invisible, and the star's design
+    /// binds it to `--state-selected-accent` (Day accent DARK, High Contrast white). This
+    /// is the Day + HC raster coverage the review asked for — it proves each glyph tints
+    /// from the ACTIVE base's ink token and that the tint reaches the rasterized pixels.
+    #[test]
+    fn chrome_glyphs_tint_from_the_active_theme_ink_across_day_dusk_and_high_contrast() {
+        fn luminance(rgb: [u8; 3]) -> f64 {
+            let channel = |c: u8| {
+                let v = f64::from(c) / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+        }
+        let contrast = |a: [u8; 4], b: [u8; 4]| {
+            let (la, lb) = (luminance([a[0], a[1], a[2]]), luminance([b[0], b[1], b[2]]));
+            let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+            (hi + 0.05) / (lo + 0.05)
+        };
+
+        // The ink each glyph is tinted with is `resolved_ink` of the token the render wires
+        // it to: wifi -> secondary, magnifier -> muted, star -> selected accent.
+        let day_secondary = resolved_ink(Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
+        let dusk_secondary = resolved_ink(Base::Dusk, COLOR_TEXT_SECONDARY_TOKEN);
+        let day_muted = resolved_ink(Base::Day, COLOR_TEXT_MUTED_TOKEN);
+        let day_accent = resolved_ink(Base::Day, STATE_SELECTED_ACCENT_TOKEN);
+        let hc_accent = resolved_ink(Base::HighContrast, STATE_SELECTED_ACCENT_TOKEN);
+
+        // The tokens resolve to DIFFERENT ink per base — a baked constant would make the
+        // Day glyph identical to Dusk (the regression the review caught).
+        assert_ne!(
+            day_secondary, dusk_secondary,
+            "wifi ink must follow the base (Day secondary != Dusk secondary)"
+        );
+
+        // On Day the surfaces are LIGHT, so every chrome glyph must stay legible against
+        // `--color-surface-raised` (>=3:1) — the blocking bug was a light Dusk-baked glyph
+        // on the light Day surface going near-invisible.
+        let theme = pf_theme::flagship();
+        let day_surface = parse_hex_rgba(
+            theme
+                .resolve(Base::Day, COLOR_SURFACE_RAISED_TOKEN)
+                .unwrap(),
+        );
+        assert!(
+            contrast(day_secondary, day_surface) >= 3.0,
+            "Day wifi glyph must be legible on the light Day surface"
+        );
+        assert!(
+            contrast(day_muted, day_surface) >= 3.0,
+            "Day magnifier glyph must be legible on the light Day surface"
+        );
+        assert!(
+            contrast(day_accent, day_surface) >= 3.0,
+            "Day favourite star must be legible on the light Day surface"
+        );
+
+        // High Contrast binds the star to white per `--state-selected-accent`.
+        assert_eq!(
+            [hc_accent[0], hc_accent[1], hc_accent[2]],
+            [0xff, 0xff, 0xff],
+            "High Contrast favourite star must be white"
+        );
+
+        // The tint reaches the RASTER: the first opaque pixel of each drawn glyph carries
+        // the Day ink exactly, and Day vs Dusk produce distinct cached images (per-tint id).
+        let painted_ink = |bytes: &[u8]| -> [u8; 4] {
+            let decoder = png::Decoder::new(Cursor::new(bytes));
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .find(|px| px[3] > 0)
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .expect("glyph must paint at least one opaque pixel")
+        };
+        assert_eq!(painted_ink(&wifi_glyph_png(day_secondary)), day_secondary);
+        assert_eq!(painted_ink(&magnifier_glyph_png(day_muted)), day_muted);
+        assert_eq!(painted_ink(&star_glyph_png(day_accent)), day_accent);
+        assert_ne!(
+            wifi_glyph_png(day_secondary),
+            wifi_glyph_png(dusk_secondary),
+            "Day and Dusk wifi glyphs must be distinct rasters, not one baked tone"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ members = [
   "crates/pf-shell-core",
   "crates/pf-shell",
   "tools/design-token-codegen",
+  "tools/fidelity-audit",
   "tools/taffy-spike",
 ]
 resolver = "2"

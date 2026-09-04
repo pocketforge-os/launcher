@@ -1,0 +1,4 @@
+{
+  "doc": "Frozen, cited list of KNOWN-ACCEPTED per-component divergences (the honest-gate mechanism, same shape as the launcher#91 target-size baseline). In report mode (default) this file is informational: every divergence is printed. In --gate mode, a divergence whose (route, selector, fact_class) triple is NOT listed here FAILS the audit; a listed one is downgraded to an accepted note. Populating this baseline and flipping the gate on is the FOLLOW-UP sweep bead (tsp-op5a.389 ships the framework + first report; the gate is deliberately off). Every entry MUST carry a 'reason' citing why the divergence is accepted (a bead id, a design ruling, or an intentional representational difference).",
+  "accepted": []
+}

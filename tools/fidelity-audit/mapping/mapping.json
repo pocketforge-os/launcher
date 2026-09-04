@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "doc": "Component correspondence: mockup selector (design-facts) <-> shell scene node id. Seeded from the design repo CONFORMANCE-CHECKLIST.md sec 1-2 and the shell scene ids. 'index' present => the design-facts 'instances' entry at that document-order index; absent => a 'unique' selector. 'classes' selects which comparators run for the component. 'underline_node' names a shell child node whose presence is the shell's active/focused underline treatment (decoration comparator). This table is a living SEED; extend it as coverage grows.",
+  "routes": [
+    {
+      "route": "quiet-console/home",
+      "design_facts": "quiet-console/home.json",
+      "shell_slug": "boot-home",
+      "golden_png": "crates/pf-shell/tests/goldens/home.png",
+      "render_flags": [],
+      "components": [
+        {
+          "selector": ".hero-eyebrow",
+          "node": "route-heading",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".hero-title",
+          "node": "hero-title",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".hero-meta",
+          "node": "hero-status",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".shelf-label",
+          "node": "home-shelf-label",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".sys",
+          "node": "status-cluster",
+          "classes": [
+            "geometry"
+          ],
+          "note": "mockup .sys is the whole system cluster block; shell decomposes it into wifi-glyph/battery-*/status-cluster, so this is an approximate region compare. Isolated wifi-glyph alignment needs a design-facts wifi selector (follow-up)."
+        },
+        {
+          "selector": ".rooms",
+          "node": "rooms",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 0,
+          "node": "room-home",
+          "classes": [
+            "geometry",
+            "decoration"
+          ],
+          "underline_node": "room-home-underline",
+          "note": "active room = Home on this route"
+        },
+        {
+          "selector": ".room",
+          "index": 1,
+          "node": "room-library",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 2,
+          "node": "room-settings",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".card",
+          "index": 0,
+          "node": "item-ridgeline",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".promptbar",
+          "node": "prompt-bar",
+          "classes": [
+            "geometry"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "quiet-console/high-contrast",
+      "design_facts": "quiet-console/high-contrast.json",
+      "shell_slug": "high-contrast",
+      "golden_png": "crates/pf-shell/tests/goldens/high-contrast.png",
+      "render_flags": [
+        "--high-contrast-evidence"
+      ],
+      "components": [
+        {
+          "selector": ".hero-eyebrow",
+          "node": "route-heading",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".hero-title",
+          "node": "hero-title",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".hero-meta",
+          "node": "hero-status",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".rooms",
+          "node": "rooms",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 0,
+          "node": "room-home",
+          "classes": [
+            "geometry",
+            "decoration"
+          ],
+          "underline_node": "room-home-underline"
+        },
+        {
+          "selector": ".promptbar",
+          "node": "prompt-bar",
+          "classes": [
+            "geometry"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "quiet-console/library",
+      "design_facts": "quiet-console/library.json",
+      "shell_slug": "library",
+      "golden_png": "crates/pf-shell/tests/goldens/library.png",
+      "render_flags": [],
+      "components": [
+        {
+          "selector": ".sys",
+          "node": "status-cluster",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".rooms",
+          "node": "rooms",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 0,
+          "node": "room-home",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 1,
+          "node": "room-library",
+          "classes": [
+            "geometry",
+            "decoration"
+          ],
+          "underline_node": "room-library-underline",
+          "note": "active room = Library on this route"
+        },
+        {
+          "selector": ".card",
+          "index": 0,
+          "node": "library-item-ridgeline",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".promptbar",
+          "node": "prompt-bar",
+          "classes": [
+            "geometry"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "quiet-console/detail",
+      "design_facts": "quiet-console/detail.json",
+      "shell_slug": "details",
+      "golden_png": "crates/pf-shell/tests/goldens/detail.png",
+      "render_flags": [],
+      "components": [
+        {
+          "selector": ".sys",
+          "node": "status-cluster",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".rooms",
+          "node": "rooms",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 0,
+          "node": "room-home",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".detail-title",
+          "node": "detail-title",
+          "classes": [
+            "geometry",
+            "crop"
+          ]
+        },
+        {
+          "selector": ".provenance",
+          "node": "detail-provenance",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".promptbar",
+          "node": "prompt-bar",
+          "classes": [
+            "geometry"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "quiet-console/settings",
+      "design_facts": "quiet-console/settings.json",
+      "shell_slug": "settings",
+      "golden_png": "crates/pf-shell/tests/goldens/settings.png",
+      "render_flags": [
+        "--settings-evidence"
+      ],
+      "components": [
+        {
+          "selector": ".sys",
+          "node": "status-cluster",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".rooms",
+          "node": "rooms",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".room",
+          "index": 2,
+          "node": "room-settings",
+          "classes": [
+            "geometry",
+            "decoration"
+          ],
+          "underline_node": "room-settings-underline",
+          "note": "active room = Settings on this route"
+        },
+        {
+          "selector": ".set-col:not([hidden]) .set-title",
+          "index": 0,
+          "node": "settings-section-title",
+          "classes": [
+            "geometry"
+          ]
+        },
+        {
+          "selector": ".promptbar",
+          "node": "prompt-bar",
+          "classes": [
+            "geometry"
+          ]
+        }
+      ]
+    }
+  ]
+}

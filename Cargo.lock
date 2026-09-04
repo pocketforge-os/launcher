@@ -220,6 +220,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fidelity-audit"
+version = "0.1.0"
+dependencies = [
+ "png 0.17.16",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

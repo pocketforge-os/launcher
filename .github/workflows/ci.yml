@@ -35,6 +35,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Score offscreen routes against approved design renders
         run: cargo test -p pf-shell --test mockup_diff --locked -- --nocapture
+      - name: Fidelity-audit report (per-component, non-gating)
+        # REPORT MODE — the whole-route scorer above is coarse; this enumerates
+        # per-component structural + perceptual divergences (tsp-op5a.389). It is
+        # deliberately non-gating: the gate flips on in the follow-up sweep bead
+        # once the first ledger is triaged into baseline/accepted.json.
+        continue-on-error: true
+        run: |
+          cargo build -p pf-shell --locked
+          cargo run -p fidelity-audit --locked -- --shell-bin target/debug/pf-shell --format table
       - name: Ensure the PINNED cargo-nextest is on PATH (assert exact version)
         run: |
           # The pf-builder VM toolset (pocketforge-automation install-rust-ci-toolset.sh)

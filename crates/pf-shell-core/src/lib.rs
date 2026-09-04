@@ -953,6 +953,10 @@ pub struct ShellCore {
     just_returned: bool,
     motion_ms: u32,
     normal_motion_ms: u32,
+    /// The theme SUPPLIED to `boot` — glyph bitmaps resolve their ink against THIS theme
+    /// for the active base, so the drawn chrome (wifi/magnifier/star) follows the same
+    /// theme the scene nodes do instead of a process-static flagship.
+    theme: Theme,
     env_reduced_motion: bool,
     reduced_motion: bool,
     high_contrast: bool,
@@ -1114,6 +1118,7 @@ impl ShellCore {
                 .resolve_motion("launch", false)
                 .expect("motion.launch")
                 .duration_ms,
+            theme: theme.clone(),
             env_reduced_motion: reduced_motion,
             reduced_motion,
             high_contrast: false,
@@ -1603,6 +1608,10 @@ impl ShellCore {
     #[must_use]
     pub const fn reduce_flashing(&self) -> bool {
         self.reduce_flashing
+    }
+    /// Ink for a drawn chrome glyph, resolved against the SUPPLIED theme at the active base.
+    fn resolved_ink(&self, token: &str) -> [u8; 4] {
+        resolved_ink_from(&self.theme, self.theme_base(), token)
     }
 
     pub fn authority_snapshot(&mut self, recovery_available: bool) {
@@ -3005,7 +3014,7 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(
-                    wifi_glyph_source(resolved_ink(self.theme_base(), COLOR_TEXT_SECONDARY_TOKEN)),
+                    wifi_glyph_source(self.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
                     ImageFit::Contain,
                 ),
             );
@@ -3869,7 +3878,7 @@ impl ShellCore {
                         &item.id,
                         pin_center_x,
                         pin_center_y,
-                        resolved_ink(self.theme_base(), STATE_SELECTED_ACCENT_TOKEN),
+                        self.resolved_ink(STATE_SELECTED_ACCENT_TOKEN),
                     ));
                 }
                 content.push(n);
@@ -3960,7 +3969,7 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(
-                    magnifier_glyph_source(resolved_ink(self.theme_base(), COLOR_TEXT_MUTED_TOKEN)),
+                    magnifier_glyph_source(self.resolved_ink(COLOR_TEXT_MUTED_TOKEN)),
                     ImageFit::Contain,
                 ),
             );
@@ -4259,7 +4268,7 @@ impl ShellCore {
                         &item.id,
                         pin_center_x,
                         pin_center_y,
-                        resolved_ink(self.theme_base(), STATE_SELECTED_ACCENT_TOKEN),
+                        self.resolved_ink(STATE_SELECTED_ACCENT_TOKEN),
                     ));
                 }
                 let title_y = card.bounds.y + library_card_art_height + CARD_LABEL_GAP;
@@ -8104,16 +8113,14 @@ const CHROME_GLYPH_INK_FALLBACK: [u8; 4] = [0xc9, 0xc2, 0xb4, 0xff];
 /// theme base gets its own rasterized image (the renderer caches images by id).
 type GlyphInkCache = OnceLock<Mutex<HashMap<[u8; 4], Arc<[u8]>>>>;
 
-/// Resolve a semantic ink token to a concrete RGBA for the active theme base, so the
-/// drawn chrome glyph images (wifi, magnifier, star) follow the theme instead of baking
-/// one Dusk-only tone. On Day the status/search surfaces are LIGHT and its accent is
-/// DARK, so a Dusk-light glyph would go near-invisible; High Contrast wants the strongest
-/// ink. Resolves through the same flagship theme + token chain the renderer uses for node
-/// token strings, so a glyph image matches the ink a text node in the same role would get.
-fn resolved_ink(base: Base, token: &str) -> [u8; 4] {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME
-        .get_or_init(pf_theme::flagship)
+/// Resolve a semantic ink token to a concrete RGBA against a SPECIFIC theme for the given
+/// base, so a drawn chrome glyph (wifi, magnifier, star) follows the theme the shell was
+/// booted with instead of a process-static one. On Day the status/search surfaces are LIGHT
+/// and its accent is DARK, so a Dusk-light glyph would go near-invisible; High Contrast wants
+/// the strongest ink. Resolves through the same token chain the renderer uses for node token
+/// strings, so a glyph image matches the ink a text node in the same role would get.
+fn resolved_ink_from(theme: &Theme, base: Base, token: &str) -> [u8; 4] {
+    theme
         .resolve(base, token)
         .ok()
         .map_or(CHROME_GLYPH_INK_FALLBACK, parse_hex_rgba)
@@ -8622,13 +8629,14 @@ mod tests {
             (hi + 0.05) / (lo + 0.05)
         };
 
-        // The ink each glyph is tinted with is `resolved_ink` of the token the render wires
-        // it to: wifi -> secondary, magnifier -> muted, star -> selected accent.
-        let day_secondary = resolved_ink(Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
-        let dusk_secondary = resolved_ink(Base::Dusk, COLOR_TEXT_SECONDARY_TOKEN);
-        let day_muted = resolved_ink(Base::Day, COLOR_TEXT_MUTED_TOKEN);
-        let day_accent = resolved_ink(Base::Day, STATE_SELECTED_ACCENT_TOKEN);
-        let hc_accent = resolved_ink(Base::HighContrast, STATE_SELECTED_ACCENT_TOKEN);
+        // The ink each glyph is tinted with is `resolved_ink_from` of the token the render
+        // wires it to: wifi -> secondary, magnifier -> muted, star -> selected accent.
+        let theme = pf_theme::flagship();
+        let day_secondary = resolved_ink_from(&theme, Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
+        let dusk_secondary = resolved_ink_from(&theme, Base::Dusk, COLOR_TEXT_SECONDARY_TOKEN);
+        let day_muted = resolved_ink_from(&theme, Base::Day, COLOR_TEXT_MUTED_TOKEN);
+        let day_accent = resolved_ink_from(&theme, Base::Day, STATE_SELECTED_ACCENT_TOKEN);
+        let hc_accent = resolved_ink_from(&theme, Base::HighContrast, STATE_SELECTED_ACCENT_TOKEN);
 
         // The tokens resolve to DIFFERENT ink per base — a baked constant would make the
         // Day glyph identical to Dusk (the regression the review caught).
@@ -8640,7 +8648,6 @@ mod tests {
         // On Day the surfaces are LIGHT, so every chrome glyph must stay legible against
         // `--color-surface-raised` (>=3:1) — the blocking bug was a light Dusk-baked glyph
         // on the light Day surface going near-invisible.
-        let theme = pf_theme::flagship();
         let day_surface = parse_hex_rgba(
             theme
                 .resolve(Base::Day, COLOR_SURFACE_RAISED_TOKEN)
@@ -8687,6 +8694,62 @@ mod tests {
             wifi_glyph_png(dusk_secondary),
             "Day and Dusk wifi glyphs must be distinct rasters, not one baked tone"
         );
+    }
+
+    /// tsp-op5a.390 review r2 (blocking): the glyph bitmaps must resolve their ink against
+    /// the theme SUPPLIED to `boot`, not a process-static `pf_theme::flagship()` — otherwise
+    /// under any non-flagship theme the drawn chrome disagrees with the scene nodes (which
+    /// resolve against the supplied theme). This is the differing-theme coverage the reviewer
+    /// asked for: it boots the shell with a theme whose Day `--color-text-secondary` differs
+    /// from flagship (`#57503f` -> `#0d1b2a`) and asserts the wifi glyph's ink follows it.
+    #[test]
+    fn glyph_ink_follows_the_supplied_theme_not_a_static_flagship() {
+        let variant_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/theme-variant");
+        let variant = pf_theme::load(&variant_dir).expect("theme-variant fixture must load");
+
+        let sentinel = parse_hex_rgba("#0d1b2a");
+        let flagship_day_secondary =
+            resolved_ink_from(&pf_theme::flagship(), Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
+        // Guard the guard: the fixture must actually diverge from flagship, else a static
+        // flagship would pass this test by coincidence.
+        assert_ne!(
+            sentinel, flagship_day_secondary,
+            "the theme-variant fixture must differ from flagship for this test to bite"
+        );
+
+        // Boot with the SUPPLIED variant theme and switch to Day appearance.
+        let mut core = ShellCore::boot(&snapshot(), &variant, false);
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("appearance".into()),
+            effective: PreferenceValue::Text("Day".into()),
+            stored: PreferenceValue::Text("Day".into()),
+            applied: true,
+        });
+        assert_eq!(core.theme_base(), Base::Day);
+
+        // The wifi glyph resolves COLOR_TEXT_SECONDARY on Day — it must follow the SUPPLIED
+        // theme's sentinel, not flagship's #57503f.
+        let ink = core.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN);
+        assert_eq!(
+            ink, sentinel,
+            "glyph ink must resolve against the supplied theme, not a static flagship"
+        );
+
+        // And the rasterized wifi glyph carries that supplied-theme ink.
+        let painted = {
+            let bytes = wifi_glyph_png(ink);
+            let decoder = png::Decoder::new(Cursor::new(&bytes[..]));
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .find(|px| px[3] > 0)
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .expect("wifi glyph must paint an opaque pixel")
+        };
+        assert_eq!(painted, sentinel);
     }
 
     #[test]

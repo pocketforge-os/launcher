@@ -246,23 +246,31 @@ fn vertical_slice_frame_hashes_are_stable() {
         // (variant border is strong-when-selected, focus is the ring only). boot-home /
         // focus-moved / launch-dimmed / returned / variant-chooser are unchanged (Home card
         // reverted to baseline; those frames carry none of the repainted control classes).
-        "92aa60a88fe1226955ed8034d9ecbab8ad8585051daf5fd8fea154849d9a9a59  ",
-        "2d4218d45cc36f6dfafa4bca3951dc72f60fc400b456c86cf5c2739634c408bd  ",
-        "cb83f164daaf3c3fea79c40c135835aa24992df6feb939c31d41bdf367a88bec  ",
-        "0df8b0a7f0826f1be5df8a3a5f70fb09b23e378f709fda0ba1c040b62e9927e7  ",
-        "6c4d457fc9d4d591d2a752fbc5702155919c48cc56d64b312a3e27f2caad90d6  ",
-        "ab3b710b49a2b3e55cc12554ea87a872acc1280684312f0da2582308499dd0a0  ",
-        "ab3b710b49a2b3e55cc12554ea87a872acc1280684312f0da2582308499dd0a0  ",
+        // tsp-op5a.390 (Family D iconography system) rebaselines every status-bar
+        // route: the wifi glyph shrinks to 9x7 and the battery to a delicate 12x7
+        // outline capsule, both centered with the %/clock text on one optical
+        // centerline; the Home hero + Details ready cue become a drawn green 8px dot;
+        // card favorite pips gain a centered star image; the Library magnifier becomes
+        // a real glyph; and the Network/Update badges take the globe / info-i glyphs.
+        // search and variant-chooser carry none of those and keep their digests.
+        // All raster guards pass with PF_RASTER_INK_GUARD=1.
+        "4f400f9096f738bc79b825f5ba475b2c0d078af7c1e4d9ff85780e6f08b00b40  ",
+        "e98a8ad59417b0b3193f177e4de5b22da22cf2fab7467fda6c791f7a2b90d103  ",
+        "29ec76ec1a49b2f9ec7d8197d2a992a174fbf8c68a8d9c2594a1a0f0d581b29a  ",
+        "0ae2c9cf3f55cea387d26abd59b998168b8ff20301a856ad9930e13b0e925309  ",
+        "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
+        "a7c1625ea3e771025709afcfd7cfd929c179df6d2fb6788df37b0689777b8ee2  ",
+        "a7c1625ea3e771025709afcfd7cfd929c179df6d2fb6788df37b0689777b8ee2  ",
         "b0e1e9b4bbfbdad1057e18bf22bf4251e81123d34922908fa6466d0acbf995e1  ",
-        "7948b6f2b058d06b648e1328b758a35f4ba65f95cc78defea5acdcbee36c56f9  ",
-        "55ba9c1bc150b16da5ab3033af88fbb55430a226fe2c6a3740487eb5bddf137d  ",
+        "e61ece9c15e9ac63151f97fbc77c412de90ad41bd1f0984b53c438cdd1881dfc  ",
+        "412b9447ef8950e8d2be473402e5cb7525fbd3c3d19c9b0acd9c8e045178db08  ",
         "5a57875e834d80bceaca128e5a17b64f31d8fd3035bd99d0dede4a188755ffa8  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("2d4218d"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("e98a8ad"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("0df8b0a"),
+        lines.lines().nth(3).unwrap().starts_with("0ae2c9cf"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -314,22 +322,22 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // is dropped — including the first-run row + its value chip). Every Settings/first-run
     // frame carries the rail, so all six shift; raster guards pass with PF_RASTER_INK_GUARD=1.
     assert!(
-        transcript.contains("03f359c9853926d9e53b946ceec1090117fc80ff932ea445f9377bdae346e1d4  ")
+        transcript.contains("7668f3e29248f120c01bf15649bdcdb170957c02450033717fb9f5269d7e8cb8  ")
     );
     assert!(
-        transcript.contains("a93317975b2eb2b21af2c9cef0ef058bf942f05c8887673df041904366e749ee  ")
+        transcript.contains("dd96a91c9bb7dce83ee2f53fa3d2475b72bffdde560095a1d109b2938b28d06d  ")
     );
     assert!(
-        transcript.contains("a7674c160946bcc572a0a549e35586f98646ab586bedee32c5eecf95c7465420  ")
+        transcript.contains("c9a87e3964b707c4778b3d407fed6f1577664c644cc91726b1f69f6790754a22  ")
     );
     assert!(
-        transcript.contains("cb2aa4ccab209d21e8bcc2973ab65bff1840f968f6d28ad0654c48a51bb1e94d  ")
+        transcript.contains("b3604e7f68d0e6262abf5bedcc8b29f51a962950e605e130f734874455b7fe13  ")
     );
     assert!(
-        transcript.contains("a4aa571636d02af8d5859702259ef6475c452938fd0a7afab01b8a3fbd689894  ")
+        transcript.contains("584ba6a9dc657dce4e33d006bb2ce725cb7e9e1da06ecc40cf718a8126519647  ")
     );
     assert!(
-        transcript.contains("37f9a1d538d9ff58a8ab432ee31ca959a693aa8764f9bcbb5327d252934975ad  ")
+        transcript.contains("da8254f0e2dbc0fdc29e48f199f189f2cb36e057f5b833b6038b22355659f564  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());
@@ -354,6 +362,111 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
     assert!(
-        transcript.contains("f682da19a94f80f0d3353062b742d1c6824d5e2a616a7f81134778dda412bfd6  ")
+        transcript.contains("841499bf3b2b5098a9a0be8d38daef6deeaf4bd2f811b2f9a036fc4c6a702179  ")
+    );
+}
+
+// ---- tsp-op5a.390 Family D (iconography system) structural guards ------------------
+// Decode a route's PNG from a fresh offscreen render into (pixels, stride).
+fn decode_route(dir: &std::path::Path, file: &str) -> (Vec<u8>, usize, usize, usize) {
+    let decoder = png::Decoder::new(std::fs::File::open(dir.join(file)).unwrap());
+    let mut reader = decoder.read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let stride = info.width as usize * 4;
+    (
+        pixels[..info.buffer_size()].to_vec(),
+        stride,
+        info.width as usize,
+        info.height as usize,
+    )
+}
+
+/// Ink bounding box (`min_x`, `max_x`, `min_y`, `max_y`, count) of pixels brighter
+/// than `th` on all three channels, within the `[x0,x1)` x `[y0,y1)` window.
+#[allow(clippy::similar_names)]
+fn ink_bbox(
+    pixels: &[u8],
+    stride: usize,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+    th: u8,
+) -> Option<(usize, usize, usize, usize, usize)> {
+    let (mut minx, mut miny, mut maxx, mut maxy, mut count) = (usize::MAX, usize::MAX, 0, 0, 0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let o = y * stride + x * 4;
+            if pixels[o] > th && pixels[o + 1] > th && pixels[o + 2] > th {
+                count += 1;
+                minx = minx.min(x);
+                maxx = maxx.max(x);
+                miny = miny.min(y);
+                maxy = maxy.max(y);
+            }
+        }
+    }
+    (count > 0).then_some((minx, maxx, miny, maxy, count))
+}
+
+// The status-bar chrome (wifi glyph, battery capsule, %/clock text) must share ONE
+// optical centerline within 1px and stay within per-icon size limits. Red before
+// tsp-op5a.390: the shipped items sat at ink-midlines wifi y=34 / battery y=30.5 /
+// text y=28 (a 6px spread) with a 26x14 near-solid battery block and a 14x11 wifi.
+#[test]
+#[allow(clippy::cast_precision_loss, clippy::similar_names)]
+fn status_cluster_items_share_one_optical_centerline() {
+    let (out, _) = render_offscreen();
+    let (pixels, stride, _, _) = decode_route(out.path(), "boot-home.png");
+    let wifi = ink_bbox(&pixels, stride, 1103, 1120, 20, 44, 55).expect("wifi glyph ink");
+    let battery = ink_bbox(&pixels, stride, 1121, 1141, 20, 44, 40).expect("battery ink");
+    let text = ink_bbox(&pixels, stride, 1144, 1215, 20, 44, 110).expect("status text ink");
+    let center_y = |b: (usize, usize, usize, usize, usize)| (b.2 + b.3) as f32 / 2.0;
+    let (wy, by, ty) = (center_y(wifi), center_y(battery), center_y(text));
+    assert!(
+        (wy - ty).abs() <= 1.5,
+        "wifi ink centerline {wy} must sit within 1px of the status text {ty}"
+    );
+    assert!(
+        (by - ty).abs() <= 1.5,
+        "battery ink centerline {by} must sit within 1px of the status text {ty}"
+    );
+    let dims = |b: (usize, usize, usize, usize, usize)| (b.1 - b.0 + 1, b.3 - b.2 + 1);
+    let (ww, wh) = dims(wifi);
+    assert!(
+        ww <= 12 && wh <= 9,
+        "wifi glyph {ww}x{wh} exceeds the 12x9 cap"
+    );
+    let (bw, bh) = dims(battery);
+    assert!(
+        bw <= 18 && bh <= 10,
+        "battery capsule {bw}x{bh} exceeds the 18x10 cap (must be a delicate outline, not a block)"
+    );
+}
+
+// The Library search magnifier must render as a real glyph (thin ring + handle), not a
+// tofu box. Red before tsp-op5a.390: the `⌕` (U+2315) codepoint is in neither bundled
+// face, so it painted a near-solid `.notdef` rectangle (fill ratio ~0.97 of its bbox).
+// A drawn ring+handle glyph is SPARSE (fill ratio ~0.4). This is ink-SHAPE sanity, not
+// merely non-empty ink — a solid slab has plenty of ink and must still fail.
+#[test]
+#[allow(clippy::cast_precision_loss, clippy::similar_names)]
+fn library_search_magnifier_is_a_glyph_not_a_tofu_box() {
+    let (out, _) = render_offscreen();
+    let (pixels, stride, _, _) = decode_route(out.path(), "library.png");
+    let glyph = ink_bbox(&pixels, stride, 62, 84, 86, 110, 45).expect("magnifier glyph ink");
+    let (minx, maxx, miny, maxy, count) = glyph;
+    let (w, h) = (maxx - minx + 1, maxy - miny + 1);
+    assert!(count > 8, "magnifier must produce visible glyph ink");
+    assert!(
+        w <= 16 && h <= 16,
+        "magnifier glyph {w}x{h} is too large — a slab, not a mark"
+    );
+    let fill = count as f32 / (w * h) as f32;
+    assert!(
+        fill < 0.55,
+        "magnifier fill ratio {fill:.2} of its {w}x{h} box is a solid tofu slab, not a ring+handle glyph"
     );
 }

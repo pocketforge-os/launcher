@@ -4871,13 +4871,26 @@ impl ShellCore {
                 // The chooser replaces the Details panel instead of painting another
                 // interactive stack over it.
                 out.retain(|node| !node.id.as_str().starts_with("detail-"));
-                let chooser_top = 300.0;
                 let chooser_row_height = 54.0;
                 let chooser_row_gap = 10.0;
                 let chooser_capacity = 5;
                 let chooser_compact = library_geometry(w).columns < 6;
                 let chooser_left = if chooser_compact { 48.0 } else { 360.0 };
                 let chooser_width = if chooser_compact { w - 96.0 } else { w - 720.0 };
+                // Flow each header position from the SCALED height of the box above it
+                // so the eyebrow/title/note stack cannot collide at 150%/200% text scale.
+                // Fixed y's collided there: at 200% the eyebrow box (120..164) grew into
+                // the title's fixed y=148, and the title box (148..244) into the note's
+                // fixed y=235. The .max() floors keep the 100% layout byte-identical
+                // (eyebrow 120, title 148, note 235, rows 300) while larger scales push
+                // down, matching the cursor pattern first_run_nodes uses.
+                let eyebrow_height = scaled_text_box_height(22.0, self.text_scale);
+                let title_height = scaled_text_box_height(48.0, self.text_scale);
+                let note_height = scaled_text_box_height(40.0, self.text_scale);
+                let eyebrow_top = 120.0;
+                let title_top = (eyebrow_top + eyebrow_height + 4.0).max(148.0);
+                let note_top = (title_top + title_height + SPACE_2).max(235.0);
+                let chooser_top = (note_top + note_height + SPACE_3).max(300.0);
                 // The chooser heading is a game-name Eyebrow over a Title question
                 // (spec.css .modal .m-eyebrow over .m-title). The retain above strips
                 // the Details game-name title, and the generic route-heading (now
@@ -4890,9 +4903,9 @@ impl ShellCore {
                         Role::Text,
                         &item.title,
                         chooser_left,
-                        120.0,
+                        eyebrow_top,
                         chooser_width,
-                        scaled_text_box_height(22.0, self.text_scale),
+                        eyebrow_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
                     .with_type_role(TypeRole::Eyebrow)
@@ -4904,9 +4917,9 @@ impl ShellCore {
                         Role::Heading,
                         "How do you want to play?",
                         chooser_left,
-                        148.0,
+                        title_top,
                         chooser_width,
-                        scaled_text_box_height(48.0, self.text_scale),
+                        title_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
                     .with_type_role(TypeRole::Title)
@@ -4922,9 +4935,9 @@ impl ShellCore {
                     Role::Text,
                     "Ready right now. Back leaves without opening anything.",
                     chooser_left,
-                    235.0,
+                    note_top,
                     chooser_width,
-                    40.0,
+                    note_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 ));
                 out.push(node(

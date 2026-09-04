@@ -3465,7 +3465,10 @@ impl ShellCore {
         };
         if !matches!(
             self.route,
-            Route::Settings | Route::Library | Route::Details
+            // VariantChooser builds its own Eyebrow game-name + Title question
+            // (below) instead of the generic small-caps Eyebrow route-heading, which
+            // read as the chooser's whole heading and left no game-name eyebrow.
+            Route::Settings | Route::Library | Route::Details | Route::VariantChooser
         ) {
             out.push(
                 node(
@@ -4536,7 +4539,10 @@ impl ShellCore {
                     title_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Hero)
+                // Details title is the Title role (shell.css .detail-title →
+                // --type-title-size/-weight, 34/800, display family). Was Hero
+                // (52/800) — cap ~37px, ~1.5x over the mockup's 25px cap.
+                .with_type_role(TypeRole::Title)
                 .with_line_height(1.04)
                 .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
             );
@@ -4797,7 +4803,12 @@ impl ShellCore {
                             detail_column_width - 64.0,
                             26.0,
                             text_token,
-                        ),
+                        )
+                        // Option-card name is the Label role (14/600); its subtitle
+                        // the Caption role (12.5/600) — shell.css .variant .v-name
+                        // over .v-sub. Both were unset (→ Body 15/500), so name and
+                        // sub flattened to one weight/size with only ink between them.
+                        .with_type_role(TypeRole::Label),
                         node(
                             &format!("detail-variant-{variant_index}-sub"),
                             Role::Text,
@@ -4811,6 +4822,7 @@ impl ShellCore {
                         // Option-card subtitle is muted (shell.css .variant .v-sub);
                         // the variant name above it stays at body/primary. Was unset
                         // (→ primary), flattening the two.
+                        .with_type_role(TypeRole::Caption)
                         .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                     ];
                     if variant_node.state.selected {
@@ -4866,6 +4878,40 @@ impl ShellCore {
                 let chooser_compact = library_geometry(w).columns < 6;
                 let chooser_left = if chooser_compact { 48.0 } else { 360.0 };
                 let chooser_width = if chooser_compact { w - 96.0 } else { w - 720.0 };
+                // The chooser heading is a game-name Eyebrow over a Title question
+                // (spec.css .modal .m-eyebrow over .m-title). The retain above strips
+                // the Details game-name title, and the generic route-heading (now
+                // excluded for this route) rendered the question as a tiny small-caps
+                // Eyebrow — so the game-name eyebrow was missing and the heading read
+                // at eyebrow scale. Rebuild both roles here.
+                out.push(
+                    node(
+                        "chooser-eyebrow",
+                        Role::Text,
+                        &item.title,
+                        chooser_left,
+                        120.0,
+                        chooser_width,
+                        scaled_text_box_height(22.0, self.text_scale),
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Eyebrow)
+                    .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+                );
+                out.push(
+                    node(
+                        "chooser-title",
+                        Role::Heading,
+                        "How do you want to play?",
+                        chooser_left,
+                        148.0,
+                        chooser_width,
+                        scaled_text_box_height(48.0, self.text_scale),
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Title)
+                    .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+                );
                 let chooser_start = self
                     .focus
                     .saturating_add(1)
@@ -5304,16 +5350,29 @@ impl ShellCore {
             SettingsRoom::Network => "Network status",
             SettingsRoom::System => "System",
         };
-        out.push(node(
-            "settings-section-title",
-            Role::Heading,
-            title,
-            content_left,
-            112.0,
-            content_width,
-            48.0,
-            COLOR_SURFACE_CANVAS_TOKEN,
-        ));
+        // Grow the title box with the text scale so the H1 line box (size*1.25 =
+        // 27.5px at 100%, 55px at 200%) stays inside the containment guard — the Body
+        // default it replaced was small enough for the fixed 48px box. Cap at 60px so
+        // the box never reaches the fixed rows_top (174) below: capping instead of a
+        // free scale keeps the 200% row capacity (the toggle-caption evidence needs
+        // three accessibility rows visible), and 60px still clears the 55px H1 line.
+        let section_title_height = scaled_text_box_height(48.0, self.text_scale).min(60.0);
+        out.push(
+            node(
+                "settings-section-title",
+                Role::Heading,
+                title,
+                content_left,
+                112.0,
+                content_width,
+                section_title_height,
+                COLOR_SURFACE_CANVAS_TOKEN,
+            )
+            // Settings screen title is the H1 role (shell.css .set-title →
+            // --type-h1-size/-weight, 22/700). Was unset (→ Body 15/500), so the
+            // title read at body scale and weight and disappeared at squint.
+            .with_type_role(TypeRole::H1),
+        );
         if portrait {
             out.push(node(
                 "settings-section-back",
@@ -5331,6 +5390,9 @@ impl ShellCore {
         let scale = f32::from(self.text_scale) / 100.0;
         let row_height = 74.0 * scale;
         let row_gap = 12.0;
+        // Fixed at 112 + 48 + 14, historically. The H1 title box (above) is capped at
+        // 60px so its bottom (172) stays clear of this line, so rows_top holds steady
+        // and the 200% row capacity is unchanged.
         let rows_top = 174.0;
         let rows_bottom = h - PROMPTS_AREA_HEIGHT - 16.0;
         let visible_rows = ((rows_bottom - rows_top + row_gap) / (row_height + row_gap))
@@ -5433,6 +5495,15 @@ impl ShellCore {
                 };
                 let semantic_paint_split = is_toggle && line_index > 0;
                 let label_id = format!("settings-row-{}-line-{line_index}", row.id);
+                // Row name is the Label role (14/600), its sublabel the Caption role
+                // (12.5/600) — shell.css .row .r-name over .r-sub. Both lines were
+                // unset (→ Body 15/500), flattening the name/sub type hierarchy so
+                // only ink separated them.
+                let line_role = if line_index == 0 {
+                    TypeRole::Label
+                } else {
+                    TypeRole::Caption
+                };
                 let mut label = node(
                     &label_id,
                     if semantic_paint_split {
@@ -5471,6 +5542,7 @@ impl ShellCore {
                                 row_line_height,
                                 row_surface,
                             )
+                            .with_type_role(line_role)
                             .with_ink_token(if line_index == 0 {
                                 COLOR_TEXT_PRIMARY_TOKEN
                             } else {
@@ -5495,15 +5567,17 @@ impl ShellCore {
                     label = declared_multiline(label);
                 }
                 if !semantic_paint_split {
-                    label = label.with_ink_token(if !interactive {
-                        STATE_UNAVAILABLE_TEXT_TOKEN
-                    } else if line_index == 0 {
-                        COLOR_TEXT_PRIMARY_TOKEN
-                    } else {
-                        // Row sublabel is muted, quieter than the row name
-                        // (shell.css .row .r-sub). Was secondary.
-                        COLOR_TEXT_MUTED_TOKEN
-                    });
+                    label = label
+                        .with_type_role(line_role)
+                        .with_ink_token(if !interactive {
+                            STATE_UNAVAILABLE_TEXT_TOKEN
+                        } else if line_index == 0 {
+                            COLOR_TEXT_PRIMARY_TOKEN
+                        } else {
+                            // Row sublabel is muted, quieter than the row name
+                            // (shell.css .row .r-sub). Was secondary.
+                            COLOR_TEXT_MUTED_TOKEN
+                        });
                 }
                 text.push(label);
             }
@@ -6101,7 +6175,10 @@ impl ShellCore {
         let row_height = (52.0 * scale).min(if compact { 76.0 } else { 92.0 });
         let row_gap = if compact { 4.0 } else { SPACE_2 };
         let eyebrow_height = scaled_text_box_height(22.0, self.text_scale);
-        let title_height = scaled_text_box_height(34.0, self.text_scale);
+        // The Title role (34px) needs a line box taller than its em to keep painted
+        // ink inside the containment guard (34px box clipped its descenders); 48px
+        // matches the chooser-title box below.
+        let title_height = scaled_text_box_height(48.0, self.text_scale);
         let mut cursor = sheet_top + SPACE_5;
 
         out.push(
@@ -6130,7 +6207,10 @@ impl ShellCore {
                 eyebrow_height,
                 SCENE_TRANSPARENT_TOKEN,
             )
-            .with_type_role(TypeRole::Caption)
+            // First-run kicker is the Eyebrow role (spec.css .welcome .w-eyebrow →
+            // --type-eyebrow-*, 11.5/700 + 0.14em tracking), muted. Was Caption
+            // (12.5/600), which sat nearly title-size beside the shrunken title.
+            .with_type_role(TypeRole::Eyebrow)
             .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
         );
         cursor += eyebrow_height + 4.0;
@@ -6145,7 +6225,11 @@ impl ShellCore {
                 title_height,
                 SCENE_TRANSPARENT_TOKEN,
             )
-            .with_type_role(TypeRole::Label)
+            // First-run title is the Title role (spec.css .welcome .w-title →
+            // --type-title-size/-weight, 34/800, display family). Was Label
+            // (14/600) — ~body scale, ~1.05x body vs the mockup's 2.4x. The box
+            // height was already sized to the 34px title (title_height above).
+            .with_type_role(TypeRole::Title)
             .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
         );
         cursor += title_height + SPACE_2;
@@ -10091,6 +10175,169 @@ mod tests {
             ink_l(name)
         );
         assert_muted(sub, "settings row sublabel");
+    }
+
+    /// Family-E type-metric guard: the heading/label hierarchy is carried by the
+    /// node's `TypeRole`, not left to the Body default. Resolve each node's role to its
+    /// concrete (`size_px`, weight) exactly as pf-render does — from the committed
+    /// design tokens (`design_generated`) — and assert, per screen: each title
+    /// dominates body scale at a heading weight, each eyebrow recedes below its
+    /// title, and every label/sublabel pair keeps a real size+weight split instead of
+    /// flattening onto one role. RED before the fix: the Settings/first-run/chooser
+    /// headings fell through to Body (15/500), the Details title sat at Hero (52/800),
+    /// and each row/option name+sub shared the Body default so only ink separated
+    /// them. Stays honest if a token is ever regenerated.
+    #[test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)]
+    fn fidelity_e_type_role_hierarchy_is_wired_per_screen() {
+        // (size_px, weight) per role — the pf-render `parse_type_role` mapping over
+        // the committed flagship tokens.
+        fn role_metrics(role: TypeRole) -> (f32, f32) {
+            use design_generated as d;
+            match role {
+                TypeRole::Hero => (d::TYPE_HERO_SIZE, d::TYPE_HERO_WEIGHT),
+                TypeRole::Title => (d::TYPE_TITLE_SIZE, d::TYPE_TITLE_WEIGHT),
+                TypeRole::H1 => (d::TYPE_H1_SIZE, d::TYPE_H1_WEIGHT),
+                TypeRole::Label => (d::TYPE_LABEL_SIZE, d::TYPE_LABEL_WEIGHT),
+                TypeRole::Caption => (d::TYPE_CAPTION_SIZE, d::TYPE_CAPTION_WEIGHT),
+                TypeRole::Eyebrow => (d::TYPE_EYEBROW_SIZE, d::TYPE_EYEBROW_WEIGHT),
+                // Plate is a decorative Fraunces role with no heading/label duty here;
+                // fall back to Body metrics like any non-hierarchy text.
+                TypeRole::Body | TypeRole::Plate => (d::TYPE_BODY_SIZE, d::TYPE_BODY_WEIGHT),
+            }
+        }
+        let (body_size, _) = role_metrics(TypeRole::Body);
+        let (_, h1_weight) = role_metrics(TypeRole::H1);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        // A heading node must resolve to at least `factor`x body cap-scale and a
+        // heading weight (>= H1's 700), never the Body default.
+        let assert_dominant = |node: &Node, factor: f32, what: &str| {
+            let (size, weight) = role_metrics(node.type_role);
+            assert!(
+                size >= body_size * factor,
+                "{what} must be >= {factor}x body scale ({}), got {size} (role {:?})",
+                body_size * factor,
+                node.type_role
+            );
+            assert!(
+                weight >= h1_weight,
+                "{what} must carry a heading weight (>= {h1_weight}), got {weight} (role {:?})",
+                node.type_role
+            );
+        };
+        // An eyebrow recedes strictly below its title in scale and is the Eyebrow role.
+        let assert_eyebrow = |eyebrow: &Node, title: &Node, what: &str| {
+            assert_eq!(
+                eyebrow.type_role,
+                TypeRole::Eyebrow,
+                "{what} must be the Eyebrow role, got {:?}",
+                eyebrow.type_role
+            );
+            assert!(
+                role_metrics(eyebrow.type_role).0 < role_metrics(title.type_role).0,
+                "{what} must sit below its title in scale"
+            );
+        };
+        // A label/sublabel pair must keep a real split: label strictly larger, never
+        // lighter, and the two must not resolve to one identical role (the flattening).
+        let assert_pair = |label: &Node, sub: &Node, what: &str| {
+            let (ls, lw) = role_metrics(label.type_role);
+            let (ss, sw) = role_metrics(sub.type_role);
+            assert!(
+                ls > ss,
+                "{what}: label must be larger than its sublabel, got {ls} vs {ss} (roles {:?}/{:?})",
+                label.type_role,
+                sub.type_role
+            );
+            assert!(
+                lw >= sw,
+                "{what}: label must not be lighter than its sublabel, got {lw} vs {sw}"
+            );
+            assert!(
+                (ls - ss).abs() > f32::EPSILON || (lw - sw).abs() > f32::EPSILON,
+                "{what}: label and sublabel must not flatten to one role"
+            );
+        };
+
+        // ---- Home: hero stays the Hero role ---------------------------------
+        let home = core();
+        let home_scene = home.scene(metrics, "").unwrap();
+        let hn = |id: &str| {
+            node_by_id(home_scene.root(), id).unwrap_or_else(|| panic!("home node {id}"))
+        };
+        assert_eq!(hn("hero-title").type_role, TypeRole::Hero);
+        assert_dominant(hn("hero-title"), 3.0, "Home hero title");
+
+        // ---- Settings: H1 title dominant; row name/sub un-flattened ---------
+        let mut settings = core();
+        settings.load_preferences(&preferences(true), true).unwrap();
+        settings.go(Route::Settings);
+        let set = settings_scene(&settings);
+        let sn =
+            |id: &str| node_by_id(set.root(), id).unwrap_or_else(|| panic!("settings node {id}"));
+        assert_eq!(sn("settings-section-title").type_role, TypeRole::H1);
+        assert_dominant(sn("settings-section-title"), 1.4, "Settings H1 title");
+        assert_pair(
+            sn("settings-row-accessibility-textScale-line-0"),
+            sn("settings-row-accessibility-textScale-line-1"),
+            "Settings row name/sublabel",
+        );
+
+        // ---- First run: Title heading over an Eyebrow kicker ----------------
+        let mut first_run = core();
+        first_run.reset_first_run();
+        let fr = first_run.scene(metrics, "").unwrap();
+        let fn_ =
+            |id: &str| node_by_id(fr.root(), id).unwrap_or_else(|| panic!("first-run node {id}"));
+        assert_eq!(fn_("first-run-title").type_role, TypeRole::Title);
+        assert_dominant(fn_("first-run-title"), 2.0, "First-run title");
+        assert_eyebrow(
+            fn_("first-run-eyebrow"),
+            fn_("first-run-title"),
+            "First-run eyebrow",
+        );
+
+        // ---- Details + Variant chooser share a two-ready-variant fixture ----
+        let mut catalog = fixture_core(vec![item(
+            "game",
+            "Hollow Tides",
+            vec![
+                variant("native", "native-app", Availability::Ready),
+                variant("stream", "stream-app", Availability::Ready),
+            ],
+        )]);
+        catalog.selected_item = Some(0);
+
+        catalog.go(Route::Details);
+        let details = catalog.scene(metrics, "").unwrap();
+        let dn =
+            |id: &str| node_by_id(details.root(), id).unwrap_or_else(|| panic!("detail node {id}"));
+        assert_eq!(dn("detail-title").type_role, TypeRole::Title);
+        assert_dominant(dn("detail-title"), 2.0, "Details title");
+        assert_pair(
+            dn("detail-variant-0-name"),
+            dn("detail-variant-0-sub"),
+            "Details option-card name/sublabel",
+        );
+
+        catalog.go(Route::VariantChooser);
+        let chooser = catalog.scene(metrics, "").unwrap();
+        let cn = |id: &str| {
+            node_by_id(chooser.root(), id).unwrap_or_else(|| panic!("chooser node {id}"))
+        };
+        assert_eq!(cn("chooser-title").type_role, TypeRole::Title);
+        assert_dominant(cn("chooser-title"), 2.0, "Variant-chooser title");
+        assert_eyebrow(
+            cn("chooser-eyebrow"),
+            cn("chooser-title"),
+            "Variant-chooser game-name eyebrow",
+        );
     }
 
     #[test]
@@ -17016,7 +17263,7 @@ mod tests {
 
         assert_eq!(
             node_by_id(root, "detail-title").unwrap().type_role,
-            TypeRole::Hero
+            TypeRole::Title
         );
         let first = node_by_id(root, "detail-variant-0").unwrap();
         let second = node_by_id(root, "detail-variant-1").unwrap();
@@ -17113,7 +17360,10 @@ mod tests {
                     .iter()
                     .filter(|node| node.id.as_str().starts_with("chooser-"))
                     .collect::<Vec<_>>();
-                assert_eq!(chooser_nodes.len(), 5);
+                // note + scroll-region + 3 variant rows, plus the tsp-op5a.395
+                // game-name eyebrow and question title — all share the responsive
+                // chooser column bounds.
+                assert_eq!(chooser_nodes.len(), 7);
                 for node in chooser_nodes {
                     assert!(
                         (node.bounds.x - expected_left).abs() < f32::EPSILON,

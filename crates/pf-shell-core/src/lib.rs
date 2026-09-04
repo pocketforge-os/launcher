@@ -42,8 +42,9 @@ mod design_manual;
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
-    COLOR_STATUS_READY_TOKEN, COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
-    COLOR_SURFACE_SCRIM_TOKEN, COLOR_SURFACE_SUNKEN_TOKEN, COLOR_TEXT_INVERSE_TOKEN,
+    COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN, COLOR_SURFACE_CANVAS_TOKEN,
+    COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN, COLOR_SURFACE_SCRIM_TOKEN,
+    COLOR_TEXT_INVERSE_TOKEN,
     COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
     KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
     LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
@@ -3081,7 +3082,21 @@ impl ShellCore {
                         32.0,
                         SCENE_TRANSPARENT_TOKEN,
                     )
-                    .with_type_role(TypeRole::Label),
+                    .with_type_role(TypeRole::Label)
+                    // Room strip: current room at primary, the others recede. Before
+                    // this, no ink was set so both collapsed to --state-rest-text
+                    // (primary), erasing the active/inactive distinction. The design
+                    // (shell.css .room) is muted, but the strip is chrome sitting over
+                    // the hero-wash decoration layer, and muted there lands at ~4.47:1
+                    // — below the 4.5:1 raster legibility floor (assert_raster_text_
+                    // legible). Secondary is the nearest legible tone; it restores the
+                    // ramp and clears the floor. Escalated to coordinator: exact-muted
+                    // chrome would need a wash/scrim change (a backdrop-family fix).
+                    .with_ink_token(if selected {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    } else {
+                        COLOR_TEXT_SECONDARY_TOKEN
+                    }),
                 );
                 if selected {
                     room_nodes.push(node(
@@ -3495,6 +3510,32 @@ impl ShellCore {
             if self.text_scale < 200 {
                 content.push(heading);
             }
+            // The hero meta line is the three-tier ramp in one string: only the
+            // status phrase (dot + "Ready"/"Starting"/"⊘ …") carries state hue; the
+            // trailing "· kind · cue · playtime" is warm-neutral secondary, NOT the
+            // status color. Painting the whole line one ink (previously all
+            // COLOR_STATUS_READY_TOKEN) is the Family-A collapse. Split into a lead
+            // run (state hue) and a meta run (secondary), under a Group that retains
+            // the full accessible label so the line still reads as one phrase.
+            let (status_lead, status_meta) = hero_status
+                .split_once(" · ")
+                .map_or((hero_status.as_str(), ""), |(lead, _)| {
+                    (lead, &hero_status[lead.len()..])
+                });
+            let status_lead_ink = if status_lead.starts_with('●') {
+                COLOR_STATUS_READY_TOKEN
+            } else {
+                COLOR_STATUS_STOPPED_TOKEN
+            };
+            // Reserve the lead run generously: the leading state glyph (● / ⊘) is
+            // wider than the conservative label advance, so a tight box wraps it
+            // (the single-line raster guard rejects that). SPACE_5 of slack keeps
+            // "● Ready" et al. on one line while the meta run still follows closely.
+            let status_lead_width = (text_node_box_width(measured_text_advance(
+                label_text_width(status_lead),
+                self.text_scale,
+            )) + SPACE_5)
+                .min(hero_status_width);
             content.extend([
                 node(
                     "hero-title",
@@ -3511,7 +3552,7 @@ impl ShellCore {
                 .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
                 node(
                     "hero-status",
-                    Role::Text,
+                    Role::Group,
                     &hero_status,
                     48.0,
                     vertical.status_y,
@@ -3520,7 +3561,32 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Label)
-                .with_ink_token(COLOR_STATUS_READY_TOKEN),
+                .with_children(vec![
+                    node(
+                        "hero-status-lead",
+                        Role::Text,
+                        status_lead,
+                        48.0,
+                        vertical.status_y,
+                        status_lead_width,
+                        hero_status_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_ink_token(status_lead_ink),
+                    node(
+                        "hero-status-meta",
+                        Role::Text,
+                        status_meta,
+                        48.0 + status_lead_width,
+                        vertical.status_y,
+                        (hero_status_width - status_lead_width).max(0.0),
+                        hero_status_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+                ]),
             ]);
             let attention = self.attention_message.as_deref().or_else(|| {
                 (self.presentation == Presentation::ForcedClose)
@@ -3647,7 +3713,9 @@ impl ShellCore {
                     shelf_label_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Eyebrow),
+                .with_type_role(TypeRole::Eyebrow)
+                // shelf label is a muted eyebrow, not emphasis (shell.css .shelf-label).
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
             let shelf_count = ready_items.len();
             let card_width = CARD_ART_WIDTH;
@@ -3816,7 +3884,9 @@ impl ShellCore {
                     scaled_text_box_height(28.0, self.text_scale),
                     STATE_REST_SURFACE_TOKEN,
                 )
-                .with_type_role(TypeRole::Label),
+                .with_type_role(TypeRole::Label)
+                // Placeholder prompt is muted, not emphasis (shell.css .searchbox).
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
             out.push(search);
             for (index, (full_label, count, filter)) in filters.into_iter().enumerate() {
@@ -3948,7 +4018,15 @@ impl ShellCore {
                         },
                         chip.style_token.as_str(),
                     )
-                    .with_type_role(TypeRole::Label);
+                    .with_type_role(TypeRole::Label)
+                    // Selected filter reads at primary; the rest recede to secondary
+                    // (shell.css .chip / .chip[data-state="selected"]). Was unset
+                    // (→ primary), collapsing the active/inactive distinction.
+                    .with_ink_token(if active {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    } else {
+                        COLOR_TEXT_SECONDARY_TOKEN
+                    });
                     label_node.state.focused = focused;
                     label_node
                 });
@@ -3968,7 +4046,10 @@ impl ShellCore {
                             },
                             chip.style_token.as_str(),
                         )
-                        .with_type_role(TypeRole::Label);
+                        .with_type_role(TypeRole::Label)
+                        // The count is always muted, quieter than its label
+                        // (shell.css .chip .count). Was unset (→ primary).
+                        .with_ink_token(COLOR_TEXT_MUTED_TOKEN);
                         count_node.state.focused = focused;
                         count_node
                     });
@@ -4128,7 +4209,15 @@ impl ShellCore {
                         library_title_height,
                         COLOR_SURFACE_CANVAS_TOKEN,
                     )
-                    .with_type_role(TypeRole::Label),
+                    .with_type_role(TypeRole::Label)
+                    // Card label: focused card at primary, the rest at secondary
+                    // (shell.css .card .label / :has(.art[data-focused]) .label).
+                    // Was unset (→ primary), so every title read at emphasis.
+                    .with_ink_token(if self.focus == i + 5 {
+                        COLOR_TEXT_PRIMARY_TOKEN
+                    } else {
+                        COLOR_TEXT_SECONDARY_TOKEN
+                    }),
                 );
                 out.push(card);
             }
@@ -4467,7 +4556,11 @@ impl ShellCore {
                     ways_heading_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Eyebrow),
+                .with_type_role(TypeRole::Eyebrow)
+                // Section eyebrow is muted, matching the breadcrumb (shell.css
+                // .v-label). Was unset (→ primary); breadcrumb/description already
+                // wire correctly and are this screen's reference.
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
             let ready = self.ready_variants(item_index);
             let active_ready_variant = self.active_ready_variant(item_index);
@@ -4574,7 +4667,11 @@ impl ShellCore {
                             detail_column_width - 64.0,
                             24.0,
                             STATE_REST_SURFACE_TOKEN,
-                        ),
+                        )
+                        // Option-card subtitle is muted (shell.css .variant .v-sub);
+                        // the variant name above it stays at body/primary. Was unset
+                        // (→ primary), flattening the two.
+                        .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                     ];
                     if variant_node.state.selected {
                         variant_node.children.push(
@@ -4887,18 +4984,24 @@ impl ShellCore {
                                 22.0,
                                 COLOR_SURFACE_CANVAS_TOKEN,
                             )
-                            .with_type_role(TypeRole::Eyebrow),
+                            .with_type_role(TypeRole::Eyebrow)
+                            // Fact label is a muted eyebrow (shell.css .fact .f-k);
+                            // its value below is secondary. Both were unset (→ primary).
+                            .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                         );
-                        out.push(node(
-                            &value_id,
-                            Role::Text,
-                            &value,
-                            left,
-                            flow_top + 26.0,
-                            fact_width - 8.0,
-                            28.0,
-                            COLOR_SURFACE_CANVAS_TOKEN,
-                        ));
+                        out.push(
+                            node(
+                                &value_id,
+                                Role::Text,
+                                &value,
+                                left,
+                                flow_top + 26.0,
+                                fact_width - 8.0,
+                                28.0,
+                                COLOR_SURFACE_CANVAS_TOKEN,
+                            )
+                            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+                        );
                     }
                 } else if let Some(playtime) = self.playtime.get(&item.id).copied()
                     && flow_top + block_height <= footer_top
@@ -4924,18 +5027,23 @@ impl ShellCore {
                             22.0,
                             COLOR_SURFACE_CANVAS_TOKEN,
                         )
-                        .with_type_role(TypeRole::Eyebrow),
+                        .with_type_role(TypeRole::Eyebrow)
+                        // Fact label muted; value secondary (shell.css .fact .f-k/.f-v).
+                        .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                     );
-                    out.push(node(
-                        "detail-playtime",
-                        Role::Text,
-                        &format_playtime(playtime),
-                        detail_column_left,
-                        flow_top + 42.0,
-                        detail_column_width,
-                        28.0,
-                        COLOR_SURFACE_CANVAS_TOKEN,
-                    ));
+                    out.push(
+                        node(
+                            "detail-playtime",
+                            Role::Text,
+                            &format_playtime(playtime),
+                            detail_column_left,
+                            flow_top + 42.0,
+                            detail_column_width,
+                            28.0,
+                            COLOR_SURFACE_CANVAS_TOKEN,
+                        )
+                        .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+                    );
                 }
             }
         } else if self.route == Route::Settings {
@@ -5221,7 +5329,9 @@ impl ShellCore {
                             .with_ink_token(if line_index == 0 {
                                 COLOR_TEXT_PRIMARY_TOKEN
                             } else {
-                                COLOR_TEXT_SECONDARY_TOKEN
+                                // Row sublabel is muted, quieter than the row name
+                                // (shell.css .row .r-sub). Was secondary.
+                                COLOR_TEXT_MUTED_TOKEN
                             }),
                         ]);
                 }
@@ -5245,7 +5355,9 @@ impl ShellCore {
                     } else if line_index == 0 {
                         COLOR_TEXT_PRIMARY_TOKEN
                     } else {
-                        COLOR_TEXT_SECONDARY_TOKEN
+                        // Row sublabel is muted, quieter than the row name
+                        // (shell.css .row .r-sub). Was secondary.
+                        COLOR_TEXT_MUTED_TOKEN
                     });
                 }
                 text.push(label);
@@ -5319,7 +5431,10 @@ impl ShellCore {
                     .with_ink_token(if selected {
                         COLOR_TEXT_INVERSE_TOKEN
                     } else {
-                        COLOR_TEXT_PRIMARY_TOKEN
+                        // Unselected segmented options recede to muted; only the
+                        // selected value sits at emphasis on its fill (shell.css
+                        // .seg .opt / .opt[data-state="selected"]). Was primary.
+                        COLOR_TEXT_MUTED_TOKEN
                     });
                     value_node.state.focused = false;
                     text.push(value_node);
@@ -5367,16 +5482,27 @@ impl ShellCore {
                     state_width,
                     state_height,
                     row_surface,
-                );
+                )
+                // The ON/OFF caption is part of the toggle's tonal hierarchy: ON at
+                // primary, OFF muted so the resting toggle never reads as emphasis
+                // (shell.css .toggle .t-state / [data-on="true"]). Was unset (→ primary).
+                .with_ink_token(if on {
+                    COLOR_TEXT_PRIMARY_TOKEN
+                } else {
+                    COLOR_TEXT_MUTED_TOKEN
+                });
                 state_node.state.focused = focused;
                 text.push(state_node);
                 let track_left = control_left + state_width + toggle_gap;
+                // OFF is an outlined transparent capsule; the accent fill is reserved
+                // for ON (shell.css .toggle .t-track / [data-on="true"] .t-track). A
+                // filled OFF slab made the resting toggle read as an active element.
                 let track_token = if on {
                     STATE_SELECTED_ACCENT_TOKEN
                 } else {
-                    COLOR_SURFACE_SUNKEN_TOKEN
+                    SCENE_TRANSPARENT_TOKEN
                 };
-                fills.push(node(
+                let mut track_node = node(
                     &format!("settings-toggle-{}-track", row.id),
                     Role::Group,
                     "",
@@ -5385,7 +5511,11 @@ impl ShellCore {
                     track_width,
                     track_height,
                     track_token,
-                ));
+                );
+                if !on {
+                    track_node = track_node.with_border(COLOR_BORDER_STRONG_TOKEN, 1.0);
+                }
+                fills.push(track_node);
                 let knob_left = control_left
                     + state_width
                     + toggle_gap
@@ -5397,7 +5527,9 @@ impl ShellCore {
                 let knob_token = if on {
                     COLOR_TEXT_INVERSE_TOKEN
                 } else {
-                    COLOR_TEXT_PRIMARY_TOKEN
+                    // The OFF knob must not be the brightest element on the row;
+                    // it recedes to muted (shell.css .toggle .t-knob). Was primary.
+                    COLOR_TEXT_MUTED_TOKEN
                 };
                 fills.push(node(
                     &format!("settings-toggle-{}-knob", row.id),
@@ -5933,7 +6065,11 @@ impl ShellCore {
                     chip_top,
                     chip_width,
                     chip_height,
-                    STATE_SELECTED_ACCENT_TOKEN,
+                    // Read-only value chip is a quiet inset surface, NOT the accent
+                    // CTA fill (that is reserved for Continue). Sharing the CTA fill
+                    // was the accent inversion; the value text below becomes secondary
+                    // to sit on this surface instead of inverse-on-accent.
+                    COLOR_SURFACE_OVERLAY_TOKEN,
                 )
                 .with_border(
                     if focused {
@@ -5957,7 +6093,9 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Label)
-                .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
+                // Secondary on the quiet chip surface — inverse was for the removed
+                // accent fill it used to sit on.
+                .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
             );
             out.push(n);
             cursor += row_height + row_gap;
@@ -5987,14 +6125,13 @@ impl ShellCore {
             cursor,
             content_width,
             continue_height,
-            STATE_SELECTED_ACCENT_TOKEN,
+            // The single accent CTA on first-run: lamplight fill (#F3DFAE =
+            // --color-focus-ring), not the quieter --qc-select the value chips
+            // used to share.
+            STATE_FOCUSED_RING_TOKEN,
         )
         .with_border(
-            if self.focus == rows.len() {
-                STATE_FOCUSED_RING_TOKEN
-            } else {
-                STATE_SELECTED_ACCENT_TOKEN
-            },
+            STATE_FOCUSED_RING_TOKEN,
             if self.focus == rows.len() { 2.0 } else { 0.0 },
         )
         .with_ink_token("--scene-overlay-role");
@@ -6852,7 +6989,10 @@ fn plate_art_nodes(
                 title_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Label),
+            .with_type_role(TypeRole::Label)
+            // Identity-plate card label reads at secondary, not emphasis
+            // (shell.css .card .label). Was unset (→ primary).
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         );
     }
     nodes
@@ -6917,7 +7057,14 @@ fn art_nodes(
                 title_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Label),
+            .with_type_role(TypeRole::Label)
+            // Card label: focused at primary, otherwise secondary (shell.css
+            // .card .label). Was unset (→ primary), collapsing the ramp.
+            .with_ink_token(if focused {
+                COLOR_TEXT_PRIMARY_TOKEN
+            } else {
+                COLOR_TEXT_SECONDARY_TOKEN
+            }),
         ];
     }
     let _ = focused;
@@ -7001,7 +7148,10 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption),
+            .with_type_role(TypeRole::Caption)
+            // Availability badge is secondary text on its scrim, not emphasis
+            // (shell.css .card[data-state="unavailable"] .badge). Was unset (→ primary).
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         ));
         if show_reason {
             let reason = scale_aware_single_line("⊘ Network required", width, text_scale);
@@ -7017,7 +7167,10 @@ fn add_unavailable_card_cues(
                     reason_height,
                     COLOR_SURFACE_CANVAS_TOKEN,
                 )
-                .with_type_role(TypeRole::Caption),
+                .with_type_role(TypeRole::Caption)
+                // The card availability sublabel is muted (shell.css .card .sub).
+                // Was unset (→ primary).
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
         }
     }
@@ -7040,7 +7193,10 @@ fn add_unavailable_card_cues(
                 badge_height,
                 COLOR_SURFACE_CANVAS_TOKEN,
             )
-            .with_type_role(TypeRole::Caption),
+            .with_type_role(TypeRole::Caption)
+            // Availability badge is secondary text on its scrim, not emphasis
+            // (shell.css .card[data-state="unavailable"] .badge). Was unset (→ primary).
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
         ));
         return;
     }
@@ -7129,7 +7285,10 @@ fn add_unavailable_card_cues(
             reason_height,
             COLOR_SURFACE_CANVAS_TOKEN,
         )
-        .with_type_role(TypeRole::Caption),
+        .with_type_role(TypeRole::Caption)
+        // The card availability sublabel is muted (shell.css .card .sub).
+        // Was unset (→ primary).
+        .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
     );
 }
 
@@ -8902,15 +9061,28 @@ mod tests {
                     .iter()
                     .any(|child| child.id.as_str().ends_with("-value-chip"))
         }));
+        // The single filled CTA is Continue, and its fill is the lamplight accent
+        // (--color-focus-ring / #F3DFAE), not the quieter --qc-select the read-only
+        // value chips used to share (Family-A accent inversion).
         assert_eq!(
             nodes
                 .iter()
                 .filter(|node| {
-                    node.action.is_some() && node.style_token == STATE_SELECTED_ACCENT_TOKEN
+                    node.action.is_some() && node.style_token == STATE_FOCUSED_RING_TOKEN
                 })
                 .count(),
             1,
             "Continue is the only filled primary action"
+        );
+        assert!(
+            nodes
+                .iter()
+                .filter(|node| node.id.as_str().ends_with("-value-chip"))
+                .all(|node| {
+                    node.style_token != STATE_FOCUSED_RING_TOKEN
+                        && node.style_token != STATE_SELECTED_ACCENT_TOKEN
+                }),
+            "read-only value chips must not carry the accent CTA fill"
         );
         assert!(find("continue-keycap-start").is_some());
         assert!(find("safe-return-teach").is_some_and(|node| node.action.is_none()));
@@ -8963,9 +9135,11 @@ mod tests {
                 resting_title.ink_token.as_deref(),
                 Some(COLOR_TEXT_PRIMARY_TOKEN)
             );
+            // Row sublabel is muted, quieter than its primary row name
+            // (shell.css .row .r-sub) — was secondary before the Family-A fix.
             assert_eq!(
                 resting_caption.ink_token.as_deref(),
-                Some(COLOR_TEXT_SECONDARY_TOKEN)
+                Some(COLOR_TEXT_MUTED_TOKEN)
             );
 
             core.enter_settings_rows();
@@ -9009,12 +9183,14 @@ mod tests {
                 assert_eq!(chip.state.selected, value == effective);
                 let value_text =
                     find(scene.root(), &format!("settings-text-scale-value-{value}")).unwrap();
+                // Selected segment value is inverse on its accent fill; unselected
+                // options recede to muted (shell.css .seg .opt) — were primary.
                 assert_eq!(
                     value_text.ink_token.as_deref(),
                     Some(if value == effective {
                         COLOR_TEXT_INVERSE_TOKEN
                     } else {
-                        COLOR_TEXT_PRIMARY_TOKEN
+                        COLOR_TEXT_MUTED_TOKEN
                     })
                 );
             }
@@ -9251,6 +9427,139 @@ mod tests {
         );
         assert!(row.action.is_none());
         assert_ne!(row.style_token, STATE_REST_SURFACE_TOKEN);
+    }
+
+    /// Family-A tonal guard: the Quiet Console text ramp is muted (i2) < secondary
+    /// (i1) < emphasis/primary (i0), and every named secondary/muted role must render
+    /// at or below its tier ceiling — never at emphasis. Before the role-wiring fix,
+    /// these nodes carried no ink token and fell back through the renderer default
+    /// (`--state-rest-text` = primary), so this test is RED on the pre-fix tree and
+    /// GREEN after. It resolves each node's EFFECTIVE ink exactly as pf-render does
+    /// (disabled → ink_token → unavailable → focused → rest-text) and compares real
+    /// resolved luminance, so it stays honest if a token is ever remapped.
+    #[test]
+    fn tonal_text_hierarchy_roles_render_at_or_below_their_tier() {
+        fn luminance(hex: &str) -> f64 {
+            let channel = |offset| {
+                let value =
+                    f64::from(u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap()) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+        }
+        // Mirror of pf-render's resolved_text_ink_token: the color a text node
+        // actually paints when no explicit ink token is set falls through to primary.
+        fn effective_ink(node: &Node) -> &str {
+            if node.state.disabled {
+                design_generated::STATE_DISABLED_TEXT_TOKEN
+            } else if let Some(token) = node.ink_token.as_deref() {
+                token
+            } else if node.state.unavailable {
+                STATE_UNAVAILABLE_TEXT_TOKEN
+            } else if node.state.focused {
+                STATE_FOCUSED_TEXT_TOKEN
+            } else {
+                STATE_REST_TEXT_TOKEN
+            }
+        }
+        let theme = pf_theme::flagship();
+        let token_l = |token: &str| luminance(&theme.resolve(Base::Dusk, token).unwrap());
+        let muted = token_l(COLOR_TEXT_MUTED_TOKEN);
+        let secondary = token_l(COLOR_TEXT_SECONDARY_TOKEN);
+        let primary = token_l(COLOR_TEXT_PRIMARY_TOKEN);
+        assert!(
+            muted < secondary && secondary < primary,
+            "three-tier text ramp must hold: muted={muted} secondary={secondary} primary={primary}"
+        );
+        // A muted role sits below the muted/secondary midpoint; a secondary role
+        // below the secondary/primary midpoint (and, checked per case, above muted).
+        let muted_ceiling = f64::midpoint(muted, secondary);
+        let secondary_ceiling = f64::midpoint(secondary, primary);
+        let ink_l = |node: &Node| luminance(&theme.resolve(Base::Dusk, effective_ink(node)).unwrap());
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let assert_muted = |node: &Node, what: &str| {
+            assert!(
+                ink_l(node) <= muted_ceiling,
+                "{what} must be muted (<= {muted_ceiling}), got {} (token {:?})",
+                ink_l(node),
+                effective_ink(node)
+            );
+        };
+        let assert_secondary = |node: &Node, what: &str| {
+            let l = ink_l(node);
+            assert!(
+                l > muted_ceiling && l <= secondary_ceiling,
+                "{what} must be secondary ({muted_ceiling} < l <= {secondary_ceiling}), got {l} (token {:?})",
+                effective_ink(node)
+            );
+        };
+
+        // ---- Home ----------------------------------------------------------
+        let home = core().scene(metrics, "").unwrap();
+        let hn = |id: &str| node_by_id(home.root(), id).unwrap_or_else(|| panic!("home node {id}"));
+        // The current room reads at emphasis; an inactive room must be strictly quieter
+        // (the active/inactive distinction the collapse had erased).
+        assert!(
+            ink_l(hn("room-library")) < ink_l(hn("room-home")),
+            "inactive nav room must be quieter than the active one"
+        );
+        assert_muted(hn("home-shelf-label"), "READY NOW shelf label");
+        // Hero meta line: only the status lead carries the state hue; the trailing
+        // meta run is warm-neutral secondary, not emphasis.
+        assert_secondary(hn("hero-status-meta"), "hero meta trailing run");
+
+        // ---- Details (breadcrumb + description are the correct reference) ---
+        let mut ready = variant("native", "ready-app", Availability::Ready);
+        ready.provenance.provider_id = "ready-provider".into();
+        ready.provenance.app_version = Some("2.4".into());
+        let mut details = fixture_core(vec![item("mixed", "Mixed Game", vec![ready])]);
+        details.selected_item = Some(0);
+        details.go(Route::Details);
+        let detail = details.scene(metrics, "").unwrap();
+        let dn = |id: &str| node_by_id(detail.root(), id).unwrap_or_else(|| panic!("detail node {id}"));
+        assert_muted(dn("detail-provenance"), "breadcrumb (reference)");
+        assert_muted(dn("detail-ways-heading"), "WAYS TO PLAY label");
+        assert_muted(dn("detail-variant-0-sub"), "option-card subtitle");
+        assert_muted(dn("detail-fact-developer-heading"), "fact label");
+        assert_secondary(dn("detail-fact-developer"), "fact value");
+
+        // ---- Library -------------------------------------------------------
+        let mut library = fixture_core(vec![
+            item("alpha", "Alpha", vec![variant("a", "a-app", Availability::Ready)]),
+            item("beta", "Beta", vec![variant("b", "b-app", Availability::Ready)]),
+        ]);
+        library.go(Route::Library);
+        let lib = library.scene(metrics, "").unwrap();
+        let ln = |id: &str| node_by_id(lib.root(), id).unwrap_or_else(|| panic!("library node {id}"));
+        assert_muted(ln("library-search-placeholder"), "search placeholder");
+        assert_muted(ln("library-filter-2-count"), "Games chip count");
+        assert_secondary(ln("library-title-alpha"), "unfocused card title");
+
+        // ---- Settings ------------------------------------------------------
+        let mut settings = core();
+        settings.load_preferences(&preferences(true), true).unwrap();
+        settings.go(Route::Settings);
+        let set = settings_scene(&settings);
+        let sn = |id: &str| node_by_id(set.root(), id).unwrap_or_else(|| panic!("settings node {id}"));
+        // Row name at emphasis, its sublabel muted (the two must not collapse).
+        let name = sn("settings-row-accessibility-textScale-line-0");
+        let sub = sn("settings-row-accessibility-textScale-line-1");
+        assert!(
+            ink_l(name) > secondary_ceiling,
+            "settings row name must stay at emphasis, got {}",
+            ink_l(name)
+        );
+        assert_muted(sub, "settings row sublabel");
     }
 
     #[test]
@@ -14144,7 +14453,9 @@ mod tests {
             .unwrap();
         for (id, role) in [
             ("hero-title", Role::Heading),
-            ("hero-status", Role::Text),
+            // hero-status is now a Group carrying the full accessible label, with a
+            // status-hue lead run + secondary meta run as children (Family-A split).
+            ("hero-status", Role::Group),
             ("home-shelf-label", Role::Heading),
             ("status-cluster", Role::Text),
         ] {

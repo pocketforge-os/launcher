@@ -3944,6 +3944,7 @@ impl ShellCore {
                 };
                 let painted_label =
                     scale_aware_single_line(&full_label, available_label_width, self.text_scale);
+                let chip_radius = RADIUS_M * f32::from(self.text_scale) / 100.0;
                 let mut chip = node(
                     &format!("library-filter-{index}"),
                     Role::Button,
@@ -3955,53 +3956,44 @@ impl ShellCore {
                     toolbar_top + chip_row as f32 * (chip_height + chip_row_gap),
                     chip_width,
                     chip_height,
-                    STATE_REST_SURFACE_TOKEN,
+                    // Selected chip fills with the warm accent; the inner-surface layer
+                    // below re-covers all but the ramped bottom underline (shell.css
+                    // .chip[data-state="selected"] inset 0 -3px 0 accent). Selection is a
+                    // bottom underline, NOT the renderer's built-in state.selected LEFT
+                    // bar — setting state.selected here is what produced the bright L-frame
+                    // (left rule + bottom bar) the owner flagged.
+                    if active {
+                        STATE_SELECTED_ACCENT_TOKEN
+                    } else {
+                        STATE_REST_SURFACE_TOKEN
+                    },
                 );
                 chip.state.focused = focused;
-                chip.state.selected = active;
                 chip.action = Some(NodeAction::Activate);
-                if active {
-                    for (edge, x, y, width, height) in [
-                        (
-                            "top",
-                            chip.bounds.x,
-                            chip.bounds.y,
-                            chip.bounds.width,
-                            CHIP_BORDER_WIDTH,
-                        ),
-                        (
-                            "right",
-                            chip.bounds.x + chip.bounds.width - CHIP_BORDER_WIDTH,
-                            chip.bounds.y,
-                            CHIP_BORDER_WIDTH,
-                            chip.bounds.height,
-                        ),
-                        (
-                            "bottom",
-                            chip.bounds.x,
-                            chip.bounds.y + chip.bounds.height - CHIP_BORDER_WIDTH,
-                            chip.bounds.width,
-                            CHIP_BORDER_WIDTH,
-                        ),
-                        (
-                            "left",
-                            chip.bounds.x,
-                            chip.bounds.y,
-                            CHIP_BORDER_WIDTH,
-                            chip.bounds.height,
-                        ),
-                    ] {
-                        chip.children.push(node(
-                            &format!("library-filter-{index}-border-{edge}"),
-                            Role::Group,
-                            "",
-                            x,
-                            y,
-                            width,
-                            height,
-                            COLOR_BORDER_STRONG_TOKEN,
-                        ));
+                chip.corner_radius = chip_radius;
+                // Rounded strong border when selected, rounded hairline otherwise
+                // (shell.css .chip / .chip[data-state="selected"] border-color). Replaces
+                // the four square-cornered per-edge border nodes that boxed the chip.
+                chip.border_token = Some(
+                    if active {
+                        COLOR_BORDER_STRONG_TOKEN
+                    } else {
+                        COLOR_BORDER_HAIRLINE_TOKEN
                     }
+                    .into(),
+                );
+                chip.border_width = CHIP_BORDER_WIDTH;
+                if active {
+                    chip.children.push(selected_underline_inner(
+                        &format!("library-filter-{index}-underline"),
+                        chip.bounds.x,
+                        chip.bounds.y,
+                        chip.bounds.width,
+                        chip.bounds.height,
+                        chip_radius,
+                        CHIP_BORDER_WIDTH,
+                        STATE_REST_SURFACE_TOKEN,
+                    ));
                 }
                 chip.children.push({
                     let mut label_node = node(
@@ -4016,7 +4008,11 @@ impl ShellCore {
                         } else {
                             scaled_text_box_height(28.0, self.text_scale)
                         },
-                        chip.style_token.as_str(),
+                        // Declares the rest-surface background it paints over — the chip's own
+                        // fill when inactive, or the inner-surface underlay when selected (both
+                        // rest-surface) — so the legibility guard can validate the ink pairing.
+                        // (Never the accent fill of a selected chip; the label sits above it.)
+                        STATE_REST_SURFACE_TOKEN,
                     )
                     .with_type_role(TypeRole::Label)
                     // Selected filter reads at primary; the rest recede to secondary
@@ -4044,7 +4040,7 @@ impl ShellCore {
                             } else {
                                 scaled_text_box_height(28.0, self.text_scale)
                             },
-                            chip.style_token.as_str(),
+                            STATE_REST_SURFACE_TOKEN,
                         )
                         .with_type_role(TypeRole::Label)
                         // The count is always muted, quieter than its label
@@ -4055,19 +4051,6 @@ impl ShellCore {
                     });
                 }
                 out.push(chip);
-                if active {
-                    out.push(node(
-                        &format!("library-selected-underline-{index}"),
-                        Role::Group,
-                        "",
-                        chip_x + CHIP_BORDER_WIDTH,
-                        toolbar_top + chip_row as f32 * (chip_height + chip_row_gap) + chip_height
-                            - 3.0,
-                        chip_width - 2.0 * CHIP_BORDER_WIDTH,
-                        3.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
-                    ));
-                }
             }
             let library_title_height = scaled_text_box_height(34.0, self.text_scale);
             // The reason caption follows the scaled title. Reserve that complete
@@ -4257,13 +4240,13 @@ impl ShellCore {
             .with_corner_radius(RADIUS_M * scale)
             .with_elevation(Elevation::Elev2);
             search_box.state.focused = self.search_results.is_empty();
+            // Focus is the renderer's single offset ring + glow (state.focused); the box
+            // keeps its resting hairline border underneath rather than a second, inset
+            // ring-colored border (which read as a heavier standalone ring).
+            search_box.border_token = Some(COLOR_BORDER_HAIRLINE_TOKEN.into());
+            search_box.border_width = 1.0;
             if search_box.state.focused {
-                search_box.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
-                search_box.border_width = 2.0;
                 search_box.action = Some(NodeAction::Custom("Search".into()));
-            } else {
-                search_box.border_token = Some(COLOR_BORDER_HAIRLINE_TOKEN.into());
-                search_box.border_width = 1.0;
             }
             out.push(search_box);
             let hint_top = search_top + search_height + SPACE_2 * scale;
@@ -4408,11 +4391,9 @@ impl ShellCore {
                     .with_type_role(TypeRole::Caption)
                     .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                 ]);
+                // Focus is the renderer's single offset ring + glow (state.focused), not an
+                // inset ring-colored border layered on top of it.
                 row.state.focused = self.focus == result;
-                if row.state.focused {
-                    row.border_token = Some(STATE_FOCUSED_RING_TOKEN.into());
-                    row.border_width = 2.0;
-                }
                 row.action = Some(NodeAction::Activate);
                 results_region.children.push(row);
             }
@@ -4638,9 +4619,14 @@ impl ShellCore {
                         !matches!(variant.availability, Availability::Ready);
                     let selected = Some(variant_index) == active_ready_variant;
                     variant_node.state.selected = selected;
+                    // Selected variant: strong border + the renderer's 3px left accent bar
+                    // (state.selected) + the ✓ mark (shell.css .variant[data-state=selected]
+                    // border-color: border-strong; inset 3px 0 0 accent). Focus is the offset
+                    // ring (state.focused), NOT an accent-colored border box — the border no
+                    // longer turns accent on focus.
                     variant_node = variant_node.with_border(
-                        if focused || selected {
-                            STATE_SELECTED_ACCENT_TOKEN
+                        if selected {
+                            COLOR_BORDER_STRONG_TOKEN
                         } else {
                             COLOR_BORDER_HAIRLINE_TOKEN
                         },
@@ -5121,12 +5107,17 @@ impl ShellCore {
                     },
                 );
                 nav.state.focused = focused;
-                nav.state.selected = selected && !focused;
+                // The current section carries the renderer's 3px edge-flush warm accent bar
+                // (state.selected) whether or not it also holds focus — was suppressed while
+                // focused (`&& !focused`), which dropped the bar exactly when the item was
+                // navigated. The bar replaces the faked `▌` near-white glyph the label used
+                // to prepend (shell.css .set-nav .item[data-current] inset 3px 0 0 accent).
+                nav.state.selected = selected;
                 nav.action = Some(NodeAction::Activate);
                 let mut nav_label = node(
                     &format!("settings-nav-{}-label", name.to_ascii_lowercase()),
                     Role::Text,
-                    &format!("{} {name}", if selected { "▌" } else { " " }),
+                    name,
                     nav.bounds.x + nav_label_inset,
                     nav.bounds.y + (nav.bounds.height - nav_label_height) / 2.0,
                     nav.bounds.width - 2.0 * nav_label_inset,
@@ -5389,6 +5380,7 @@ impl ShellCore {
                     let x = control_left + segment_widths[..segment].iter().sum::<f32>();
                     let segment_width = segment_widths[segment];
                     let value_width = value_widths[segment];
+                    let segment_radius = RADIUS_S * scale;
                     let mut chip = node(
                         &format!("settings-text-scale-chip-{value}"),
                         Role::Group,
@@ -5397,22 +5389,31 @@ impl ShellCore {
                         control_top,
                         segment_width - 4.0,
                         control_height,
+                        // Active segment: warm accent base for the ramped bottom underline;
+                        // the inner overlay layer re-covers all but that band (shell.css
+                        // .seg .opt[data-state="selected"] surface-overlay + inset 0 -3px 0
+                        // accent). Was a SOLID accent flood with inverted dark text — the
+                        // segment now keeps a light label on a subtle fill, full-height.
                         if selected {
                             STATE_SELECTED_ACCENT_TOKEN
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
                     )
-                    .with_corner_radius(RADIUS_S * scale)
-                    .with_border(
-                        if focused && selected {
-                            STATE_FOCUSED_RING_TOKEN
-                        } else {
-                            COLOR_BORDER_HAIRLINE_TOKEN
-                        },
-                        if focused && selected { 2.0 } else { 1.0 },
-                    );
-                    chip.state.selected = selected;
+                    .with_corner_radius(segment_radius)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
+                    if selected {
+                        chip.children.push(selected_underline_inner(
+                            &format!("settings-text-scale-chip-{value}-underline"),
+                            chip.bounds.x,
+                            chip.bounds.y,
+                            chip.bounds.width,
+                            chip.bounds.height,
+                            segment_radius,
+                            1.0,
+                            COLOR_SURFACE_OVERLAY_TOKEN,
+                        ));
+                    }
                     fills.push(chip);
                     let mut value_node = node(
                         &format!("settings-text-scale-value-{value}"),
@@ -5422,18 +5423,21 @@ impl ShellCore {
                         scene_row.bounds.y + 24.0 * scale,
                         value_width,
                         scaled_text_box_height(26.0, self.text_scale),
+                        // Declares the surface the value paints over — the overlay underlay of
+                        // the active segment, or the resting surface otherwise — for the ink
+                        // pairing guard (never the accent underline base beneath it).
                         if selected {
-                            STATE_SELECTED_ACCENT_TOKEN
+                            COLOR_SURFACE_OVERLAY_TOKEN
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
                     )
                     .with_ink_token(if selected {
-                        COLOR_TEXT_INVERSE_TOKEN
+                        // The active option's label stays LIGHT on its subtle fill — never
+                        // inverted-on-accent (shell.css .seg .opt[data-state="selected"]).
+                        COLOR_TEXT_PRIMARY_TOKEN
                     } else {
-                        // Unselected segmented options recede to muted; only the
-                        // selected value sits at emphasis on its fill (shell.css
-                        // .seg .opt / .opt[data-state="selected"]). Was primary.
+                        // Unselected segmented options recede to muted (shell.css .seg .opt).
                         COLOR_TEXT_MUTED_TOKEN
                     });
                     value_node.state.focused = false;
@@ -6023,14 +6027,11 @@ impl ShellCore {
                 row_height,
                 STATE_REST_SURFACE_TOKEN,
             )
-            .with_border(
-                if focused {
-                    STATE_FOCUSED_RING_TOKEN
-                } else {
-                    COLOR_BORDER_HAIRLINE_TOKEN
-                },
-                if focused { 2.0 } else { 1.0 },
-            )
+            // The focused row owns the single ring (renderer offset ring + glow via
+            // state.focused); it keeps a resting hairline border rather than a second
+            // ring-colored border here AND another on its value chip — the duplicated
+            // concentric ring (row + inner chip) the sweep flagged.
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
             .with_ink_token("--scene-overlay-role");
             n.state.focused = focused;
             n.action = Some(NodeAction::Activate);
@@ -6071,14 +6072,10 @@ impl ShellCore {
                     // to sit on this surface instead of inverse-on-accent.
                     COLOR_SURFACE_OVERLAY_TOKEN,
                 )
-                .with_border(
-                    if focused {
-                        STATE_FOCUSED_RING_TOKEN
-                    } else {
-                        COLOR_BORDER_HAIRLINE_TOKEN
-                    },
-                    if focused { 2.0 } else { 1.0 },
-                )
+                // The value chip is a quiet inset surface, never a second focus ring: the
+                // focused row above owns the single ring, so the chip keeps a plain hairline
+                // border regardless of focus (was the inner half of the duplicated ring).
+                .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
                 .with_ink_token("--scene-overlay-role"),
             );
             n.children.push(
@@ -6130,11 +6127,9 @@ impl ShellCore {
             // used to share.
             STATE_FOCUSED_RING_TOKEN,
         )
-        .with_border(
-            STATE_FOCUSED_RING_TOKEN,
-            if self.focus == rows.len() { 2.0 } else { 0.0 },
-        )
         .with_ink_token("--scene-overlay-role");
+        // Focus is the renderer's offset ring + glow (state.focused). A ring-colored border
+        // on the ring-colored CTA fill was invisible and redundant with that ring.
         continue_node.state.focused = self.focus == rows.len();
         continue_node.action = Some(NodeAction::Activate);
         continue_node.children.push(
@@ -6242,14 +6237,10 @@ impl ShellCore {
                 row_height,
                 STATE_REST_SURFACE_TOKEN,
             )
-            .with_border(
-                if focused {
-                    STATE_FOCUSED_RING_TOKEN
-                } else {
-                    COLOR_BORDER_HAIRLINE_TOKEN
-                },
-                if focused { 2.0 } else { 1.0 },
-            );
+            // Single focus ring + glow from the renderer (state.focused); the resting
+            // hairline border stays underneath rather than becoming a second concentric
+            // ring-colored border (the double-ring, no-glow quick row the sweep flagged).
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
             row.state.focused = focused;
             row.state.disabled = !enabled;
             if enabled {
@@ -6355,14 +6346,9 @@ impl ShellCore {
                 row_height,
                 STATE_REST_SURFACE_TOKEN,
             )
-            .with_border(
-                if index == self.focus {
-                    STATE_FOCUSED_RING_TOKEN
-                } else {
-                    COLOR_BORDER_HAIRLINE_TOKEN
-                },
-                if index == self.focus { 2.0 } else { 1.0 },
-            );
+            // Single renderer focus ring + glow (state.focused); resting hairline border
+            // stays underneath rather than a second concentric ring-colored border.
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
             row.state.focused = index == self.focus;
             row.state.disabled = !enabled;
             if enabled {
@@ -6425,18 +6411,9 @@ impl ShellCore {
             row_height,
             STATE_REST_SURFACE_TOKEN,
         )
-        .with_border(
-            if screenshot_index == self.focus {
-                STATE_FOCUSED_RING_TOKEN
-            } else {
-                COLOR_BORDER_HAIRLINE_TOKEN
-            },
-            if screenshot_index == self.focus {
-                2.0
-            } else {
-                1.0
-            },
-        );
+        // Single renderer focus ring + glow (state.focused); resting hairline border
+        // stays underneath rather than a second concentric ring-colored border.
+        .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
         screenshot.state.focused = screenshot_index == self.focus;
         screenshot.action = Some(NodeAction::Activate);
         let screenshot_y = system_top + system_position as f32 * (row_height + gap);
@@ -7438,6 +7415,48 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+/// Thickness of the persistent-selection BOTTOM underline (shell.css `inset 0 -3px 0 accent`).
+const SELECTED_UNDERLINE_PX: f32 = 3.0;
+
+/// The persistent-selection BOTTOM underline, composed as a concentric inner-surface layer
+/// over an accent-filled, bordered container.
+///
+/// `--state-selected-accent` shows only as a warm band along the rounded bottom edge,
+/// ramping through the container's corner radius exactly like the mockup's
+/// `box-shadow: inset 0 -3px 0 accent`. The scene vocabulary has no per-edge border or
+/// inset-shadow primitive (the renderer's built-in `state.selected` accent is a fixed LEFT
+/// bar), so this two-layer form is the single systemic point every bottom-underline
+/// selection class routes through — the library filter chips and the text-size segmented
+/// control. The caller fills the container with `STATE_SELECTED_ACCENT_TOKEN`, sets its
+/// corner radius and border, and pushes this node as the FIRST child (so labels paint above
+/// it); this inner node re-covers the container everywhere except the bottom
+/// `SELECTED_UNDERLINE_PX`, leaving the accent visible only as the ramped underline.
+fn selected_underline_inner(
+    id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    border_width: f32,
+    surface_token: &str,
+) -> Node {
+    node(
+        id,
+        Role::Group,
+        "",
+        x + border_width,
+        y + border_width,
+        (width - 2.0 * border_width).max(0.0),
+        // Covers from the top inset down to SELECTED_UNDERLINE_PX above the bottom border, so
+        // exactly that band of accent shows just INSIDE the bottom border (shell.css
+        // `inset 0 -3px 0 accent` sitting within the rounded border).
+        (height - 2.0 * border_width - SELECTED_UNDERLINE_PX).max(0.0),
+        surface_token,
+    )
+    .with_corner_radius((radius - border_width).max(0.0))
 }
 
 /// Declares that wrapping is intentional for this absolute-positioned text node.
@@ -9160,6 +9179,10 @@ mod tests {
             for value in ["100%", "150%", "200%"] {
                 let chip =
                     find(scene.root(), &format!("settings-text-scale-chip-{value}")).unwrap();
+                // Active segment fills with the warm accent as the BASE for the bottom
+                // underline; the inner overlay layer re-covers all but that band, so the
+                // segment reads as a subtle overlay fill + ramped bottom accent — never a
+                // solid accent flood. Unselected segments stay on the resting surface.
                 assert_eq!(
                     chip.style_token,
                     if value == effective {
@@ -9168,27 +9191,33 @@ mod tests {
                         STATE_REST_SURFACE_TOKEN
                     }
                 );
+                // Every segment keeps a plain hairline border (no ring-colored border on the
+                // active one) and NEVER the renderer's left-bar accent (state.selected). The
+                // active segment carries the bottom-underline inner layer over the overlay fill.
                 assert_eq!(
                     chip.border_token.as_deref(),
-                    Some(if value == effective {
-                        STATE_FOCUSED_RING_TOKEN
-                    } else {
-                        COLOR_BORDER_HAIRLINE_TOKEN
-                    })
+                    Some(COLOR_BORDER_HAIRLINE_TOKEN)
                 );
+                assert!((chip.border_width - 1.0).abs() < f32::EPSILON);
                 assert!(
-                    (chip.border_width - if value == effective { 2.0 } else { 1.0 }).abs()
-                        < f32::EPSILON
+                    !chip.state.selected,
+                    "segment must not use the renderer left bar"
                 );
-                assert_eq!(chip.state.selected, value == effective);
+                let underline = find(chip, &format!("settings-text-scale-chip-{value}-underline"));
+                if value == effective {
+                    let inner = underline.expect("active segment has a bottom-underline layer");
+                    assert_eq!(inner.style_token, COLOR_SURFACE_OVERLAY_TOKEN);
+                } else {
+                    assert!(underline.is_none());
+                }
                 let value_text =
                     find(scene.root(), &format!("settings-text-scale-value-{value}")).unwrap();
-                // Selected segment value is inverse on its accent fill; unselected
-                // options recede to muted (shell.css .seg .opt) — were primary.
+                // The active option's label stays LIGHT (primary) on its subtle fill — never
+                // inverted-on-accent; unselected options recede to muted (shell.css .seg .opt).
                 assert_eq!(
                     value_text.ink_token.as_deref(),
                     Some(if value == effective {
-                        COLOR_TEXT_INVERSE_TOKEN
+                        COLOR_TEXT_PRIMARY_TOKEN
                     } else {
                         COLOR_TEXT_MUTED_TOKEN
                     })
@@ -14209,8 +14238,14 @@ mod tests {
         );
     }
 
+    // Red-first guard for the owner-flagged defect (tsp-op5a.391): the selected filter chip
+    // must read as the mockup's rounded chip with a BOTTOM underline that ramps through the
+    // corner radius — NOT the bright L-frame (full-height left rule + bottom bar + square box)
+    // it shipped as. The L-frame came from three things this asserts against: the renderer's
+    // built-in `state.selected` LEFT bar, four square per-edge border nodes, and a square
+    // bottom accent rect. This is red on that shipped treatment and green on the fix.
     #[test]
-    fn selected_library_chip_uses_uniform_strong_border_and_full_inner_accent() {
+    fn selected_library_chip_reads_as_a_rounded_bottom_underline_not_an_l_frame() {
         let mut core = fixture_core(vec![item(
             "item-0",
             "Item 0",
@@ -14230,20 +14265,47 @@ mod tests {
             )
             .unwrap();
         let chip = node_by_id(scene.root(), "library-filter-0").unwrap();
-        assert_eq!(chip.style_token, STATE_REST_SURFACE_TOKEN);
+        // No LEFT bar: the renderer's built-in state.selected accent is a left rule, so a
+        // selected chip must NOT carry it (that was the vertical half of the L-frame).
+        assert!(
+            !chip.state.selected,
+            "selected filter chip must not use the renderer's left-bar accent"
+        );
+        // A single ROUNDED strong border replaces the four square per-edge border nodes.
+        assert!(
+            chip.corner_radius > 0.0,
+            "the chip border must be rounded, not a square box"
+        );
+        assert_eq!(
+            chip.border_token.as_deref(),
+            Some(COLOR_BORDER_STRONG_TOKEN)
+        );
         for edge in ["top", "right", "bottom", "left"] {
-            assert_eq!(
-                node_by_id(chip, &format!("library-filter-0-border-{edge}"))
-                    .unwrap()
-                    .style_token,
-                COLOR_BORDER_STRONG_TOKEN
+            assert!(
+                node_by_id(chip, &format!("library-filter-0-border-{edge}")).is_none(),
+                "square per-edge border node {edge} must be gone (it made the square L-frame box)"
             );
         }
-        let accent = node_by_id(scene.root(), "library-selected-underline-0").unwrap();
-        assert!((accent.bounds.x - chip.bounds.x - CHIP_BORDER_WIDTH).abs() < f32::EPSILON);
+        // The bottom underline is a concentric inner-surface layer over the accent-filled
+        // chip: it re-covers everything except the bottom SELECTED_UNDERLINE_PX, so the warm
+        // accent shows ONLY as the ramped bottom band — never a left/right/top edge.
+        assert_eq!(chip.style_token, STATE_SELECTED_ACCENT_TOKEN);
+        let inner = node_by_id(chip, "library-filter-0-underline").unwrap();
+        assert_eq!(inner.style_token, STATE_REST_SURFACE_TOKEN);
+        assert!((inner.bounds.x - (chip.bounds.x + CHIP_BORDER_WIDTH)).abs() < f32::EPSILON);
+        assert!((inner.bounds.y - (chip.bounds.y + CHIP_BORDER_WIDTH)).abs() < f32::EPSILON);
+        let accent_band = (chip.bounds.y + chip.bounds.height - CHIP_BORDER_WIDTH)
+            - (inner.bounds.y + inner.bounds.height);
         assert!(
-            (accent.bounds.width - chip.bounds.width + 2.0 * CHIP_BORDER_WIDTH).abs()
-                < f32::EPSILON
+            (accent_band - SELECTED_UNDERLINE_PX).abs() < 0.01,
+            "exactly {SELECTED_UNDERLINE_PX}px of bottom accent must remain, got {accent_band}"
+        );
+        // The inner layer spans the full inner width — the accent never survives as a left or
+        // right vertical bar (the other half of the L-frame).
+        assert!(
+            (inner.bounds.width - (chip.bounds.width - 2.0 * CHIP_BORDER_WIDTH)).abs()
+                < f32::EPSILON,
+            "inner-surface must cover the full inner width so no side accent bar remains"
         );
     }
 
@@ -15864,7 +15926,9 @@ mod tests {
         core.go(Route::Library);
         core.focus = 5;
         let library = core.scene(metrics, "wrong caller footer").unwrap();
-        assert!(find(library.root(), "library-selected-underline-0").is_some());
+        // The selected filter chip's bottom underline is now the concentric inner-surface
+        // layer inside the chip (was a separate square `library-selected-underline-0` node).
+        assert!(find(library.root(), "library-filter-0-underline").is_some());
         assert!(find(library.root(), "room-library-underline").is_some());
         assert!(find(library.root(), "room-keycap-left-border").is_some());
         assert_eq!(
@@ -16665,11 +16729,18 @@ mod tests {
         assert!((panel.corner_radius - RADIUS_L).abs() < f32::EPSILON);
         let focused = node_by_id(unsupported_scene.root(), "quick-0").unwrap();
         assert_eq!(focused.style_token, STATE_REST_SURFACE_TOKEN);
+        // The focus cue is the renderer's single offset ring + glow (state.focused); the row
+        // keeps its resting hairline border rather than a second ring-colored border on top
+        // (the double concentric ring the sweep flagged).
+        assert!(
+            focused.state.focused,
+            "the focused quick row owns state.focused"
+        );
         assert_eq!(
             focused.border_token.as_deref(),
-            Some(STATE_FOCUSED_RING_TOKEN)
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
         );
-        assert!((focused.border_width - 2.0).abs() < f32::EPSILON);
+        assert!((focused.border_width - 1.0).abs() < f32::EPSILON);
         assert!((focused.corner_radius - RADIUS_M).abs() < f32::EPSILON);
         let prompts = node_by_id(unsupported_scene.root(), "prompts").unwrap();
         assert_eq!(prompts.role, Role::Group);

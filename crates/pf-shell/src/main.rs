@@ -5729,11 +5729,11 @@ mod durable_tests {
         }
         assert!(rows[0].state.focused);
         assert_eq!(rows[0].style_token, "--state-rest-surface");
-        assert_eq!(
-            rows[0].border_token.as_deref(),
-            Some("--state-focused-ring")
-        );
-        assert!((rows[0].border_width - 2.0).abs() < f32::EPSILON);
+        // The focus cue is the renderer's single offset ring + glow (state.focused); the
+        // result row no longer layers a second inset ring-colored border on top of it (the
+        // heavier standalone ring the sweep flagged).
+        assert_eq!(rows[0].border_token, None);
+        assert!((rows[0].border_width - 0.0).abs() < f32::EPSILON);
         let mut focused = Vec::new();
         collect_focused(root, &mut focused);
         assert_eq!(focused.len(), 1);

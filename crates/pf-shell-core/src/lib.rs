@@ -44,14 +44,14 @@ use design_generated::{
     COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
     COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN, COLOR_SURFACE_CANVAS_TOKEN,
     COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN, COLOR_SURFACE_SCRIM_TOKEN,
-    COLOR_TEXT_INVERSE_TOKEN,
-    COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN,
-    KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP,
-    LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL,
-    RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7,
-    STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN,
-    STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN,
-    STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
+    COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN,
+    COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH,
+    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
+    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2,
+    SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
+    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
+    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
+    STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -9479,7 +9479,8 @@ mod tests {
         // below the secondary/primary midpoint (and, checked per case, above muted).
         let muted_ceiling = f64::midpoint(muted, secondary);
         let secondary_ceiling = f64::midpoint(secondary, primary);
-        let ink_l = |node: &Node| luminance(&theme.resolve(Base::Dusk, effective_ink(node)).unwrap());
+        let ink_l =
+            |node: &Node| luminance(&theme.resolve(Base::Dusk, effective_ink(node)).unwrap());
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -9526,7 +9527,8 @@ mod tests {
         details.selected_item = Some(0);
         details.go(Route::Details);
         let detail = details.scene(metrics, "").unwrap();
-        let dn = |id: &str| node_by_id(detail.root(), id).unwrap_or_else(|| panic!("detail node {id}"));
+        let dn =
+            |id: &str| node_by_id(detail.root(), id).unwrap_or_else(|| panic!("detail node {id}"));
         assert_muted(dn("detail-provenance"), "breadcrumb (reference)");
         assert_muted(dn("detail-ways-heading"), "WAYS TO PLAY label");
         assert_muted(dn("detail-variant-0-sub"), "option-card subtitle");
@@ -9535,12 +9537,21 @@ mod tests {
 
         // ---- Library -------------------------------------------------------
         let mut library = fixture_core(vec![
-            item("alpha", "Alpha", vec![variant("a", "a-app", Availability::Ready)]),
-            item("beta", "Beta", vec![variant("b", "b-app", Availability::Ready)]),
+            item(
+                "alpha",
+                "Alpha",
+                vec![variant("a", "a-app", Availability::Ready)],
+            ),
+            item(
+                "beta",
+                "Beta",
+                vec![variant("b", "b-app", Availability::Ready)],
+            ),
         ]);
         library.go(Route::Library);
         let lib = library.scene(metrics, "").unwrap();
-        let ln = |id: &str| node_by_id(lib.root(), id).unwrap_or_else(|| panic!("library node {id}"));
+        let ln =
+            |id: &str| node_by_id(lib.root(), id).unwrap_or_else(|| panic!("library node {id}"));
         assert_muted(ln("library-search-placeholder"), "search placeholder");
         assert_muted(ln("library-filter-2-count"), "Games chip count");
         assert_secondary(ln("library-title-alpha"), "unfocused card title");
@@ -9550,7 +9561,8 @@ mod tests {
         settings.load_preferences(&preferences(true), true).unwrap();
         settings.go(Route::Settings);
         let set = settings_scene(&settings);
-        let sn = |id: &str| node_by_id(set.root(), id).unwrap_or_else(|| panic!("settings node {id}"));
+        let sn =
+            |id: &str| node_by_id(set.root(), id).unwrap_or_else(|| panic!("settings node {id}"));
         // Row name at emphasis, its sublabel muted (the two must not collapse).
         let name = sn("settings-row-accessibility-textScale-line-0");
         let sub = sn("settings-row-accessibility-textScale-line-1");

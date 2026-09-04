@@ -9435,7 +9435,7 @@ mod tests {
     /// these nodes carried no ink token and fell back through the renderer default
     /// (`--state-rest-text` = primary), so this test is RED on the pre-fix tree and
     /// GREEN after. It resolves each node's EFFECTIVE ink exactly as pf-render does
-    /// (disabled → ink_token → unavailable → focused → rest-text) and compares real
+    /// (disabled → `ink_token` → unavailable → focused → rest-text) and compares real
     /// resolved luminance, so it stays honest if a token is ever remapped.
     #[test]
     fn tonal_text_hierarchy_roles_render_at_or_below_their_tier() {
@@ -9467,7 +9467,7 @@ mod tests {
             }
         }
         let theme = pf_theme::flagship();
-        let token_l = |token: &str| luminance(&theme.resolve(Base::Dusk, token).unwrap());
+        let token_l = |token: &str| luminance(theme.resolve(Base::Dusk, token).unwrap());
         let muted = token_l(COLOR_TEXT_MUTED_TOKEN);
         let secondary = token_l(COLOR_TEXT_SECONDARY_TOKEN);
         let primary = token_l(COLOR_TEXT_PRIMARY_TOKEN);
@@ -9480,7 +9480,7 @@ mod tests {
         let muted_ceiling = f64::midpoint(muted, secondary);
         let secondary_ceiling = f64::midpoint(secondary, primary);
         let ink_l =
-            |node: &Node| luminance(&theme.resolve(Base::Dusk, effective_ink(node)).unwrap());
+            |node: &Node| luminance(theme.resolve(Base::Dusk, effective_ink(node)).unwrap());
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,

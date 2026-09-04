@@ -6163,7 +6163,7 @@ mod durable_tests {
             .find(|node| node.id.as_str() == "item-steam-link")
             .unwrap();
         assert!(steam.children.iter().any(|node| {
-            node.id.as_str() == "home-card-badge-steam-link" && node.accessible_label == "⊘ Network"
+            node.id.as_str() == "home-card-badge-steam-link" && node.accessible_label == "⊕ Network"
         }));
         assert!(steam.children.iter().any(|node| {
             node.id.as_str() == "home-card-reason-steam-link"

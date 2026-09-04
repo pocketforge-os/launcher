@@ -156,6 +156,70 @@ fn chrome_row_bottom(safe_top: f32, text_scale: u16) -> f32 {
     safe_top + STATUS_BAR_HEIGHT.max(16.0 + scaled_text_box_height(32.0, text_scale))
 }
 
+/// The design's status dot is a drawn `.status .dot` element (shell.css: an 8px pill
+/// disc reinforcing the status word), NOT a font glyph. `●` (U+25CF) exists only in
+/// the CJK fallback face and paints ~11-14px, sitting off the text midline; a filled
+/// Group disc is the deterministic, theme-token-colored 8px cue the mockups pin,
+/// centered on the phrase's optical midline.
+const STATUS_DOT_DIAMETER: f32 = 8.0;
+/// The one optical centerline every status-bar chrome item (wifi glyph, battery
+/// capsule, and the battery%/clock text) is centered on, so all sit within 1px of
+/// each other. Empirically the caption text's ink midline lands here at 100% scale;
+/// the icons are placed around it rather than each carrying its own hard-coded y.
+const STATUS_CLUSTER_CENTER_Y: f32 = 28.0;
+fn status_dot_node(id: &str, center_x: f32, center_y: f32, color_token: &str) -> Node {
+    node(
+        id,
+        Role::Group,
+        "",
+        center_x - STATUS_DOT_DIAMETER / 2.0,
+        center_y - STATUS_DOT_DIAMETER / 2.0,
+        STATUS_DOT_DIAMETER,
+        STATUS_DOT_DIAMETER,
+        color_token,
+    )
+    .with_corner_radius(STATUS_DOT_DIAMETER / 2.0)
+}
+
+/// The favorite pip (shell.css `.pip`): a scrim DISC with the favorite star centered
+/// inside. The star is a drawn glyph image, not the `★` (U+2605) codepoint — that
+/// codepoint exists only in the CJK fallback face, which paints it ~11px and pushed
+/// off the box centre (glyph bearing/baseline), so it sat high-right in the disc. A
+/// centered star image lands the mockup's ~8px star DEAD-CENTRE. One helper, so both
+/// the Home and Library card pips fix as a system. `star_ink` is the resolved
+/// `--state-selected-accent` for the active base (dark on Day, white in High Contrast).
+fn favorite_pin_node(item_id: &str, center_x: f32, center_y: f32, star_ink: [u8; 4]) -> Node {
+    const DISC: f32 = 20.0;
+    const STAR: f32 = 8.0;
+    let mut pip = node(
+        &format!("favorite-pin-{item_id}"),
+        Role::Group,
+        "Favorite",
+        center_x - DISC / 2.0,
+        center_y - DISC / 2.0,
+        DISC,
+        DISC,
+        COLOR_SURFACE_SCRIM_TOKEN,
+    )
+    .with_corner_radius(DISC / 2.0)
+    .with_fixed_paint_scale();
+    pip.children.push(
+        node(
+            &format!("favorite-star-{item_id}"),
+            Role::Group,
+            "",
+            center_x - STAR / 2.0,
+            center_y - STAR / 2.0,
+            STAR,
+            STAR,
+            SCENE_TRANSPARENT_TOKEN,
+        )
+        .with_image(star_glyph_source(star_ink), ImageFit::Contain)
+        .with_fixed_paint_scale(),
+    );
+    pip
+}
+
 fn system_status_group_left(
     surface_width: f32,
     text_scale: u16,
@@ -245,17 +309,6 @@ fn home_vertical_layout(text_scale: u16) -> HomeVerticalLayout {
         card_art_height,
         card_height,
         show_card_caption,
-    }
-}
-
-fn scaled_centered_text_box(base_width: f32, base_height: f32, text_scale: u16) -> (f32, f32) {
-    if text_scale == 100 {
-        (base_width, base_height)
-    } else {
-        (
-            measured_text_advance(base_width, text_scale),
-            scaled_text_box_height(base_height, text_scale),
-        )
     }
 }
 
@@ -900,6 +953,10 @@ pub struct ShellCore {
     just_returned: bool,
     motion_ms: u32,
     normal_motion_ms: u32,
+    /// The theme SUPPLIED to `boot` — glyph bitmaps resolve their ink against THIS theme
+    /// for the active base, so the drawn chrome (wifi/magnifier/star) follows the same
+    /// theme the scene nodes do instead of a process-static flagship.
+    theme: Theme,
     env_reduced_motion: bool,
     reduced_motion: bool,
     high_contrast: bool,
@@ -1061,6 +1118,7 @@ impl ShellCore {
                 .resolve_motion("launch", false)
                 .expect("motion.launch")
                 .duration_ms,
+            theme: theme.clone(),
             env_reduced_motion: reduced_motion,
             reduced_motion,
             high_contrast: false,
@@ -1550,6 +1608,10 @@ impl ShellCore {
     #[must_use]
     pub const fn reduce_flashing(&self) -> bool {
         self.reduce_flashing
+    }
+    /// Ink for a drawn chrome glyph, resolved against the SUPPLIED theme at the active base.
+    fn resolved_ink(&self, token: &str) -> [u8; 4] {
+        resolved_ink_from(&self.theme, self.theme_base(), token)
     }
 
     pub fn authority_snapshot(&mut self, recovery_available: bool) {
@@ -2945,55 +3007,56 @@ impl ShellCore {
                     "wifi-glyph",
                     Role::Group,
                     "Wi-Fi connected",
-                    w - 200.0,
-                    22.0,
-                    20.0,
-                    20.0,
+                    battery_x - 17.0,
+                    STATUS_CLUSTER_CENTER_Y - 3.5,
+                    9.0,
+                    7.0,
                     SCENE_TRANSPARENT_TOKEN,
                 )
-                .with_image(wifi_glyph_source(), ImageFit::Contain),
+                .with_image(
+                    wifi_glyph_source(self.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
+                    ImageFit::Contain,
+                ),
             );
         }
         if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
+            // A delicate OUTLINE capsule (mockup ~12x7) centered on the status
+            // centerline, not the near-solid filled block the four opaque rects drew.
+            // The outline is a 1px themed border on a transparent body; the charge is a
+            // small inner fill, and a short nub is the terminal.
+            let cy = STATUS_CLUSTER_CENTER_Y;
+            let level_width = (9.0 * f32::from(battery_percent) / 100.0).max(1.5);
             children.extend([
                 node(
                     "battery-outline",
                     Role::Group,
                     "Battery",
                     battery_x,
-                    24.0,
-                    24.0,
-                    14.0,
-                    COLOR_BORDER_STRONG_TOKEN,
-                ),
-                node(
-                    "battery-cavity",
-                    Role::Group,
-                    "",
-                    battery_x + 2.0,
-                    26.0,
-                    18.0,
-                    10.0,
-                    COLOR_SURFACE_RAISED_TOKEN,
-                ),
+                    cy - 3.5,
+                    12.0,
+                    7.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_border(COLOR_BORDER_STRONG_TOKEN, 1.0)
+                .with_corner_radius(1.5),
                 node(
                     "battery-level",
                     Role::Group,
                     "",
-                    battery_x + 3.0,
-                    27.0,
-                    16.0 * f32::from(battery_percent) / 100.0,
-                    8.0,
+                    battery_x + 1.5,
+                    cy - 1.5,
+                    level_width,
+                    3.0,
                     COLOR_TEXT_SECONDARY_TOKEN,
                 ),
                 node(
                     "battery-terminal",
                     Role::Group,
                     "",
-                    battery_x + 24.0,
-                    28.0,
-                    2.0,
-                    6.0,
+                    battery_x + 12.0,
+                    cy - 1.5,
+                    1.5,
+                    3.0,
                     COLOR_BORDER_STRONG_TOKEN,
                 ),
             ]);
@@ -3527,6 +3590,18 @@ impl ShellCore {
             } else {
                 COLOR_STATUS_STOPPED_TOKEN
             };
+            // The ready cue is a drawn GREEN dot (mockup ~8px), not the oversized `●`
+            // glyph the CJK fallback painted ~12px. When present, the dot replaces the
+            // leading "● " in the lead run and the lead text shifts right to clear it;
+            // the reserved lead-run WIDTH stays keyed to the original glyph phrase so
+            // the meta run keeps its position.
+            let ready_dot = status_lead.starts_with('●');
+            let lead_display = if ready_dot {
+                status_lead.strip_prefix("● ").unwrap_or(status_lead)
+            } else {
+                status_lead
+            };
+            let lead_offset = if ready_dot { 14.0 } else { 0.0 };
             // Reserve the lead run generously: the leading state glyph (● / ⊘) is
             // wider than the conservative label advance, so a tight box wraps it
             // (the single-line raster guard rejects that). SPACE_5 of slack keeps
@@ -3536,6 +3611,43 @@ impl ShellCore {
                 self.text_scale,
             )) + SPACE_5)
                 .min(hero_status_width);
+            let mut hero_status_children = Vec::new();
+            if ready_dot {
+                hero_status_children.push(status_dot_node(
+                    "hero-status-dot",
+                    48.0 + STATUS_DOT_DIAMETER / 2.0,
+                    vertical.status_y + hero_status_height * 0.44,
+                    COLOR_STATUS_READY_TOKEN,
+                ));
+            }
+            hero_status_children.push(
+                node(
+                    "hero-status-lead",
+                    Role::Text,
+                    lead_display,
+                    48.0 + lead_offset,
+                    vertical.status_y,
+                    (status_lead_width - lead_offset).max(0.0),
+                    hero_status_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(status_lead_ink),
+            );
+            hero_status_children.push(
+                node(
+                    "hero-status-meta",
+                    Role::Text,
+                    status_meta,
+                    48.0 + status_lead_width,
+                    vertical.status_y,
+                    (hero_status_width - status_lead_width).max(0.0),
+                    hero_status_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+            );
             content.extend([
                 node(
                     "hero-title",
@@ -3561,32 +3673,7 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Label)
-                .with_children(vec![
-                    node(
-                        "hero-status-lead",
-                        Role::Text,
-                        status_lead,
-                        48.0,
-                        vertical.status_y,
-                        status_lead_width,
-                        hero_status_height,
-                        SCENE_TRANSPARENT_TOKEN,
-                    )
-                    .with_type_role(TypeRole::Label)
-                    .with_ink_token(status_lead_ink),
-                    node(
-                        "hero-status-meta",
-                        Role::Text,
-                        status_meta,
-                        48.0 + status_lead_width,
-                        vertical.status_y,
-                        (hero_status_width - status_lead_width).max(0.0),
-                        hero_status_height,
-                        SCENE_TRANSPARENT_TOKEN,
-                    )
-                    .with_type_role(TypeRole::Label)
-                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
-                ]),
+                .with_children(hero_status_children),
             ]);
             let attention = self.attention_message.as_deref().or_else(|| {
                 (self.presentation == Presentation::ForcedClose)
@@ -3785,23 +3872,14 @@ impl ShellCore {
                 if item.favorite {
                     // The star is artwork inside the fixed card box, so accessible text
                     // scaling applies only to the caption/status carrier below the art.
-                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = x + card_width - 18.0;
                     let pin_center_y = vertical.card_row_y + 20.0;
-                    n.children.push(
-                        node(
-                            &format!("favorite-pin-{}", item.id),
-                            Role::Text,
-                            "★",
-                            pin_center_x - pin_width / 2.0,
-                            pin_center_y - pin_height / 2.0,
-                            pin_width,
-                            pin_height,
-                            COLOR_SURFACE_SCRIM_TOKEN,
-                        )
-                        .with_type_role(TypeRole::Caption)
-                        .with_fixed_paint_scale(),
-                    );
+                    n.children.push(favorite_pin_node(
+                        &item.id,
+                        pin_center_x,
+                        pin_center_y,
+                        self.resolved_ink(STATE_SELECTED_ACCENT_TOKEN),
+                    ));
                 }
                 content.push(n);
             }
@@ -3864,7 +3942,7 @@ impl ShellCore {
             let mut search = node(
                 "library-search",
                 Role::Button,
-                &format!("⌕  Search {} titles", self.items.len()),
+                &format!("Search {} titles", self.items.len()),
                 LIBRARY_SIDE_MARGIN,
                 library_head_top,
                 search_width,
@@ -3873,14 +3951,36 @@ impl ShellCore {
             );
             search.state.focused = self.focus == 0;
             search.action = Some(NodeAction::Activate);
+            // The magnifier is a drawn glyph image (shell.css g-search), NOT the tofu
+            // `⌕` codepoint the label used to carry — that codepoint is in neither
+            // bundled face. A 14px box, vertically centered in the field, thin ring +
+            // lower-left handle.
+            search.children.push(
+                node(
+                    "library-search-glyph",
+                    Role::Group,
+                    // Decorative — the containing button already announces "Search N
+                    // titles", so an empty label avoids a redundant "Search" readout.
+                    "",
+                    LIBRARY_SIDE_MARGIN + SPACE_4,
+                    library_head_top + (search_height - 14.0) / 2.0,
+                    14.0,
+                    14.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_image(
+                    magnifier_glyph_source(self.resolved_ink(COLOR_TEXT_MUTED_TOKEN)),
+                    ImageFit::Contain,
+                ),
+            );
             search.children.push(
                 node(
                     "library-search-placeholder",
                     Role::Text,
-                    &format!("⌕  Search {} titles", self.items.len()),
-                    LIBRARY_SIDE_MARGIN + SPACE_4,
+                    &format!("Search {} titles", self.items.len()),
+                    LIBRARY_SIDE_MARGIN + SPACE_4 + 22.0,
                     library_head_top + 8.0,
-                    search_width - 32.0,
+                    search_width - SPACE_4 - 22.0 - SPACE_4,
                     scaled_text_box_height(28.0, self.text_scale),
                     STATE_REST_SURFACE_TOKEN,
                 )
@@ -4162,23 +4262,14 @@ impl ShellCore {
                     art.state.focused = true;
                 }
                 if item.favorite {
-                    let (pin_width, pin_height) = scaled_centered_text_box(20.0, 20.0, 100);
                     let pin_center_x = card.bounds.x + geometry.card_width - 18.0;
                     let pin_center_y = card.bounds.y + 18.0;
-                    card.children.push(
-                        node(
-                            &format!("favorite-pin-{}", item.id),
-                            Role::Text,
-                            "★",
-                            pin_center_x - pin_width / 2.0,
-                            pin_center_y - pin_height / 2.0,
-                            pin_width,
-                            pin_height,
-                            COLOR_SURFACE_SCRIM_TOKEN,
-                        )
-                        .with_type_role(TypeRole::Caption)
-                        .with_fixed_paint_scale(),
-                    );
+                    card.children.push(favorite_pin_node(
+                        &item.id,
+                        pin_center_x,
+                        pin_center_y,
+                        self.resolved_ink(STATE_SELECTED_ACCENT_TOKEN),
+                    ));
                 }
                 let title_y = card.bounds.y + library_card_art_height + CARD_LABEL_GAP;
                 card.children.push(
@@ -4490,19 +4581,82 @@ impl ShellCore {
             };
             let availability_top = title_top + title_height + 6.0;
             let availability_height = scaled_text_box_height(30.0, self.text_scale);
-            let mut availability_node = node(
-                "detail-availability-reason",
-                Role::Text,
-                &availability,
-                detail_column_left,
-                availability_top,
-                detail_column_width,
-                availability_height,
-                COLOR_SURFACE_CANVAS_TOKEN,
-            );
-            availability_node.state.unavailable =
-                !matches!(detail_availability, Availability::Ready);
-            out.push(availability_node);
+            if matches!(detail_availability, Availability::Ready) {
+                // Split the ready phrase like Home's hero status (Family A): a GREEN
+                // status dot + "Ready" lead, then the "· facts" trailing run in
+                // secondary. The old single node carried no ink token, so the whole
+                // line — dot included — painted default cream instead of the ready
+                // green the mockup shows. The container keeps the id/style/bounds/label
+                // ("● Ready…") the detail tests pin; only its visual children change.
+                let phrase = availability.strip_prefix("● ").unwrap_or(&availability);
+                let (lead, meta) = phrase
+                    .split_once(" · ")
+                    .map_or((phrase, ""), |(lead, _)| (lead, &phrase[lead.len()..]));
+                let mut container = node(
+                    "detail-availability-reason",
+                    Role::Group,
+                    &availability,
+                    detail_column_left,
+                    availability_top,
+                    detail_column_width,
+                    availability_height,
+                    COLOR_SURFACE_CANVAS_TOKEN,
+                );
+                let lead_x = detail_column_left + 16.0;
+                let lead_width = (text_node_box_width(measured_text_advance(
+                    label_text_width(lead),
+                    self.text_scale,
+                )) + SPACE_5)
+                    .min(detail_column_width - 16.0);
+                container.children.push(status_dot_node(
+                    "detail-availability-dot",
+                    detail_column_left + STATUS_DOT_DIAMETER / 2.0,
+                    availability_top + availability_height * 0.44,
+                    COLOR_STATUS_READY_TOKEN,
+                ));
+                container.children.push(
+                    node(
+                        "detail-availability-lead",
+                        Role::Text,
+                        lead,
+                        lead_x,
+                        availability_top,
+                        lead_width,
+                        availability_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token(COLOR_STATUS_READY_TOKEN),
+                );
+                container.children.push(
+                    node(
+                        "detail-availability-meta",
+                        Role::Text,
+                        meta,
+                        lead_x + lead_width,
+                        availability_top,
+                        (detail_column_width - lead_width - 16.0).max(0.0),
+                        availability_height,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Caption)
+                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+                );
+                out.push(container);
+            } else {
+                let mut availability_node = node(
+                    "detail-availability-reason",
+                    Role::Text,
+                    &availability,
+                    detail_column_left,
+                    availability_top,
+                    detail_column_width,
+                    availability_height,
+                    COLOR_SURFACE_CANVAS_TOKEN,
+                );
+                availability_node.state.unavailable = true;
+                out.push(availability_node);
+            }
             let description_top = availability_top + availability_height + 4.0;
             let description_height = item
                 .description
@@ -7112,7 +7266,12 @@ fn add_unavailable_card_cues(
         } else {
             text_scale
         };
-        let badge = scale_aware_single_line("⊘ Network", width - 20.0, badge_scale);
+        // Ready-but-streams-from-network cue: a GLOBE (shell.css g-net), NOT the
+        // circle-slash. The slash (⊘, g-slash) is reserved for the "Network required"
+        // WARNING below and the unavailable badges — reusing it here collided the two
+        // meanings. ⊕ (U+2295) is the meridian-circle the fallback face carries and
+        // matches the mockup's Steam Link "⊕ Network" cue.
+        let badge = scale_aware_single_line("⊕ Network", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 92.0, 28.0);
         nodes.push(mark_on_art(
             node(
@@ -7157,7 +7316,10 @@ fn add_unavailable_card_cues(
         } else {
             text_scale
         };
-        let badge = scale_aware_single_line("◉ Update", width - 20.0, badge_scale);
+        // Update cue: a small info-i (shell.css g-info), NOT the filled fisheye donut
+        // (◉, U+25C9) that read as a status dot. ⓘ (U+24D8) is the circled-i the
+        // fallback face carries and matches the mockup's satellite-card "ⓘ Update".
+        let badge = scale_aware_single_line("ⓘ Update", width - 20.0, badge_scale);
         let (badge_width, badge_height) = cue_box(&badge, 84.0, 28.0);
         nodes.push(mark_on_art(
             node(
@@ -7535,12 +7697,17 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16
         return;
     }
     for node in &mut system_nodes {
+        // Every status-bar item is centered on STATUS_CLUSTER_CENTER_Y (28) so the
+        // wifi glyph, battery capsule, and the %/clock text share ONE optical
+        // centerline within 1px. `right` is the gap from the surface right edge to the
+        // node's right edge; `top`/`height` place it around the centerline. The wifi
+        // (9x7) tucks just left of the delicate 12x7 battery capsule.
+        const CY: f32 = STATUS_CLUSTER_CENTER_Y;
         let (right, top, width, height) = match node.id.as_str() {
-            "wifi-glyph" => (180.0, 22.0, 20.0, 20.0),
-            "battery-outline" => (144.0, 24.0, 24.0, 14.0),
-            "battery-cavity" => (148.0, 26.0, 18.0, 10.0),
-            "battery-level" => (165.0 - node.bounds.width, 27.0, node.bounds.width, 8.0),
-            "battery-terminal" => (142.0, 28.0, 2.0, 6.0),
+            "wifi-glyph" => (164.0, CY - 3.5, 9.0, 7.0),
+            "battery-outline" => (144.0, CY - 3.5, 12.0, 7.0),
+            "battery-level" => (154.5 - node.bounds.width, CY - 1.5, node.bounds.width, 3.0),
+            "battery-terminal" => (142.5, CY - 1.5, 1.5, 3.0),
             "status-cluster" => (
                 if text_scale == 100 { -16.0 } else { 0.0 },
                 16.0,
@@ -7939,28 +8106,202 @@ fn encoded_png(width: u32, height: u32, rgba: &[u8]) -> Arc<[u8]> {
     bytes.into()
 }
 
-fn wifi_glyph_source() -> ImageSource {
-    static WIFI: OnceLock<Arc<[u8]>> = OnceLock::new();
-    let bytes = WIFI.get_or_init(|| {
-        let mut rgba = vec![0_u8; 24 * 24 * 4];
-        for y in 0..24 {
-            for x in 0..24 {
-                let dx = f32::from(u16::try_from(x).unwrap()) + 0.5 - 12.0;
-                let dy = 19.0 - (f32::from(u16::try_from(y).unwrap()) + 0.5);
-                let radius = dx.hypot(dy);
-                let in_upper_fan = dy > 0.0 && dx.abs() <= dy * 1.45;
-                let painted = radius <= 1.8
-                    || in_upper_fan
-                        && ((4.3..=6.3).contains(&radius) || (8.0..=10.2).contains(&radius));
-                if painted {
-                    let offset = (y * 24 + x) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&[0xc9, 0xc2, 0xb4, 0xff]);
+/// Fallback ink if a token cannot be resolved (should never happen for a known token).
+const CHROME_GLYPH_INK_FALLBACK: [u8; 4] = [0xc9, 0xc2, 0xb4, 0xff];
+
+/// Per-tint cache of a drawn chrome glyph's encoded PNG, keyed by its RGBA ink so each
+/// theme base gets its own rasterized image (the renderer caches images by id).
+type GlyphInkCache = OnceLock<Mutex<HashMap<[u8; 4], Arc<[u8]>>>>;
+
+/// Resolve a semantic ink token to a concrete RGBA against a SPECIFIC theme for the given
+/// base, so a drawn chrome glyph (wifi, magnifier, star) follows the theme the shell was
+/// booted with instead of a process-static one. On Day the status/search surfaces are LIGHT
+/// and its accent is DARK, so a Dusk-light glyph would go near-invisible; High Contrast wants
+/// the strongest ink. Resolves through the same token chain the renderer uses for node token
+/// strings, so a glyph image matches the ink a text node in the same role would get.
+fn resolved_ink_from(theme: &Theme, base: Base, token: &str) -> [u8; 4] {
+    theme
+        .resolve(base, token)
+        .ok()
+        .map_or(CHROME_GLYPH_INK_FALLBACK, parse_hex_rgba)
+}
+
+/// Parse a resolved `#rrggbb` / `#rrggbbaa` color into RGBA (the semantic ink tokens all
+/// resolve to hex); a non-hex value falls back to an opaque neutral.
+fn parse_hex_rgba(hex: &str) -> [u8; 4] {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() < 6 {
+        return CHROME_GLYPH_INK_FALLBACK;
+    }
+    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2).unwrap_or("cc"), 16).unwrap_or(0xcc);
+    [
+        byte(0),
+        byte(2),
+        byte(4),
+        if h.len() >= 8 { byte(6) } else { 0xff },
+    ]
+}
+
+/// A per-tint `ImageSource` id. The renderer caches images by id, so two differently tinted
+/// renders of the same glyph MUST carry distinct ids (else the first-cached tint wins).
+fn chrome_glyph_id(name: &str, ink: [u8; 4]) -> String {
+    format!(
+        "quiet-console:{name}/{:02x}{:02x}{:02x}{:02x}",
+        ink[0], ink[1], ink[2], ink[3]
+    )
+}
+
+/// Perpendicular distance from point (px,py) to the segment (ax,ay)-(bx,by).
+fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    let t = if len_sq <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+    };
+    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
+}
+
+/// The g-wifi glyph (shell.css): a centre dot plus two rising fan arcs, drawn small
+/// (mockup ~9x7) and vertically CENTERED in a 9:7 buffer so `ImageFit::Contain` lands
+/// its ink midline on the status centerline. The old form drew a ~14x11 glyph with its
+/// origin near the buffer bottom, which painted low (ink midline y=34 vs the text's 28).
+#[allow(clippy::cast_possible_truncation)]
+fn wifi_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static WIFI: GlyphInkCache = OnceLock::new();
+    WIFI.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("wifi glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            // Drawn at 4x (36:28 == 9:7) so `ImageFit::Contain`'s downscale antialiases
+            // the two thin fan arcs into a legible little glyph instead of merging them.
+            let (bw, bh) = (36usize, 28usize);
+            let mut rgba = vec![0_u8; bw * bh * 4];
+            let (ox, oy) = (18.0_f32, 20.4_f32);
+            for y in 0..bh {
+                for x in 0..bw {
+                    let dx = x as f32 + 0.5 - ox;
+                    let dy = oy - (y as f32 + 0.5);
+                    let radius = dx.hypot(dy);
+                    let in_upper_fan = dy > -1.4 && dx.abs() <= (dy + 1.4) * 1.5;
+                    let painted = radius <= 2.6
+                        || in_upper_fan
+                            && ((5.4..=7.4).contains(&radius) || (10.6..=12.6).contains(&radius));
+                    if painted {
+                        let offset = (y * bw + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
                 }
             }
+            encoded_png(bw as u32, bh as u32, &rgba)
+        })
+        .clone()
+}
+fn wifi_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-wifi", ink), wifi_glyph_png(ink))
+}
+
+/// The g-search magnifier (shell.css): a thin open ring with a lower-left handle,
+/// drawn procedurally because the `⌕` (U+2315) codepoint the search field used exists
+/// in NEITHER bundled face (Manrope nor the CJK fallback) and rendered as a `.notdef`
+/// tofu box. A drawn ring+handle restores the real glyph (not a placeholder rect),
+/// centered in a square buffer so `ImageFit::Contain` keeps it optically centered.
+#[allow(clippy::cast_possible_truncation)]
+fn magnifier_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static MAG: GlyphInkCache = OnceLock::new();
+    MAG.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("magnifier glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            let side = 20usize;
+            let mut rgba = vec![0_u8; side * side * 4];
+            let (cx, cy) = (11.5_f32, 8.2_f32);
+            let (outer, inner) = (5.9_f32, 3.9_f32);
+            // Handle springs from the ring's lower-left (225°) toward the corner.
+            let hx0 = cx - outer * 0.707;
+            let hy0 = cy + outer * 0.707;
+            let (hx1, hy1) = (3.0_f32, 16.8_f32);
+            for y in 0..side {
+                for x in 0..side {
+                    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let radius = (fx - cx).hypot(fy - cy);
+                    let on_ring = (inner..=outer).contains(&radius);
+                    let on_handle = segment_distance(fx, fy, hx0, hy0, hx1, hy1) <= 1.15
+                        && radius >= inner - 0.3;
+                    if on_ring || on_handle {
+                        let offset = (y * side + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
+                }
+            }
+            encoded_png(side as u32, side as u32, &rgba)
+        })
+        .clone()
+}
+fn magnifier_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-search", ink), magnifier_glyph_png(ink))
+}
+
+/// The g-star glyph (shell.css) as a filled 5-point star image. `★` (U+2605) only
+/// exists in the CJK fallback face, which paints it ~11px and off its box centre
+/// (bearing/baseline offset); a drawn star fills a small square buffer edge-to-edge so
+/// `ImageFit::Contain` yields the mockup's ~7-8px star sitting DEAD-CENTRE in its scrim
+/// disc. Tinted with the resolved `--state-selected-accent` for the active base.
+#[allow(clippy::cast_possible_truncation)]
+fn star_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
+    static STAR: GlyphInkCache = OnceLock::new();
+    STAR.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("star glyph cache")
+        .entry(ink)
+        .or_insert_with(|| {
+            let side = 16usize;
+            let mut rgba = vec![0_u8; side * side * 4];
+            let (cx, cy) = (8.0_f32, 8.2_f32);
+            let (outer, inner) = (7.4_f32, 3.05_f32);
+            let mut verts = [(0.0_f32, 0.0_f32); 10];
+            for (i, v) in verts.iter_mut().enumerate() {
+                let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let rad = if i % 2 == 0 { outer } else { inner };
+                *v = (cx + rad * angle.cos(), cy + rad * angle.sin());
+            }
+            for y in 0..side {
+                for x in 0..side {
+                    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    if point_in_polygon(fx, fy, &verts) {
+                        let offset = (y * side + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&ink);
+                    }
+                }
+            }
+            encoded_png(side as u32, side as u32, &rgba)
+        })
+        .clone()
+}
+fn star_glyph_source(ink: [u8; 4]) -> ImageSource {
+    ImageSource::new(chrome_glyph_id("g-star", ink), star_glyph_png(ink))
+}
+
+/// Even-odd point-in-polygon test.
+fn point_in_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let n = verts.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = verts[i];
+        let (xj, yj) = verts[j];
+        if (yi > py) != (yj > py) {
+            let x_cross = (xj - xi) * (py - yi) / (yj - yi) + xi;
+            if px < x_cross {
+                inside = !inside;
+            }
         }
-        encoded_png(24, 24, &rgba)
-    });
-    ImageSource::new("quiet-console:g-wifi.svg-path", bytes.clone())
+        j = i;
+    }
+    inside
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -8260,6 +8601,155 @@ mod tests {
         ]);
 
         assert!(totals.is_empty());
+    }
+
+    /// Family-D theme-aware chrome glyphs (tsp-op5a.390 review r1). The Codex review's two
+    /// blocking findings were that the drawn wifi/magnifier/star glyph images baked
+    /// Dusk-only ink (wifi+magnifier `#c9c2b4`, star `#eacf9c`): Day's search/status
+    /// surfaces are LIGHT so a Dusk-light glyph goes near-invisible, and the star's design
+    /// binds it to `--state-selected-accent` (Day accent DARK, High Contrast white). This
+    /// is the Day + HC raster coverage the review asked for — it proves each glyph tints
+    /// from the ACTIVE base's ink token and that the tint reaches the rasterized pixels.
+    #[test]
+    fn chrome_glyphs_tint_from_the_active_theme_ink_across_day_dusk_and_high_contrast() {
+        fn luminance(rgb: [u8; 3]) -> f64 {
+            let channel = |c: u8| {
+                let v = f64::from(c) / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+        }
+        let contrast = |a: [u8; 4], b: [u8; 4]| {
+            let (la, lb) = (luminance([a[0], a[1], a[2]]), luminance([b[0], b[1], b[2]]));
+            let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+            (hi + 0.05) / (lo + 0.05)
+        };
+
+        // The ink each glyph is tinted with is `resolved_ink_from` of the token the render
+        // wires it to: wifi -> secondary, magnifier -> muted, star -> selected accent.
+        let theme = pf_theme::flagship();
+        let day_secondary = resolved_ink_from(&theme, Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
+        let dusk_secondary = resolved_ink_from(&theme, Base::Dusk, COLOR_TEXT_SECONDARY_TOKEN);
+        let day_muted = resolved_ink_from(&theme, Base::Day, COLOR_TEXT_MUTED_TOKEN);
+        let day_accent = resolved_ink_from(&theme, Base::Day, STATE_SELECTED_ACCENT_TOKEN);
+        let hc_accent = resolved_ink_from(&theme, Base::HighContrast, STATE_SELECTED_ACCENT_TOKEN);
+
+        // The tokens resolve to DIFFERENT ink per base — a baked constant would make the
+        // Day glyph identical to Dusk (the regression the review caught).
+        assert_ne!(
+            day_secondary, dusk_secondary,
+            "wifi ink must follow the base (Day secondary != Dusk secondary)"
+        );
+
+        // On Day the surfaces are LIGHT, so every chrome glyph must stay legible against
+        // `--color-surface-raised` (>=3:1) — the blocking bug was a light Dusk-baked glyph
+        // on the light Day surface going near-invisible.
+        let day_surface = parse_hex_rgba(
+            theme
+                .resolve(Base::Day, COLOR_SURFACE_RAISED_TOKEN)
+                .unwrap(),
+        );
+        assert!(
+            contrast(day_secondary, day_surface) >= 3.0,
+            "Day wifi glyph must be legible on the light Day surface"
+        );
+        assert!(
+            contrast(day_muted, day_surface) >= 3.0,
+            "Day magnifier glyph must be legible on the light Day surface"
+        );
+        assert!(
+            contrast(day_accent, day_surface) >= 3.0,
+            "Day favourite star must be legible on the light Day surface"
+        );
+
+        // High Contrast binds the star to white per `--state-selected-accent`.
+        assert_eq!(
+            [hc_accent[0], hc_accent[1], hc_accent[2]],
+            [0xff, 0xff, 0xff],
+            "High Contrast favourite star must be white"
+        );
+
+        // The tint reaches the RASTER: the first opaque pixel of each drawn glyph carries
+        // the Day ink exactly, and Day vs Dusk produce distinct cached images (per-tint id).
+        let painted_ink = |bytes: &[u8]| -> [u8; 4] {
+            let decoder = png::Decoder::new(Cursor::new(bytes));
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .find(|px| px[3] > 0)
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .expect("glyph must paint at least one opaque pixel")
+        };
+        assert_eq!(painted_ink(&wifi_glyph_png(day_secondary)), day_secondary);
+        assert_eq!(painted_ink(&magnifier_glyph_png(day_muted)), day_muted);
+        assert_eq!(painted_ink(&star_glyph_png(day_accent)), day_accent);
+        assert_ne!(
+            wifi_glyph_png(day_secondary),
+            wifi_glyph_png(dusk_secondary),
+            "Day and Dusk wifi glyphs must be distinct rasters, not one baked tone"
+        );
+    }
+
+    /// tsp-op5a.390 review r2 (blocking): the glyph bitmaps must resolve their ink against
+    /// the theme SUPPLIED to `boot`, not a process-static `pf_theme::flagship()` — otherwise
+    /// under any non-flagship theme the drawn chrome disagrees with the scene nodes (which
+    /// resolve against the supplied theme). This is the differing-theme coverage the reviewer
+    /// asked for: it boots the shell with a theme whose Day `--color-text-secondary` differs
+    /// from flagship (`#57503f` -> `#0d1b2a`) and asserts the wifi glyph's ink follows it.
+    #[test]
+    fn glyph_ink_follows_the_supplied_theme_not_a_static_flagship() {
+        let variant_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/theme-variant");
+        let variant = pf_theme::load(&variant_dir).expect("theme-variant fixture must load");
+
+        let sentinel = parse_hex_rgba("#0d1b2a");
+        let flagship_day_secondary =
+            resolved_ink_from(&pf_theme::flagship(), Base::Day, COLOR_TEXT_SECONDARY_TOKEN);
+        // Guard the guard: the fixture must actually diverge from flagship, else a static
+        // flagship would pass this test by coincidence.
+        assert_ne!(
+            sentinel, flagship_day_secondary,
+            "the theme-variant fixture must differ from flagship for this test to bite"
+        );
+
+        // Boot with the SUPPLIED variant theme and switch to Day appearance.
+        let mut core = ShellCore::boot(&snapshot(), &variant, false);
+        core.preference_changed(&EffectivePreference {
+            key: PreferenceKey("appearance".into()),
+            effective: PreferenceValue::Text("Day".into()),
+            stored: PreferenceValue::Text("Day".into()),
+            applied: true,
+        });
+        assert_eq!(core.theme_base(), Base::Day);
+
+        // The wifi glyph resolves COLOR_TEXT_SECONDARY on Day — it must follow the SUPPLIED
+        // theme's sentinel, not flagship's #57503f.
+        let ink = core.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN);
+        assert_eq!(
+            ink, sentinel,
+            "glyph ink must resolve against the supplied theme, not a static flagship"
+        );
+
+        // And the rasterized wifi glyph carries that supplied-theme ink.
+        let painted = {
+            let bytes = wifi_glyph_png(ink);
+            let decoder = png::Decoder::new(Cursor::new(&bytes[..]));
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .find(|px| px[3] > 0)
+                .map(|px| [px[0], px[1], px[2], px[3]])
+                .expect("wifi glyph must paint an opaque pixel")
+        };
+        assert_eq!(painted, sentinel);
     }
 
     #[test]
@@ -11291,7 +11781,7 @@ mod tests {
                 .find(|node| node.id.as_str() == "home-card-badge-steam-link")
                 .unwrap()
                 .accessible_label,
-            "⊘ Network"
+            "⊕ Network"
         );
     }
 
@@ -11332,7 +11822,7 @@ mod tests {
                 node_by_id(card, &format!("home-card-badge-{id}"))
                     .unwrap()
                     .accessible_label,
-                "⊘ Network"
+                "⊕ Network"
             );
             assert_eq!(
                 node_by_id(card, &format!("home-card-reason-{id}"))
@@ -11410,7 +11900,7 @@ mod tests {
             )
             .unwrap();
         let search = node_by_id(scene.root(), "library-search").unwrap();
-        assert_eq!(search.accessible_label, "⌕  Search 1 titles");
+        assert_eq!(search.accessible_label, "Search 1 titles");
         assert!(search.state.focused);
         assert_eq!(search.style_token, STATE_REST_SURFACE_TOKEN);
     }
@@ -14195,7 +14685,6 @@ mod tests {
             for id in [
                 "wifi-glyph",
                 "battery-outline",
-                "battery-cavity",
                 "battery-level",
                 "battery-terminal",
                 "status-cluster",
@@ -14615,7 +15104,7 @@ mod tests {
                 .unwrap()
                 .bounds
                 .width
-                - 4.0)
+                - 2.25)
                 .abs()
                 < f32::EPSILON
         );
@@ -14639,7 +15128,7 @@ mod tests {
                 .unwrap()
                 .bounds
                 .width
-                - 16.0)
+                - 9.0)
                 .abs()
                 < f32::EPSILON
         );

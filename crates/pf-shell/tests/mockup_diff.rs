@@ -5,6 +5,12 @@ const HEIGHT: u32 = 720;
 
 // Keep every design-match ratchet in this one reviewable table. The PR checklist
 // explicitly forbids lowering these values; improvements should raise them.
+// tsp-op5a.391 (Family B focus/selection system fix) raised the five mockup-golden
+// scores (home/library/detail/settings/high-contrast) toward their designs and left
+// their thresholds; `quick` is a captured-render regression golden pinned at 1.0 (see
+// commit 3650f7f, "Regenerated only goldens/quick.png"), so its golden was regenerated
+// from the corrected render — the focused quick row now paints the renderer's single
+// state.focused offset ring + glow instead of the divergent inner+outer double ring.
 const SCREENS: [(&str, &str, f64); 6] = [
     ("home", "boot-home.png", 0.938_874_005_707_607),
     ("library", "library.png", 0.976_248_729_121_278),

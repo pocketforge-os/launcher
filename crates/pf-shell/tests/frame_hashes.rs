@@ -236,16 +236,26 @@ fn vertical_slice_frame_hashes_are_stable() {
         // titles/badges/reasons, chip label/count, detail facts/ways/variant sub).
         // All raster guards (containment/occlusion/target-size/legibility) pass on the
         // new pixels — the offscreen render is invoked with PF_RASTER_INK_GUARD=1.
+        // tsp-op5a.391 (Family B focus/selection system fix) rebaselines the five routes
+        // whose fixed controls repaint: quick-power (quick rows drop the second, glow-less
+        // border ring — focus is the renderer's single state.focused ring+glow), library +
+        // library-focused-search (filter chip: the hand-drawn L-frame — state.selected left
+        // bar + square 4-node box border + square bottom bar — becomes a rounded strong
+        // border with the shared selected_underline_inner bottom underline), search (box +
+        // result rows drop the duplicate inset ring), and details / details-unavailable
+        // (variant border is strong-when-selected, focus is the ring only). boot-home /
+        // focus-moved / launch-dimmed / returned / variant-chooser are unchanged (Home card
+        // reverted to baseline; those frames carry none of the repainted control classes).
         "92aa60a88fe1226955ed8034d9ecbab8ad8585051daf5fd8fea154849d9a9a59  ",
         "2d4218d45cc36f6dfafa4bca3951dc72f60fc400b456c86cf5c2739634c408bd  ",
         "cb83f164daaf3c3fea79c40c135835aa24992df6feb939c31d41bdf367a88bec  ",
         "0df8b0a7f0826f1be5df8a3a5f70fb09b23e378f709fda0ba1c040b62e9927e7  ",
-        "ddfea48ae7d4768612470e8c21aaa14a4b2f0665580760042fb2b9aae684dbad  ",
-        "7dbddbd69f43a4dcb447f333181782c2dbed6bc8a01390cfbb0dfc7eda1289c6  ",
-        "7dbddbd69f43a4dcb447f333181782c2dbed6bc8a01390cfbb0dfc7eda1289c6  ",
-        "dead6fa3b99b58b72b981731aa34228ca4e4984aabaf36c464aa4039596413d5  ",
-        "cb20654572fbf3c77523e0a19b31429f08aee6572891206637bfc72a151f0e6f  ",
-        "ed097e22022b546f0a07f8c16f190549ce1d238cd2208dd33068291023f76047  ",
+        "6c4d457fc9d4d591d2a752fbc5702155919c48cc56d64b312a3e27f2caad90d6  ",
+        "ab3b710b49a2b3e55cc12554ea87a872acc1280684312f0da2582308499dd0a0  ",
+        "ab3b710b49a2b3e55cc12554ea87a872acc1280684312f0da2582308499dd0a0  ",
+        "b0e1e9b4bbfbdad1057e18bf22bf4251e81123d34922908fa6466d0acbf995e1  ",
+        "7948b6f2b058d06b648e1328b758a35f4ba65f95cc78defea5acdcbee36c56f9  ",
+        "55ba9c1bc150b16da5ab3033af88fbb55430a226fe2c6a3740487eb5bddf137d  ",
         "5a57875e834d80bceaca128e5a17b64f31d8fd3035bd99d0dede4a188755ffa8  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
@@ -295,23 +305,31 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // toggle OFF knob muted + outlined-transparent track + muted OFF caption, and the
     // first-run value chips de-CTA'd (quiet surface, not the accent fill) while Continue
     // takes the lamplight accent. Raster guards pass with PF_RASTER_INK_GUARD=1.
+    // tsp-op5a.391 (Family B focus/selection system fix) rebaselines all six frames: the
+    // settings rail current item now carries the renderer's warm state.selected left bar
+    // (the faked near-white ▌ glyph is removed, and selection is no longer suppressed while
+    // focused), the text-size segmented control repaints (subtle overlay fill + primary text
+    // + shared bottom-underline layer, no state.selected left bar / accent flood), and the
+    // focused rows use the single state.focused ring+glow (the duplicate ring-colored border
+    // is dropped — including the first-run row + its value chip). Every Settings/first-run
+    // frame carries the rail, so all six shift; raster guards pass with PF_RASTER_INK_GUARD=1.
     assert!(
-        transcript.contains("c2e069153b2b509ca6e5fcbf27665ac97858b5d301c5d14e25bf35018a986a92  ")
+        transcript.contains("03f359c9853926d9e53b946ceec1090117fc80ff932ea445f9377bdae346e1d4  ")
     );
     assert!(
-        transcript.contains("17ab79ae77a37f7066b75e49cfae179273d4654f3cd8928d6ea5c0587a9b9e8f  ")
+        transcript.contains("a93317975b2eb2b21af2c9cef0ef058bf942f05c8887673df041904366e749ee  ")
     );
     assert!(
-        transcript.contains("8315c81a32f5ee8a5d634b603234f5d797db9b3b5219397ba4551cd37df353a9  ")
+        transcript.contains("a7674c160946bcc572a0a549e35586f98646ab586bedee32c5eecf95c7465420  ")
     );
     assert!(
-        transcript.contains("be8fe621fd535ca06c209b43de77ad8629431480fa9b47e9250d53dbd7a9ef39  ")
+        transcript.contains("cb2aa4ccab209d21e8bcc2973ab65bff1840f968f6d28ad0654c48a51bb1e94d  ")
     );
     assert!(
-        transcript.contains("6d8d401586ab0063bccbf46d38a55a6804f46b1ed016fde450f78d60760317a6  ")
+        transcript.contains("a4aa571636d02af8d5859702259ef6475c452938fd0a7afab01b8a3fbd689894  ")
     );
     assert!(
-        transcript.contains("dbfab3c751831e3824ade8f6233a5b7f587596eea0ae448495fe2114b709336d  ")
+        transcript.contains("37f9a1d538d9ff58a8ab432ee31ca959a693aa8764f9bcbb5327d252934975ad  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

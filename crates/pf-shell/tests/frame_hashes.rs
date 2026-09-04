@@ -230,26 +230,29 @@ fn vertical_slice_frame_hashes_are_stable() {
         // described fixture's two-line body copy.
         // Search intentionally rebaselines for tsp-op5a.371's shorter hint after
         // removing the redundant SEARCH prefix.
-        "6f9c658df4def86762e94e126564d9657a5c27c5fe5bf31264ad93cab747b244  ",
-        "320d9f85666bd44045bd285973c08baaad36f8492534c1178ea7e892a3ced7bd  ",
-        "c56f6f95c9edcbb63fec128d4c2600eb4c30a82adb1aab70226668a8c43ba1a4  ",
-        "5fff0dfbacc295e040573db074474899b225a462cc2ac4efc24793d4c610749c  ",
-        // Quick intentionally rebaselines after flowing its notes below the action rows.
-        "cbe491df596ca152b0f850e9f241e34958ac2ab207735adf7f4463d1f620cbcb  ",
-        // Library intentionally rebaselines after deriving the reason caption from
-        // the actual scaled title bottom instead of a shorter duplicate metric.
-        "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
-        "32c79f6951ae892363c1c01c23e2500bb949644db283bb5074c11511e70b3d9f  ",
-        "fca16869edeeb475f684838f7564839cd7d8ca63571a80eccefa2b8c352609c4  ",
-        "1d524919fe690aefe16595c30785394e876b593392b0abe83c41a1383f0d05ca  ",
-        "129850b67760cdbe6c9ec9f167e0140188738474348f7fe1eb86fae48f608156  ",
-        "eb3e4049e7b52d92370ca9f7824953835211da8938286313086b44537809e5b3  ",
+        // tsp-op5a.393 (Family A tonal wiring, ledger sweep 1) rebaselines every
+        // route: muted/secondary text roles that previously fell back to primary now
+        // carry explicit ink tokens (nav strip, shelf label, hero meta split, card
+        // titles/badges/reasons, chip label/count, detail facts/ways/variant sub).
+        // All raster guards (containment/occlusion/target-size/legibility) pass on the
+        // new pixels — the offscreen render is invoked with PF_RASTER_INK_GUARD=1.
+        "92aa60a88fe1226955ed8034d9ecbab8ad8585051daf5fd8fea154849d9a9a59  ",
+        "2d4218d45cc36f6dfafa4bca3951dc72f60fc400b456c86cf5c2739634c408bd  ",
+        "cb83f164daaf3c3fea79c40c135835aa24992df6feb939c31d41bdf367a88bec  ",
+        "0df8b0a7f0826f1be5df8a3a5f70fb09b23e378f709fda0ba1c040b62e9927e7  ",
+        "ddfea48ae7d4768612470e8c21aaa14a4b2f0665580760042fb2b9aae684dbad  ",
+        "7dbddbd69f43a4dcb447f333181782c2dbed6bc8a01390cfbb0dfc7eda1289c6  ",
+        "7dbddbd69f43a4dcb447f333181782c2dbed6bc8a01390cfbb0dfc7eda1289c6  ",
+        "dead6fa3b99b58b72b981731aa34228ca4e4984aabaf36c464aa4039596413d5  ",
+        "cb20654572fbf3c77523e0a19b31429f08aee6572891206637bfc72a151f0e6f  ",
+        "ed097e22022b546f0a07f8c16f190549ce1d238cd2208dd33068291023f76047  ",
+        "5a57875e834d80bceaca128e5a17b64f31d8fd3035bd99d0dede4a188755ffa8  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("320d9f8"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("2d4218d"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("5fff0df"),
+        lines.lines().nth(3).unwrap().starts_with("0df8b0a"),
         "Returned must restore focused Home with the just-now acknowledgement"
     );
     for route in [
@@ -287,23 +290,28 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // includes remap, Safe Return, and source; network includes SSID and signal/address;
     // system includes About, device/storage, and licenses; first-run retains the dimmed
     // Settings scene beneath its sheet.
+    // tsp-op5a.393 (Family A tonal wiring) rebaselines all six Settings/first-run
+    // evidence frames: row sublabels muted, segmented-control unselected values muted,
+    // toggle OFF knob muted + outlined-transparent track + muted OFF caption, and the
+    // first-run value chips de-CTA'd (quiet surface, not the accent fill) while Continue
+    // takes the lamplight accent. Raster guards pass with PF_RASTER_INK_GUARD=1.
     assert!(
-        transcript.contains("4f90c62598d38163e164c673d870070047dc1d95359a068fe9a9e4229ecf8dea  ")
+        transcript.contains("c2e069153b2b509ca6e5fcbf27665ac97858b5d301c5d14e25bf35018a986a92  ")
     );
     assert!(
-        transcript.contains("4fdcd773c8df4da621bbba7fb23496edd6774d83e802fe472623fa76c97e4be4  ")
+        transcript.contains("17ab79ae77a37f7066b75e49cfae179273d4654f3cd8928d6ea5c0587a9b9e8f  ")
     );
     assert!(
-        transcript.contains("19749b339081d10aeeb684ec322fe6c1055166c67fafc6a91e891d2a84156593  ")
+        transcript.contains("8315c81a32f5ee8a5d634b603234f5d797db9b3b5219397ba4551cd37df353a9  ")
     );
     assert!(
-        transcript.contains("104e9d5a663eb109bc58480842a77b34f3bc97356ced11b702bd764257806a16  ")
+        transcript.contains("be8fe621fd535ca06c209b43de77ad8629431480fa9b47e9250d53dbd7a9ef39  ")
     );
     assert!(
-        transcript.contains("7b95ae4e4942f1cecec93f24bff81227b8486a164abb717304ddfbc6e08febd8  ")
+        transcript.contains("6d8d401586ab0063bccbf46d38a55a6804f46b1ed016fde450f78d60760317a6  ")
     );
     assert!(
-        transcript.contains("c5b65200f48f4d6ed642497fcf97020eb7bebb9ee4eee1f946e370b0538ca76a  ")
+        transcript.contains("dbfab3c751831e3824ade8f6233a5b7f587596eea0ae448495fe2114b709336d  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());
@@ -325,7 +333,9 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
         String::from_utf8_lossy(&run.stderr)
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
+    // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
+    // for the nav strip / shelf label / hero meta tonal fix.
     assert!(
-        transcript.contains("17562411e168caeef61a00511a4e78add6c4ca6ead0ec87b63d965a45f7a1564  ")
+        transcript.contains("f682da19a94f80f0d3353062b742d1c6824d5e2a616a7f81134778dda412bfd6  ")
     );
 }

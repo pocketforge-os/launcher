@@ -362,7 +362,7 @@ mod tests {
             parse(br#"{"op":"wait_idle"}"#),
             Ok(Command::WaitIdle {
                 quiet: Duration::from_millis(150),
-                timeout: Duration::from_millis(5000)
+                timeout: Duration::from_secs(5)
             })
         );
         assert_eq!(

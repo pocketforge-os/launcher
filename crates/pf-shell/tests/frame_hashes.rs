@@ -264,17 +264,29 @@ fn vertical_slice_frame_hashes_are_stable() {
         // quick-power / library / library-focused-search / search carry none of the
         // retuned type roles and keep their digests. All raster guards pass with
         // PF_RASTER_INK_GUARD=1.
+        // tsp-op5a.394 (evidence-harness chrome parity, ledger sweep 1) rebaselines ALL
+        // SIX f10-evidence routes (library, library-focused-search, search, details,
+        // details-unavailable, variant-chooser): those cores now load the same
+        // device-status / network / time providers and control bindings the live shell
+        // loads, so every evidence route renders the top-right status cluster
+        // (Wi-Fi/battery/clock) + per-route hint legend the shell draws on all screens
+        // (previously blank on Library/Details/Search). The digests below are measured on
+        // the MERGED pixels (this bead's chrome atop tsp-op5a.395's Family E type roles).
+        // boot-home / focus-moved / launch-dimmed / returned / quick-power use the default
+        // core and are UNCHANGED from tsp-op5a.395. The status/legend nodes are passive
+        // (no action), so the target-size documented-baseline gate is untouched; all
+        // raster guards stay green.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
         "63bcd820e33b4b0e440dee6c269fab7ac360ec4af77cc00de293c2486ab38298  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
-        "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
-        "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
-        "b0e1e9b4bbfbdad1057e18bf22bf4251e81123d34922908fa6466d0acbf995e1  ",
-        "f9d5c93a37bfd26beb0d99d8f0149299290d1bd1e981e1419da830bdc91c164d  ",
-        "da222adf237f9a4eb113a95037a116f1323d019a6b8e0bba5174d486195ad372  ",
-        "37f8fb17e45b20794ed84edbd06b3dec51a774b8ec276e5085ec6f373a463b5f  ",
+        "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
+        "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
+        "974780574547cc01aeee8fc0e92db2f71242ff8661d4538d7902f54ab848ba09  ",
+        "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
+        "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
+        "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
@@ -486,5 +498,108 @@ fn library_search_magnifier_is_a_glyph_not_a_tofu_box() {
     assert!(
         fill < 0.55,
         "magnifier fill ratio {fill:.2} of its {w}x{h} box is a solid tofu slab, not a ring+handle glyph"
+    );
+}
+
+// ---- tsp-op5a.394 evidence-harness chrome parity (ledger sweep 1) ------------------
+// The offscreen evidence harness must render the SAME live-parity chrome the shell
+// draws on EVERY screen: the top-right status cluster (Wi-Fi glyph, battery capsule,
+// battery%/clock text) and the per-route hint-legend prompt bar. Before this bead the
+// f10-evidence cores were built by a bare `fixture_core` with no device-status /
+// network / time providers and no control bindings, so Library / Details / Search lost
+// the status cluster and Library / Details lost the hint legend — the vision-review
+// gate reviewed understated frames on those routes while the live shell (rig-proven on
+// fid-{home,library,settings}) drew both. This asserts the SCENE structure so the
+// parity cannot silently regress. It reads the per-route `.semantic.txt` node-tree the
+// harness writes beside each PNG (structure is guard-independent, so no ink guard is
+// needed here).
+fn render_evidence_set(out: &std::path::Path, extra: &[&str]) {
+    let run = Command::new(env!("CARGO_BIN_EXE_pf-shell"))
+        .arg("--offscreen")
+        .args(extra)
+        .args(["--out", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+fn semantic_has_node(semantic: &str, id: &str) -> bool {
+    let needle = format!("{id} ");
+    semantic
+        .lines()
+        .any(|line| line.trim_start().starts_with(&needle))
+}
+
+fn status_cluster_present(semantic: &str) -> bool {
+    // The full "wifi/battery/82/clock" cluster: the labeled text node plus the Wi-Fi
+    // glyph and the delicate battery outline capsule.
+    semantic_has_node(semantic, "status-cluster")
+        && semantic_has_node(semantic, "wifi-glyph")
+        && semantic_has_node(semantic, "battery-outline")
+}
+
+fn hint_legend_present(semantic: &str) -> bool {
+    // Home / Library / Details / Search render the legend as keycap + verb child nodes;
+    // Settings renders it as a single labeled text prompt. Either form is live-parity;
+    // an empty `prompts` group with no children (the pre-fix Library / Details bug) is
+    // not.
+    semantic_has_node(semantic, "home-prompt-keycap-0")
+        || semantic.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("prompts ") && !line.contains("label=\"\"")
+        })
+}
+
+#[test]
+fn every_evidence_screen_route_renders_live_parity_chrome() {
+    let default_dir = tempfile::tempdir().unwrap();
+    render_evidence_set(default_dir.path(), &[]);
+    let settings_dir = tempfile::tempdir().unwrap();
+    render_evidence_set(settings_dir.path(), &["--settings-evidence"]);
+
+    // (render dir, route semantic file) — every evidence screen whose live shell draws
+    // full chrome. Home is the always-green control; Library / Details / Search are red
+    // on pre-tsp-op5a.394 main (status cluster missing on all three, hint legend missing
+    // on Library / Details); Settings already carried both. ALL SIX chrome-rebaselined
+    // f10 routes are covered, including the three off the top-level path — details-
+    // unavailable and variant-chooser render from SEPARATE cores (the `unavailable` and
+    // `chooser` cores in emit_f10_evidence), so dropping apply_evidence_chrome from
+    // either path would otherwise slip past a guard named "every evidence route"
+    // (tsp-op5a.394 r2 review note, coordinator-adopted).
+    let cases: [(&std::path::Path, &str); 9] = [
+        (default_dir.path(), "boot-home"),
+        (default_dir.path(), "library"),
+        (default_dir.path(), "library-focused-search"),
+        (default_dir.path(), "details"),
+        (default_dir.path(), "details-unavailable"),
+        (default_dir.path(), "search"),
+        (default_dir.path(), "variant-chooser"),
+        (settings_dir.path(), "settings"),
+        (settings_dir.path(), "settings-edit"),
+    ];
+
+    let mut failures = Vec::new();
+    for (dir, route) in cases {
+        let semantic = std::fs::read_to_string(dir.join(format!("{route}.semantic.txt"))).unwrap();
+        if !status_cluster_present(&semantic) {
+            failures.push(format!(
+                "{route}: evidence scene is missing the top-right status cluster (Wi-Fi / battery / clock)"
+            ));
+        }
+        if !hint_legend_present(&semantic) {
+            failures.push(format!(
+                "{route}: evidence scene is missing the bottom hint-legend prompt bar"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "evidence routes omit live-parity chrome the shell draws on every screen:\n{}",
+        failures.join("\n")
     );
 }

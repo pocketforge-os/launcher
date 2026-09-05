@@ -276,6 +276,9 @@ fn vertical_slice_frame_hashes_are_stable() {
         // core and are UNCHANGED from tsp-op5a.395. The status/legend nodes are passive
         // (no action), so the target-size documented-baseline gate is untouched; all
         // raster guards stay green.
+        // tsp-op5a.398 intentionally rebaselines Search only: the formerly blank left
+        // pane now contains the 7-column controller OSK, while the right pane gains its
+        // result heading/count, two-line 40px-thumbnail rows, and match underline.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
@@ -283,7 +286,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
-        "974780574547cc01aeee8fc0e92db2f71242ff8661d4538d7902f54ab848ba09  ",
+        "8e1fc30087f4d185ac89ef1f61f9f5fd6ac9c84389a0643398cbfd4fa331c697  ",
         "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
         "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
         "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
@@ -351,23 +354,27 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // over an Eyebrow-role kicker (was a Label title under a Caption eyebrow). Every
     // Settings frame carries the section title, so all six shift; raster guards pass
     // with PF_RASTER_INK_GUARD=1.
+    // tsp-op5a.398 rebaselines the five Settings frames for the restored ~50%-coverage
+    // dashed unavailable outline, and first-run for its outlined PF/A/START teaching
+    // chips. These are intentional component-grammar changes, guarded by structural
+    // coverage/ink assertions in pf-shell-core.
     assert!(
-        transcript.contains("1bc970c37f00b5fa377d14a26b4fa70b2ca968e8ccda41cc5221a54bb84f1dd9  ")
+        transcript.contains("cae0516a72da02d1345aa6b53d14c8206db97517d7cfdf30bdd0d3f399093c8f  ")
     );
     assert!(
-        transcript.contains("09d5eedd6911ab05a06c32aabec8273a88875ed2382be89b976a3a0e9add0d0f  ")
+        transcript.contains("c3888eacfa0780c0f1e46cc652bd2cfca3e72fa575a511e010a7921bace68f29  ")
     );
     assert!(
-        transcript.contains("9107e63b0bf5b77f5d77b67f8c65b00bfc5fcc43418c8190b4473fafd2592565  ")
+        transcript.contains("95f84565193c463326654b34c64810393db64d85ad172f04dbcfa26dac997136  ")
     );
     assert!(
-        transcript.contains("0372535b54b2a58befa71bb64053bd531e9949447668633e076282068792e1da  ")
+        transcript.contains("f136a0899281b53eae23d6255e6e51509390ffe76bcc42c2c63360ce99188f95  ")
     );
     assert!(
-        transcript.contains("ab7d0c6f1a2694d5ba523dae0d2e18ae7f053392f82750bf1b87a03022f303c1  ")
+        transcript.contains("91dfd233c71be2abc61424d3254d6ed527604ac4581f4d2d0240ad07805b7f21  ")
     );
     assert!(
-        transcript.contains("d597ec7d46d3bdea8ed92714f4f5d2886481e3d22b8f50f00cff4ea9feea5167  ")
+        transcript.contains("5ed2bd4a74fd003e585524023fe612416577ec064bccdaeb4e76fad655d9a3c1  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

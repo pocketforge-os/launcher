@@ -1171,6 +1171,7 @@ impl ShellCore {
     where
         F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
+        let route_focus = self.focus;
         let focused_id = self
             .focused_item_index()
             .map(|index| self.items[index].id.clone());
@@ -1200,7 +1201,17 @@ impl ShellCore {
                         .iter()
                         .position(|candidate| *candidate == index)
                         .unwrap_or(0),
-                    _ => index,
+                    Route::Home => self
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                        .take(HOME_SHELF_LIMIT)
+                        .position(|(candidate, _)| candidate == index)
+                        .unwrap_or(0),
+                    Route::Details | Route::VariantChooser | Route::Settings | Route::Quick => {
+                        route_focus
+                    }
                 };
             }
         }
@@ -9043,6 +9054,74 @@ mod tests {
         assert_eq!(core.route(), Route::Details);
         assert_eq!(core.selected_item, Some(0));
         assert_eq!(core.items[0].id, "i1");
+    }
+
+    #[test]
+    fn catalog_reload_preserves_details_and_variant_control_focus() {
+        let variants = ["native", "stream", "compat"]
+            .into_iter()
+            .map(|id| variant(id, &format!("{id}-app"), Availability::Ready))
+            .collect();
+        let snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![item("focused", "Focused", variants)],
+            user_projection: UserProjection::default(),
+        };
+
+        for (route, focus) in [(Route::Details, 1), (Route::VariantChooser, 2)] {
+            let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+            core.selected_item = Some(0);
+            core.go(route);
+            core.focus = focus;
+
+            core.reload_catalog_with_art(&snapshot, |_, _| None);
+
+            assert_eq!(core.route(), route);
+            assert_eq!(core.focus(), focus);
+        }
+    }
+
+    #[test]
+    fn catalog_reload_restores_home_focus_in_ready_shelf_space() {
+        let snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![
+                item(
+                    "unavailable",
+                    "Unavailable",
+                    vec![variant(
+                        "native",
+                        "unavailable-app",
+                        Availability::NeedsSetup {
+                            reason: "not installed".into(),
+                        },
+                    )],
+                ),
+                item(
+                    "focused",
+                    "Focused",
+                    vec![variant("native", "focused-app", Availability::Ready)],
+                ),
+                item(
+                    "next",
+                    "Next",
+                    vec![variant("native", "next-app", Availability::Ready)],
+                ),
+            ],
+            user_projection: UserProjection::default(),
+        };
+        let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        core.focus = 0;
+
+        core.reload_catalog_with_art(&snapshot, |_, _| None);
+
+        assert_eq!(core.route(), Route::Home);
+        assert_eq!(core.focus(), 0);
+        assert_eq!(core.focused_item_index(), Some(1));
     }
 
     fn preferences(applied: bool) -> FakePreferencePort {

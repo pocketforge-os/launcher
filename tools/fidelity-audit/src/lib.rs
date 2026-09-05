@@ -173,18 +173,31 @@ fn render_slugs(bin: &Path, routes: &[&RouteMap], renders_dir: &Path) -> Result<
         flag_sets.insert(r.render_flags.clone());
     }
     for flags in flag_sets {
-        let status = Command::new(bin)
+        // CAPTURE the renderer's stdout — never inherit it. `pf-shell
+        // --offscreen` prints one hash line per artifact, and if it inherited
+        // this process's stdout those lines would print BEFORE main's ledger,
+        // making `--format json` invalid for any machine consumer. `output()`
+        // pipes both streams; on failure we surface the captured stderr.
+        let out = Command::new(bin)
             .arg("--offscreen")
             .args(&flags)
             .arg("--out")
             .arg(renders_dir)
-            .status()
+            .output()
             .map_err(|e| format!("run {} --offscreen: {e}", bin.display()))?;
-        if !status.success() {
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
             return Err(format!(
-                "{} --offscreen {} failed: {status}",
+                "{} --offscreen {} failed: {}{}",
                 bin.display(),
-                flags.join(" ")
+                flags.join(" "),
+                out.status,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{stderr}")
+                }
             ));
         }
     }

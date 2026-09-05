@@ -2971,26 +2971,40 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
+        let backdrop = matches!(
+            self.presentation,
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash
+        )
+        .then(|| {
+            let mut backdrop = self.clone();
+            backdrop.route = Route::Home;
+            backdrop.presentation = Presentation::Ready;
+            backdrop.focus = backdrop.saved_focus[backdrop.route_index()];
+            backdrop
+        });
+        // Terminal summaries retain the launch-origin route for their actions, but
+        // every visible backdrop element must come from the same inert Home snapshot.
+        let scene_core = backdrop.as_ref().unwrap_or(self);
         let (w, h) = (metrics.logical_width, metrics.logical_height);
-        self.library_surface_width.set(w);
+        scene_core.library_surface_width.set(w);
         let mut children = Vec::new();
         let battery_x = w - 168.0;
-        let room_width = room_strip_width(self.text_scale);
+        let room_width = room_strip_width(scene_core.text_scale);
         let room_left = (w - room_width) / 2.0;
         let room_right = room_left + room_width;
-        let has_wifi = self
+        let has_wifi = scene_core
             .network_state
             .as_ref()
             .is_ok_and(|state| state.connected_ssid.is_some());
-        let has_battery = self.battery_percent.is_some();
+        let has_battery = scene_core.battery_percent.is_some();
         let mut status_parts = Vec::new();
-        if let Some(percent) = self.battery_percent {
+        if let Some(percent) = scene_core.battery_percent {
             status_parts.push(percent.to_string());
         }
-        if self.authority_unavailable() {
+        if scene_core.authority_unavailable() {
             status_parts.push("!".into());
         }
-        if let Ok(state) = &self.time_state {
+        if let Ok(state) = &scene_core.time_state {
             let seconds = state
                 .wall_clock
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -3002,13 +3016,18 @@ impl ShellCore {
         let status_text = (!status_parts.is_empty()).then(|| status_parts.join("     "));
         let status_width = status_text
             .as_ref()
-            .map(|text| text_node_box_width(caption_text_width(text, self.text_scale)));
+            .map(|text| text_node_box_width(caption_text_width(text, scene_core.text_scale)));
         // Wi-Fi, battery, and status are one right-aligned chrome group. Measure the
         // final, scale-aware extent used by the layout seam and admit every available
         // member together only when the complete group clears the room strip.
-        let status_group_fits =
-            system_status_group_left(w, self.text_scale, status_width, has_wifi, has_battery)
-                .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
+        let status_group_fits = system_status_group_left(
+            w,
+            scene_core.text_scale,
+            status_width,
+            has_wifi,
+            has_battery,
+        )
+        .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
         if status_group_fits && has_wifi {
             children.push(
                 node(
@@ -3022,12 +3041,12 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(
-                    wifi_glyph_source(self.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
+                    wifi_glyph_source(scene_core.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
                     ImageFit::Contain,
                 ),
             );
         }
-        if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
+        if let Some(battery_percent) = scene_core.battery_percent.filter(|_| status_group_fits) {
             // A delicate OUTLINE capsule (mockup ~12x7) centered on the status
             // centerline, not the near-solid filled block the four opaque rects drew.
             // The outline is a 1px themed border on a transparent body; the charge is a
@@ -3079,11 +3098,11 @@ impl ShellCore {
                     status_left,
                     16.0,
                     status_width,
-                    scaled_text_box_height(32.0, self.text_scale),
+                    scaled_text_box_height(32.0, scene_core.text_scale),
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Caption);
-                if self.text_scale > 100 {
+                if scene_core.text_scale > 100 {
                     status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
                 }
                 children.push(status);
@@ -3099,7 +3118,7 @@ impl ShellCore {
         ] {
             let keycap = id.contains("keycap");
             let selected = matches!(
-                (id, self.route),
+                (id, scene_core.route),
                 ("room-home", Route::Home)
                     | (
                         "room-library",
@@ -3194,9 +3213,9 @@ impl ShellCore {
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        rooms = rooms_layout(rooms, room_nodes, w, self.text_scale);
+        rooms = rooms_layout(rooms, room_nodes, w, scene_core.text_scale);
         children.push(rooms);
-        if let Some(status) = self.session_status() {
+        if let Some(status) = scene_core.session_status() {
             children.push(node(
                 "session-status",
                 Role::Text,
@@ -3232,12 +3251,8 @@ impl ShellCore {
                 // caller's route. Compose a stable Home snapshot behind it, then make
                 // that snapshot inert so neither paint nor semantic focus can escape
                 // the summary controls.
-                let mut backdrop = self.clone();
-                backdrop.route = Route::Home;
-                backdrop.presentation = Presentation::Ready;
-                backdrop.focus = backdrop.saved_focus[backdrop.route_index()];
                 let backdrop_start = children.len();
-                backdrop.route_nodes(&mut children, metrics);
+                scene_core.route_nodes(&mut children, metrics);
                 for node in &mut children[backdrop_start..] {
                     make_backdrop_inert(node);
                 }
@@ -3257,62 +3272,66 @@ impl ShellCore {
                 );
                 self.return_summary_nodes(&mut children, w, h);
             }
-            _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
-            _ => self.route_nodes(&mut children, metrics),
+            _ if scene_core.route == Route::Quick => scene_core.quick_nodes(&mut children, w, h),
+            _ => scene_core.route_nodes(&mut children, metrics),
         }
         let supplied_footer = footer.to_owned();
-        let footer = match self.route {
-            Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
-                let mut prompts = self
-                    .binding_prompt("Search.open", "Search")
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if let Some(prompt) = self.binding_prompt("Quick", "Quick") {
-                    prompts.push(prompt);
-                }
-                if let Some(prompt) = self.binding_prompt(
-                    "Activate",
-                    if self.ready_variants(item).is_empty() {
-                        "Details"
-                    } else {
-                        "Open"
-                    },
-                ) {
-                    prompts.push(prompt);
-                }
-                let global_prompts = supplied_footer
-                    .split_once("     ")
-                    .map_or(supplied_footer.as_str(), |(_, global)| global);
-                if !global_prompts.is_empty() {
-                    prompts.push(global_prompts.to_owned());
-                }
-                prompts.join(" · ")
-            }),
+        let footer = match scene_core.route {
+            Route::Home => scene_core
+                .focused_item_index()
+                .map_or_else(String::new, |item| {
+                    let mut prompts = scene_core
+                        .binding_prompt("Search.open", "Search")
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    if let Some(prompt) = scene_core.binding_prompt("Quick", "Quick") {
+                        prompts.push(prompt);
+                    }
+                    if let Some(prompt) = scene_core.binding_prompt(
+                        "Activate",
+                        if scene_core.ready_variants(item).is_empty() {
+                            "Details"
+                        } else {
+                            "Open"
+                        },
+                    ) {
+                        prompts.push(prompt);
+                    }
+                    let global_prompts = supplied_footer
+                        .split_once("     ")
+                        .map_or(supplied_footer.as_str(), |(_, global)| global);
+                    if !global_prompts.is_empty() {
+                        prompts.push(global_prompts.to_owned());
+                    }
+                    prompts.join(" · ")
+                }),
             Route::Library => {
-                let mut prompts = self
+                let mut prompts = scene_core
                     .binding_prompt("Search.open", "Search")
                     .into_iter()
                     .collect::<Vec<_>>();
-                if let Some(prompt) = self.binding_prompt("Filter.next", "Filter") {
+                if let Some(prompt) = scene_core.binding_prompt("Filter.next", "Filter") {
                     prompts.push(prompt);
                 }
-                if self.focus >= 5
-                    && let Some(prompt) = self.binding_prompt("Activate", "Details")
+                if scene_core.focus >= 5
+                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Details")
                 {
                     prompts.push(prompt);
                 }
                 prompts.join("     ")
             }
             Route::Details => {
-                let ready = self
+                let ready = scene_core
                     .selected_item
-                    .is_some_and(|index| !self.ready_variants(index).is_empty());
+                    .is_some_and(|index| !scene_core.ready_variants(index).is_empty());
                 let mut prompts = Vec::new();
-                if let Some(prompt) = self.binding_prompt("Back", "Back") {
+                if let Some(prompt) = scene_core.binding_prompt("Back", "Back") {
                     prompts.push(prompt);
                 }
-                if let Some(item) = self.selected_item.and_then(|index| self.items.get(index))
-                    && let Some(prompt) = self.binding_prompt(
+                if let Some(item) = scene_core
+                    .selected_item
+                    .and_then(|index| scene_core.items.get(index))
+                    && let Some(prompt) = scene_core.binding_prompt(
                         "Quick",
                         if item.favorite {
                             "Unfavorite"
@@ -3323,9 +3342,10 @@ impl ShellCore {
                 {
                     prompts.push(prompt);
                 }
-                let activate_label = if self.focus == self.detail_pin_focus() {
-                    self.selected_item
-                        .and_then(|index| self.items.get(index))
+                let activate_label = if scene_core.focus == scene_core.detail_pin_focus() {
+                    scene_core
+                        .selected_item
+                        .and_then(|index| scene_core.items.get(index))
                         .map(|item| if item.favorite { "Unpin" } else { "Pin" })
                 } else if ready {
                     Some("Play")
@@ -3333,24 +3353,24 @@ impl ShellCore {
                     None
                 };
                 if let Some(prompt) =
-                    activate_label.and_then(|label| self.binding_prompt("Activate", label))
+                    activate_label.and_then(|label| scene_core.binding_prompt("Activate", label))
                 {
                     prompts.push(prompt);
                 }
                 prompts.join(" · ")
             }
             Route::Settings => {
-                let mut prompts = self
+                let mut prompts = scene_core
                     .binding_prompt("Back", "Back")
                     .into_iter()
                     .collect::<Vec<_>>();
-                if self.settings_in_rows
-                    && self.settings_row_focused
-                    && self
+                if scene_core.settings_in_rows
+                    && scene_core.settings_row_focused
+                    && scene_core
                         .settings_scene_rows()
-                        .get(self.focus)
+                        .get(scene_core.focus)
                         .is_some_and(|row| row.action.is_some())
-                    && let Some(prompt) = self.binding_prompt("Activate", "Change")
+                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Change")
                 {
                     prompts.push(prompt);
                 }
@@ -3370,9 +3390,9 @@ impl ShellCore {
                 SCENE_TRANSPARENT_TOKEN,
             ));
         }
-        let prompt_height = scaled_text_box_height(32.0, self.text_scale);
+        let prompt_height = scaled_text_box_height(32.0, scene_core.text_scale);
         let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-        let prompt_label = if matches!(self.route, Route::Search | Route::Details) {
+        let prompt_label = if matches!(scene_core.route, Route::Search | Route::Details) {
             ""
         } else {
             &footer
@@ -3380,7 +3400,7 @@ impl ShellCore {
         let mut prompt_node = node(
             "prompts",
             if matches!(
-                self.route,
+                scene_core.route,
                 Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
             ) {
                 Role::Group
@@ -3388,13 +3408,13 @@ impl ShellCore {
                 Role::Text
             },
             prompt_label,
-            if self.route == Route::Home {
+            if scene_core.route == Route::Home {
                 w - 660.0
             } else {
                 w - 600.0
             },
             prompt_top,
-            if self.route == Route::Home {
+            if scene_core.route == Route::Home {
                 612.0
             } else {
                 552.0
@@ -3403,23 +3423,23 @@ impl ShellCore {
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        if self.route == Route::Home {
-            prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
+        if scene_core.route == Route::Home {
+            prompt_node.children = home_prompt_nodes(&footer, w, h, scene_core.text_scale);
         } else if matches!(
-            self.route,
+            scene_core.route,
             Route::Library | Route::Details | Route::Quick | Route::Search
         ) {
-            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
+            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, scene_core.text_scale);
         }
         if self.presentation != Presentation::FirstRun {
             children.push(prompt_node);
         }
-        wrap_system_layout(&mut children, w, self.text_scale);
-        let radius_scale = f32::from(self.text_scale) / 100.0;
+        wrap_system_layout(&mut children, w, scene_core.text_scale);
+        let radius_scale = f32::from(scene_core.text_scale) / 100.0;
         for child in &mut children {
-            add_explicit_action_name(child, self.text_scale);
+            add_explicit_action_name(child, scene_core.text_scale);
         }
-        if self.route == Route::Library {
+        if scene_core.route == Route::Library {
             place_library_fade_below_footer(&mut children);
         }
         let focus_id = children
@@ -3437,11 +3457,11 @@ impl ShellCore {
         .with_children(children);
         #[cfg(test)]
         let semantics_before = semantic_snapshot(&root);
-        if self.route == Route::Home {
+        if scene_core.route == Route::Home {
             resolve_layout(
                 &mut root,
                 metrics,
-                f32::from(self.text_scale) / 100.0,
+                f32::from(scene_core.text_scale) / 100.0,
                 &Rasterizer::new(),
                 &mut LayoutCache::default(),
             );
@@ -3454,7 +3474,7 @@ impl ShellCore {
                     resolve_layout(
                         child,
                         metrics,
-                        f32::from(self.text_scale) / 100.0,
+                        f32::from(scene_core.text_scale) / 100.0,
                         &Rasterizer::new(),
                         &mut LayoutCache::default(),
                     );
@@ -11007,6 +11027,23 @@ mod tests {
     #[test]
     fn returned_summary_uses_an_inert_home_backdrop_and_owns_focus() {
         let mut c = core();
+        c.set_control_bindings(
+            [
+                ("Search.open", "Search", "Y"),
+                ("Quick", "Quick", "X"),
+                ("Activate", "Activate", "A"),
+                ("Back", "Back", "B"),
+                ("Filter.next", "Filter", "R"),
+            ]
+            .into_iter()
+            .map(|(action, label, binding)| ControlBinding {
+                context: "global".into(),
+                action: action.into(),
+                label: label.into(),
+                binding: binding.into(),
+            })
+            .collect(),
+        );
         c.go(Route::Library);
         c.focus = 6;
         c.action(&ShellAction::Activate);
@@ -11043,6 +11080,17 @@ mod tests {
                 .iter()
                 .any(|(id, _, _, _, _)| { id == "details-panel" || id.starts_with("library-") })
         );
+        assert!(node_by_id(scene.root(), "room-home-underline").is_some());
+        assert!(node_by_id(scene.root(), "room-library-underline").is_none());
+        let prompt_verbs = semantics
+            .iter()
+            .filter(|(id, _, _, _, _)| id.starts_with("home-prompt-verb-"))
+            .map(|(_, _, label, _, _)| label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prompt_verbs, vec!["Search", "Quick", "Open"]);
+        assert!(!prompt_verbs.contains(&"Back"));
+        assert!(!prompt_verbs.contains(&"Favorite"));
+        assert!(!prompt_verbs.contains(&"Play"));
         assert_eq!(
             semantics
                 .iter()

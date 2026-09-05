@@ -187,6 +187,7 @@ fn color_catches_a_seeded_color_swap() {
         h: 20.0,
     };
     let finding = compare::color("r", &comp, "rgb(244, 239, 230)", &shell, &bbox)
+        .expect("color comparison must not hard-error")
         .expect("color swap must be caught");
     assert_eq!(finding.fact_class, "color");
 }
@@ -203,7 +204,46 @@ fn color_matches_within_tolerance() {
     };
     // Off by less than the per-channel tolerance.
     let expected = format!("rgb({}, {}, {})", 244 - (COLOR_TOL / 2), 239, 230);
-    assert!(compare::color("r", &comp, &expected, &shell, &bbox).is_none());
+    assert!(
+        compare::color("r", &comp, &expected, &shell, &bbox)
+            .expect("color comparison must not hard-error")
+            .is_none()
+    );
+}
+
+#[test]
+fn color_hard_errors_on_an_unparseable_mockup_color() {
+    // An enabled color check with a malformed TRUSTED mockup color must fail
+    // loudly, never return None (which run_comparators reads as "no divergence").
+    let comp = component(r#"{"selector":".t","node":"n","classes":["color"]}"#);
+    let shell = text_on_bg(20, 20, [10, 10, 10], [244, 239, 230]);
+    let bbox = BBox {
+        x: 0.0,
+        y: 0.0,
+        w: 20.0,
+        h: 20.0,
+    };
+    let err = compare::color("r", &comp, "not-a-color", &shell, &bbox)
+        .expect_err("an unparseable mockup color must be a hard error");
+    assert!(err.contains("unparseable"), "err={err}");
+}
+
+#[test]
+fn color_hard_errors_on_an_empty_crop() {
+    // A component bbox that clamps to an empty crop leaves nothing to sample; the
+    // enabled check must hard-error rather than silently pass.
+    let comp = component(r#"{"selector":".t","node":"n","classes":["color"]}"#);
+    let shell = text_on_bg(20, 20, [10, 10, 10], [244, 239, 230]);
+    // A zero-size bbox off the top-left -> clamp_rect yields an empty rect.
+    let bbox = BBox {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: 0.0,
+    };
+    let err = compare::color("r", &comp, "rgb(244, 239, 230)", &shell, &bbox)
+        .expect_err("an empty crop must be a hard error");
+    assert!(err.contains("empty crop"), "err={err}");
 }
 
 // ---------------------------------------------------------------- crop

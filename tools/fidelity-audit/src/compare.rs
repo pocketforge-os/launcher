@@ -121,28 +121,48 @@ pub fn decoration(
 }
 
 /// Render-sampled dominant component color vs mockup computed color (opt-in).
-#[must_use]
+///
+/// # Errors
+/// An enabled color check must be PERFORMED or fail loudly — it must never
+/// silently pass. So an unparseable trusted mockup color, or a component bbox
+/// that clamps to an empty crop (nothing to sample), is a hard input error, not
+/// a `None` that `run_comparators` would read as "no divergence".
 pub fn color(
     route: &str,
     comp: &Component,
     mockup_color: &str,
     shell: &Raster,
     bbox: &BBox,
-) -> Option<Finding> {
-    let expected = parse_css_rgb(mockup_color)?;
+) -> Result<Option<Finding>, String> {
+    let expected = parse_css_rgb(mockup_color).ok_or_else(|| {
+        format!(
+            "{route} {}: color enabled but mockup color {mockup_color:?} is unparseable",
+            comp.label()
+        )
+    })?;
     let rect = shell.clamp_rect(bbox);
-    let sampled = shell.dominant_foreground(rect)?;
+    let sampled = shell.dominant_foreground(rect).ok_or_else(|| {
+        format!(
+            "{route} {}: color enabled but the component bbox clamps to an empty crop \
+             ({}x{} at {},{}) — nothing to sample",
+            comp.label(),
+            rect.w,
+            rect.h,
+            rect.x,
+            rect.y
+        )
+    })?;
     let dist: u32 = (0..3)
         .map(|c| u32::from(expected[c].abs_diff(sampled[c])))
         .sum();
     if dist <= COLOR_TOL * 3 {
-        return None;
+        return Ok(None);
     }
     let mut f = base(FactClass::Color, route, comp, &comp.node);
     f.expected = format!("rgb({},{},{})", expected[0], expected[1], expected[2]);
     f.shipped = format!("rgb({},{},{})", sampled[0], sampled[1], sampled[2]);
     f.delta = format!("sum|d|={dist}");
-    Some(f)
+    Ok(Some(f))
 }
 
 /// Perceptual per-component crop diff: golden vs shell render over the mockup

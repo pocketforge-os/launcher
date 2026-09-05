@@ -397,13 +397,11 @@ fn run_comparators(
         let shell = ctx
             .shell
             .ok_or("internal: shell raster not loaded for an enabled color comparator")?;
-        ledger.extend(compare::color(
-            route,
-            comp,
-            &mockup.color,
-            shell,
-            &mockup.bbox,
-        ));
+        // Propagate the input-contract error: an unparseable trusted color or an
+        // empty crop is a hard failure, never a silently-skipped comparison.
+        if let Some(f) = compare::color(route, comp, &mockup.color, shell, &mockup.bbox)? {
+            ledger.extend([f]);
+        }
     }
     if comp.wants(FactClass::Crop) {
         let golden = ctx

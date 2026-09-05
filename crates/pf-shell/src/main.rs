@@ -938,6 +938,12 @@ fn main() -> Result<(), String> {
     core.drive_session(&mut session)
         .map_err(|e| format!("{e:?}"))?;
     emit(&mut host, &mut core, &footer, out, "returned")?;
+    core.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+        session_id: "fake-crash-session".into(),
+        summary: "exit status 9".into(),
+    }));
+    emit(&mut host, &mut core, &footer, out, "safe-return-crash")?;
+    core.action(&ShellAction::Activate);
     core.action(&ShellAction::Custom("Quick".into()));
     emit(&mut host, &mut core, &footer, out, "quick-power")?;
     emit_f10_evidence(&mut host, &snapshot, &theme, &footer, &glyphs, out)?;
@@ -2899,6 +2905,7 @@ fn evaluate_occlusion_pair(
 ) {
     let modal_node = |node: &Node| {
         node.id.as_str().starts_with("first-run-")
+            || node.id.as_str().starts_with("return-summary-")
             || node.id.as_str().starts_with("comfort-")
             || matches!(
                 node.id.as_str(),
@@ -2908,6 +2915,15 @@ fn evaluate_occlusion_pair(
     // The declared first-run dim establishes a modal paint layer. Its sheet and
     // descendants are intentionally above the inactive route beneath it.
     if modal_node(later.node) && !modal_node(earlier.node) {
+        return;
+    }
+    // A modal's translucent full-screen dim is deliberately painted before its
+    // opaque sheet and controls. They share the modal layer even when the scene
+    // keeps them as root siblings for paint order.
+    if modal_node(later.node)
+        && modal_node(earlier.node)
+        && earlier.node.id.as_str().ends_with("backdrop-dim")
+    {
         return;
     }
     if occlusion_nodes_related(earlier, later) {
@@ -3300,10 +3316,12 @@ fn assert_raster_text_legible(
         }
 
         let children = &scene.root().children;
-        let Some(dim_index) = children
-            .iter()
-            .position(|child| child.id.as_str() == "first-run-backdrop-dim")
-        else {
+        let Some(dim_index) = children.iter().position(|child| {
+            matches!(
+                child.id.as_str(),
+                "first-run-backdrop-dim" | "return-summary-backdrop-dim"
+            )
+        }) else {
             return false;
         };
         children[..dim_index]

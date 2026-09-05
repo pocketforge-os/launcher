@@ -2065,7 +2065,10 @@ impl ShellCore {
                 ShellAction::Custom(_) => None,
             };
         }
-        if matches!(self.presentation, Presentation::Crash) {
+        if matches!(
+            self.presentation,
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash
+        ) {
             return match action {
                 ShellAction::Back => {
                     self.presentation = Presentation::Ready;
@@ -2909,15 +2912,21 @@ impl ShellCore {
             SessionEvent::Observed(ObservedSessionState::Running) => {
                 self.presentation = Presentation::Running
             }
-            SessionEvent::Terminal(TerminalReceipt::Returned { .. }) => {
+            SessionEvent::Terminal(TerminalReceipt::Returned { session_id }) => {
                 self.presentation = Presentation::Returned;
-                self.focus = self.launch_focus;
+                self.crash_receipt_id.clone_from(session_id);
+                self.crash_summary = "Returned safely".into();
+                self.crash_exit_detail = "Safe Return completed".into();
+                self.focus = 0;
                 self.just_returned = true;
                 self.pending_ack = true;
             }
-            SessionEvent::Terminal(TerminalReceipt::ForcedClose { .. }) => {
+            SessionEvent::Terminal(TerminalReceipt::ForcedClose { session_id }) => {
                 self.presentation = Presentation::ForcedClose;
-                self.focus = self.launch_focus;
+                self.crash_receipt_id.clone_from(session_id);
+                self.crash_summary = "Closed unexpectedly".into();
+                self.crash_exit_detail = "The session was forced closed".into();
+                self.focus = 0;
                 self.pending_ack = true;
             }
             SessionEvent::Terminal(TerminalReceipt::Crash {
@@ -3219,7 +3228,24 @@ impl ShellCore {
                 );
                 self.first_run_nodes(&mut children, w, h);
             }
-            Presentation::Crash => self.crash_nodes(&mut children, w, h),
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash => {
+                self.route_nodes(&mut children, metrics);
+                children.push(
+                    node(
+                        "return-summary-backdrop-dim",
+                        Role::Group,
+                        "",
+                        0.0,
+                        0.0,
+                        w,
+                        h,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_image(first_run_dim_source(), ImageFit::Cover)
+                    .with_ink_token("--scene-overlay-role"),
+                );
+                self.return_summary_nodes(&mut children, w, h);
+            }
             _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
             _ => self.route_nodes(&mut children, metrics),
         }
@@ -6720,71 +6746,125 @@ impl ShellCore {
             ));
         }
     }
-    fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+    fn return_summary_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+        let clean = self.presentation == Presentation::Returned;
+        let badge = if clean {
+            "✓ RETURNED SAFELY"
+        } else {
+            "⚠ CLOSED UNEXPECTEDLY"
+        };
+        let outcome = if clean {
+            "Safe Return"
+        } else {
+            self.crash_summary.as_str()
+        };
         out.push(node(
-            "receipt-panel",
+            "return-summary-panel",
             Role::Group,
             "",
-            152.0,
-            72.0,
-            w - 304.0,
-            552.0,
+            220.0,
+            64.0,
+            w - 440.0,
+            592.0,
             COLOR_SURFACE_RAISED_TOKEN,
         ));
-        out.push(node(
-            "crash-eyebrow",
-            Role::Text,
-            "⚠ Closed unexpectedly",
-            180.0,
-            100.0,
-            w - 360.0,
-            40.0,
-            COLOR_STATUS_ATTENTION_TOKEN,
-        ));
-        out.push(node(
-            "crash-title",
-            Role::Heading,
-            &self.active_title,
-            180.0,
-            150.0,
-            w - 360.0,
-            54.0,
-            STATE_REST_TEXT_TOKEN,
-        ));
-        out.push(node("crash-copy", Role::Text, &format!("{} stopped on its own and the shelf took the screen back. Nothing else was affected, and it's ready to open again.", self.active_title), 180.0, 220.0, w - 360.0, 70.0, COLOR_TEXT_SECONDARY_TOKEN));
-        out.push(node(
-            "crash-facts",
-            Role::Text,
-            &format!("Session · Ended · What happened · {}", self.crash_summary),
-            180.0,
-            310.0,
-            w - 360.0,
-            50.0,
-            COLOR_STATUS_ATTENTION_TOKEN,
-        ));
-        out.push(node(
-            "crash-diagnostic",
-            Role::Text,
-            &format!(
-                "{} · kept on this device · {}",
-                self.crash_receipt_id, self.crash_exit_detail
-            ),
-            180.0,
-            370.0,
-            w - 360.0,
-            40.0,
-            COLOR_TEXT_SECONDARY_TOKEN,
-        ));
-        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 420.0, w - 360.0, 60.0, COLOR_TEXT_SECONDARY_TOKEN));
+        out.push(
+            node(
+                "return-summary-badge",
+                Role::Text,
+                badge,
+                252.0,
+                92.0,
+                w - 504.0,
+                34.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Eyebrow)
+            .with_ink_token(if clean {
+                COLOR_STATUS_READY_TOKEN
+            } else {
+                COLOR_STATUS_ATTENTION_TOKEN
+            }),
+        );
+        out.push(
+            node(
+                "return-summary-title",
+                Role::Heading,
+                &self.active_title,
+                252.0,
+                140.0,
+                w - 504.0,
+                52.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Title)
+            .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+        );
+        for (index, (label, value)) in [
+            ("Session", self.crash_receipt_id.as_str()),
+            ("Ended", "Just now"),
+            ("How it ended", outcome),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let y = 218.0 + index as f32 * 58.0;
+            out.push(
+                node(
+                    &format!("return-summary-{index}-label"),
+                    Role::Text,
+                    label,
+                    252.0,
+                    y,
+                    190.0,
+                    32.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            );
+            out.push(
+                node(
+                    &format!("return-summary-{index}-value"),
+                    Role::Text,
+                    value,
+                    448.0,
+                    y,
+                    w - 700.0,
+                    32.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+            );
+        }
+        out.push(
+            node(
+                "return-summary-receipt",
+                Role::Text,
+                &format!(
+                    "RECEIPT  ·  {}  ·  kept on this device",
+                    self.crash_exit_detail
+                ),
+                252.0,
+                408.0,
+                w - 504.0,
+                46.0,
+                COLOR_SURFACE_CANVAS_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
+        );
         for (i, label) in ["Back to Home", "Open again"].iter().enumerate() {
             let mut n = node(
-                &format!("crash-action-{i}"),
+                &format!("return-summary-action-{i}"),
                 Role::Button,
                 label,
-                180.0,
-                480.0 + i as f32 * 62.0,
-                360.0,
-                50.0,
+                252.0 + i as f32 * 286.0,
+                526.0,
+                270.0,
+                64.0,
                 if i == self.focus {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
@@ -8627,7 +8707,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     } else if id == "detail-cover"
         || id.starts_with("detail-art-")
         || id == "first-run-panel"
-        || id == "receipt-panel"
+        || id == "return-summary-panel"
         || id == "quick-panel-surface"
     {
         Some(RADIUS_L)
@@ -10799,8 +10879,59 @@ mod tests {
         );
     }
     #[test]
-    fn crash_scene_includes_local_receipt_diagnostic() {
+    fn returned_summary_actions_relaunch_or_return_home() {
         let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-safe".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-again".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+    #[test]
+    fn terminal_summary_scenes_are_driven_by_their_receipts() {
+        let mut c = core();
+        c.active_title = "Ridgeline".into();
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-safe".into(),
+        }));
+        let returned = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(returned.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-badge"
+                && node.accessible_label == "✓ RETURNED SAFELY"
+        }));
+        assert!(returned.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-0-value" && node.accessible_label == "receipt-safe"
+        }));
+
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-7".into(),
             summary: "exit status 9".into(),
@@ -10817,17 +10948,27 @@ mod tests {
                 "",
             )
             .unwrap();
-        let diagnostic = scene
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-badge"
+                && node.accessible_label == "⚠ CLOSED UNEXPECTEDLY"
+        }));
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-2-value" && node.accessible_label == "exit status 9"
+        }));
+        let receipt = scene
             .root()
             .children
             .iter()
-            .find(|node| node.id.as_str() == "crash-diagnostic")
-            .expect("crash diagnostic row");
+            .find(|node| node.id.as_str() == "return-summary-receipt")
+            .expect("local receipt row");
         assert_eq!(
-            diagnostic.accessible_label,
-            "receipt-7 · kept on this device · exit status 9"
+            receipt.accessible_label,
+            "RECEIPT  ·  exit status 9  ·  kept on this device"
         );
-        assert_eq!(diagnostic.style_token, COLOR_TEXT_SECONDARY_TOKEN);
+        assert_eq!(
+            receipt.ink_token.as_deref(),
+            Some(COLOR_TEXT_SECONDARY_TOKEN)
+        );
     }
     #[test]
     fn recovery_entry_is_authority_gated() {

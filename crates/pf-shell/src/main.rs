@@ -1497,9 +1497,15 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     loop {
         if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
             let snapshot = catalog.snapshot()?;
-            if let Some(trace) = latency_trace.as_mut() {
-                trace.catalog_reloaded(snapshot.items.len())?;
-            }
+            apply_catalog_reload(
+                host,
+                core,
+                &activate,
+                &snapshot,
+                &mut frames,
+                &mut presented_revision,
+                latency_trace,
+            )?;
         }
         let before = redraw_state(core);
         drive_socket_session(core, &mut session)?;
@@ -1675,6 +1681,32 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             trace.action(&action, ingress_us, presented, core.revision())?;
         }
     }
+}
+
+fn apply_catalog_reload(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    activate: &str,
+    snapshot: &CatalogSnapshot,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+    latency_trace: &mut Option<LatencyTrace>,
+) -> Result<(), String> {
+    let item_count = snapshot.items.len();
+    core.reload_catalog_with_art(snapshot, |item, reference| {
+        resolve_art(
+            art_base_path(item, &ArtBase::DescriptorDirectory),
+            reference,
+        )
+    });
+    if present_interactive(host, core, activate)? {
+        frames.increment();
+        *presented_revision = core.revision();
+    }
+    if let Some(trace) = latency_trace.as_mut() {
+        trace.catalog_reloaded(item_count)?;
+    }
+    Ok(())
 }
 
 fn automation_server(args: &[String]) -> Result<Option<automation::AutomationServer>, String> {
@@ -8556,6 +8588,57 @@ exec="./launch"
         fn has_pending(&self) -> bool {
             !self.polls.is_empty()
         }
+    }
+
+    #[test]
+    fn catalog_reload_applies_and_presents_new_snapshot_before_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("latency.jsonl");
+        let original: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut reloaded = original.clone();
+        reloaded.items.truncate(1);
+        reloaded.items[0].title = "Reloaded Catalog Title".into();
+
+        let mut core = fixture_core(&original, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+        let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
+
+        apply_catalog_reload(
+            &mut host,
+            &mut core,
+            "A Open",
+            &reloaded,
+            &mut frames,
+            &mut presented_revision,
+            &mut trace,
+        )
+        .unwrap();
+
+        let scene = core.scene(host.metrics(), "A Open").unwrap();
+        let semantic = semantic_snapshot(&scene);
+        assert!(semantic.contains("Reloaded Catalog Title"));
+        assert!(!semantic.contains(&original.items[1].title));
+        assert_eq!(frames.get(), 1);
+        assert_eq!(presented_revision, core.revision());
+        drop(trace);
+        let acknowledgement = fs::read_to_string(trace_path)
+            .unwrap()
+            .lines()
+            .last()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .unwrap();
+        assert_eq!(acknowledgement["event"], "catalog_reloaded");
+        assert_eq!(acknowledgement["items"], reloaded.items.len());
     }
 
     #[test]

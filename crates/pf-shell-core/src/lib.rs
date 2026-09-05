@@ -937,6 +937,10 @@ pub struct ShellCore {
     selected_item: Option<usize>,
     search_query: String,
     search_results: Vec<usize>,
+    /// Focus within the controller-operated search keyboard. `None` means the
+    /// result list owns focus (automation text injection deliberately uses that
+    /// state so it remains an honest result-navigation seam).
+    search_key: Option<usize>,
     library_filter: LibraryFilter,
     library_items: Vec<usize>,
     library_surface_width: Cell<f32>,
@@ -1096,6 +1100,7 @@ impl ShellCore {
             selected_item: None,
             search_query: String::new(),
             search_results: (0..snapshot.items.len()).collect(),
+            search_key: None,
             library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
             library_surface_width: Cell::new(1280.0),
@@ -1651,6 +1656,12 @@ impl ShellCore {
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.bump_revision();
         self.search_query = query.into();
+        self.refresh_search_results();
+        self.search_key = None;
+        self.focus = 0;
+    }
+
+    fn refresh_search_results(&mut self) {
         let words = self
             .search_query
             .split_whitespace()
@@ -1666,7 +1677,6 @@ impl ShellCore {
             })
             .map(|(index, _)| index)
             .collect();
-        self.focus = 0;
     }
 
     #[must_use]
@@ -2093,6 +2103,82 @@ impl ShellCore {
                 }
                 ShellAction::Custom(_) => None,
             };
+        }
+        if self.route == Route::Search {
+            if let Some(key) = self.search_key {
+                const COLS: usize = 7;
+                return match action {
+                    ShellAction::Move(AxisMove::Left) => {
+                        if key % COLS == 0 {
+                            self.search_key = None;
+                            self.focus = 0;
+                        } else {
+                            self.search_key = Some(key - 1);
+                        }
+                        None
+                    }
+                    ShellAction::Move(AxisMove::Right) => {
+                        if key % COLS == COLS - 1 || key + 1 == SEARCH_KEYS.len() {
+                            self.search_key = None;
+                            self.focus = 0;
+                        } else {
+                            self.search_key = Some(key + 1);
+                        }
+                        None
+                    }
+                    ShellAction::Move(AxisMove::Up) => {
+                        self.search_key = Some(match key {
+                            36 => 35,
+                            37 => 31,
+                            38 => 34,
+                            _ => key.saturating_sub(COLS),
+                        });
+                        None
+                    }
+                    ShellAction::Move(AxisMove::Down) => {
+                        let column = key % COLS;
+                        self.search_key = Some(if key + COLS >= 36 {
+                            match column {
+                                0..=2 => 36,
+                                3..=4 => 37,
+                                _ => 38,
+                            }
+                        } else {
+                            key + COLS
+                        });
+                        None
+                    }
+                    ShellAction::Activate => {
+                        match SEARCH_KEYS[key] {
+                            "SPACE" => self.search_query.push(' '),
+                            "DELETE" => {
+                                self.search_query.pop();
+                            }
+                            "DONE" => {
+                                if !self.search_results.is_empty() {
+                                    self.search_key = None;
+                                    self.focus = 0;
+                                }
+                                return None;
+                            }
+                            letter => self.search_query.push_str(letter),
+                        }
+                        self.bump_revision();
+                        self.refresh_search_results();
+                        self.focus = 0;
+                        None
+                    }
+                    ShellAction::Back => {
+                        self.restore_caller_focus();
+                        None
+                    }
+                    ShellAction::Custom(_) => None,
+                };
+            }
+            if matches!(action, ShellAction::Move(AxisMove::Left)) {
+                self.search_key = Some(0);
+                return None;
+            }
         }
         match action {
             ShellAction::Custom(name) if name == "Favorite" => {
@@ -2597,6 +2683,9 @@ impl ShellCore {
         }
         self.route = route;
         self.focus = self.saved_focus[self.route_index()].min(self.focus_count().saturating_sub(1));
+        if route == Route::Search {
+            self.search_key = Some(0);
+        }
     }
     fn next_room(&mut self) {
         match self.route {
@@ -4316,10 +4405,71 @@ impl ShellCore {
             );
         } else if self.route == Route::Search {
             let scale = f32::from(self.text_scale) / 100.0;
-            let column_width = (w - 2.0 * SPACE_7).min(800.0);
-            let column_left = (w - column_width) / 2.0;
+            let gutter = SPACE_5 * scale;
+            let keyboard_left = SPACE_7;
+            let keyboard_width = (w * 0.43 - SPACE_7).max(180.0);
+            let column_left = keyboard_left + keyboard_width + gutter;
+            let column_width = (w - column_left - SPACE_7).max(320.0);
             let search_top = chrome_row_bottom(metrics.safe_insets.top, self.text_scale) + SPACE_5;
             let search_height = 52.0 * scale;
+            let key_gap = SPACE_2;
+            let key_width = (keyboard_width - 6.0 * key_gap) / 7.0;
+            let key_height = (48.0 * scale).min(56.0);
+            let keyboard_top = search_top + search_height + SPACE_5 * scale;
+            let mut keyboard = node(
+                "search-keyboard",
+                Role::Group,
+                "On-screen keyboard",
+                keyboard_left,
+                keyboard_top,
+                keyboard_width,
+                7.0 * key_height + 6.0 * key_gap,
+                SCENE_TRANSPARENT_TOKEN,
+            );
+            for (index, label) in SEARCH_KEYS.iter().enumerate() {
+                let (column, row, span): (usize, usize, usize) = if index < 36 {
+                    (index % 7, index / 7, 1)
+                } else {
+                    match index {
+                        36 => (0, 6, 3),
+                        37 => (3, 6, 2),
+                        _ => (5, 6, 2),
+                    }
+                };
+                let width = key_width * span as f32 + key_gap * span.saturating_sub(1) as f32;
+                let mut key = node(
+                    &format!("search-key-{index}"),
+                    Role::Button,
+                    label,
+                    keyboard_left + column as f32 * (key_width + key_gap),
+                    keyboard_top + row as f32 * (key_height + key_gap),
+                    width,
+                    key_height,
+                    STATE_REST_SURFACE_TOKEN,
+                )
+                .with_corner_radius(RADIUS_S * scale)
+                .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                .with_ink_token(SCENE_TRANSPARENT_TOKEN);
+                key.state.focused = self.search_key == Some(index);
+                key.action = Some(NodeAction::Activate);
+                key.children.push(
+                    node(
+                        &format!("search-key-{index}-label"),
+                        Role::Text,
+                        label,
+                        key.bounds.x,
+                        key.bounds.y,
+                        key.bounds.width,
+                        key.bounds.height,
+                        STATE_REST_SURFACE_TOKEN,
+                    )
+                    .with_type_role(TypeRole::Label)
+                    .with_text_align(TextAlign::Center)
+                    .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN),
+                );
+                keyboard.children.push(key);
+            }
+            out.push(keyboard);
             let mut search_box = node(
                 "search-query",
                 Role::Text,
@@ -4333,7 +4483,7 @@ impl ShellCore {
             .with_type_role(TypeRole::Label)
             .with_corner_radius(RADIUS_M * scale)
             .with_elevation(Elevation::Elev2);
-            search_box.state.focused = self.search_results.is_empty();
+            search_box.state.focused = self.search_results.is_empty() && self.search_key.is_none();
             // Focus is the renderer's single offset ring + glow (state.focused); the box
             // keeps its resting hairline border underneath rather than a second, inset
             // ring-colored border (which read as a heavier standalone ring).
@@ -4359,6 +4509,23 @@ impl ShellCore {
                 .with_type_role(TypeRole::Caption)
                 .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
             );
+            let section_top = hint_top + hint_height + SPACE_4 * scale;
+            let section_height = scaled_text_box_height(22.0, self.text_scale);
+            out.push(
+                node(
+                    "search-results-heading",
+                    Role::Heading,
+                    &format!("IN YOUR LIBRARY · {} MATCHES", self.search_results.len()),
+                    column_left,
+                    section_top,
+                    column_width,
+                    section_height,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Eyebrow)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            );
+            let rows_top = section_top + section_height + SPACE_2 * scale;
             if self.search_results.is_empty() {
                 out.push(node(
                     "search-empty",
@@ -4369,17 +4536,16 @@ impl ShellCore {
                         "Nothing matches — check the spelling, or browse the Library."
                     },
                     column_left,
-                    hint_top + hint_height + SPACE_4 * scale,
+                    rows_top,
                     column_width,
                     70.0,
                     COLOR_TEXT_SECONDARY_TOKEN,
                 ));
             }
-            let rows_top = hint_top + hint_height + SPACE_4 * scale;
             let rows_bottom = h
                 - PROMPTS_AREA_HEIGHT.max(scaled_text_box_height(32.0, self.text_scale))
                 - SPACE_3;
-            let row_height = 44.0 * scale;
+            let row_height = 64.0 * scale;
             let row_gap = SPACE_3 * scale;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let capacity = (((rows_bottom - rows_top + row_gap) / (row_height + row_gap))
@@ -4415,27 +4581,12 @@ impl ShellCore {
                     kind_text(&item.kind),
                     availability_text(availability, &self.presentation)
                 );
-                let text_left = column_left + SPACE_4 * scale;
-                let content_width = (column_width - 2.0 * SPACE_4 * scale).max(0.0);
-                let inter_gap = SPACE_2 * scale;
-                let title_floor = 72.0 * scale;
-                let caption_natural_width = caption_text_width(&caption, self.text_scale)
-                    + 2.0 * TEXT_NODE_INLINE_INSET * scale;
-                let caption_reserve =
-                    caption_natural_width.min((content_width - inter_gap - title_floor).max(0.0));
-                // Keep the established 42% column at roomy widths, but reserve the
-                // caption before allowing long titles to grow. The gap lives at the
-                // end of the title column so existing wide evidence keeps its geometry.
-                let title_column_width = (column_width * 0.42)
-                    .max(
-                        measured_text_advance(label_text_width(title), self.text_scale)
-                            + 2.0 * TEXT_NODE_INLINE_INSET * scale
-                            + inter_gap,
-                    )
-                    .min((content_width - caption_reserve).max(0.0));
-                let title_paint_width = (title_column_width - inter_gap).max(0.0);
-                let caption_width =
-                    (column_left + column_width - text_left - title_column_width).max(0.0);
+                let art_size = 40.0 * scale;
+                let text_left = column_left + SPACE_3 * scale + art_size + SPACE_3 * scale;
+                let content_width =
+                    (column_width - (text_left - column_left) - SPACE_3 * scale).max(0.0);
+                let title_paint_width = content_width;
+                let caption_width = content_width;
                 let painted_title = ellipsize_to_lines(
                     title,
                     title_paint_width * 100.0 / f32::from(self.text_scale),
@@ -4443,7 +4594,7 @@ impl ShellCore {
                 );
                 let painted_caption = ellipsize_to_lines(
                     &caption,
-                    caption_width * 100.0 / f32::from(self.text_scale),
+                    content_width * 100.0 / f32::from(self.text_scale),
                     1,
                 );
                 let mut row = node(
@@ -4460,6 +4611,33 @@ impl ShellCore {
                 .with_corner_radius(RADIUS_M * scale)
                 .with_ink_token(SCENE_TRANSPARENT_TOKEN)
                 .with_children(vec![
+                    item.art.clone().map_or_else(
+                        || {
+                            node(
+                                &format!("search-result-{}-thumbnail", item.id),
+                                Role::Group,
+                                "",
+                                column_left + SPACE_3 * scale,
+                                result_top + (row_height - art_size) / 2.0,
+                                art_size,
+                                art_size,
+                                COLOR_SURFACE_OVERLAY_TOKEN,
+                            )
+                        },
+                        |art| {
+                            node(
+                                &format!("search-result-{}-thumbnail", item.id),
+                                Role::Group,
+                                &format!("{} cover art", item.title),
+                                column_left + SPACE_3 * scale,
+                                result_top + (row_height - art_size) / 2.0,
+                                art_size,
+                                art_size,
+                                COLOR_SURFACE_OVERLAY_TOKEN,
+                            )
+                            .with_image(art, ImageFit::Cover)
+                        },
+                    ),
                     node(
                         &format!("search-result-{}-title", item.id),
                         Role::Text,
@@ -4467,7 +4645,7 @@ impl ShellCore {
                         text_left,
                         result_top,
                         title_paint_width,
-                        row_height,
+                        row_height / 2.0,
                         SCENE_TRANSPARENT_TOKEN,
                     )
                     .with_type_role(TypeRole::Label)
@@ -4476,15 +4654,32 @@ impl ShellCore {
                         &format!("search-result-{}-caption", item.id),
                         Role::Text,
                         &painted_caption,
-                        text_left + title_column_width,
-                        result_top,
+                        text_left,
+                        result_top + row_height / 2.0,
                         caption_width,
-                        row_height,
+                        row_height / 2.0,
                         SCENE_TRANSPARENT_TOKEN,
                     )
                     .with_type_role(TypeRole::Caption)
                     .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                 ]);
+                if let Some(match_range) = caseless_match_char_range(title, &self.search_query) {
+                    let match_chars = match_range.end - match_range.start;
+                    if match_chars > 0 {
+                        row.children.push(node(
+                            &format!("search-result-{}-match-underline", item.id),
+                            Role::Group,
+                            "",
+                            text_left
+                                + TEXT_NODE_INLINE_INSET * scale
+                                + match_range.start as f32 * CAPTION_GLYPH_ADVANCE * scale,
+                            result_top + row_height / 2.0 - 5.0 * scale,
+                            (match_chars as f32 * CAPTION_GLYPH_ADVANCE * scale).min(content_width),
+                            2.0 * scale,
+                            STATE_SELECTED_ACCENT_TOKEN,
+                        ));
+                    }
+                }
                 // Focus is the renderer's single offset ring + glow (state.focused), not an
                 // inset ring-colored border layered on top of it.
                 row.state.focused = self.focus == result;
@@ -5453,8 +5648,6 @@ impl ShellCore {
             scene_row.state.focused = focused;
             if interactive {
                 scene_row.action = Some(NodeAction::Activate);
-            } else {
-                scene_row = scene_row.with_border(STATE_DISABLED_BORDER_TOKEN, 1.0);
             }
             let row_surface = if interactive {
                 STATE_REST_SURFACE_TOKEN
@@ -5499,6 +5692,13 @@ impl ShellCore {
                     (control_left - SPACE_2 * scale - label_left).max(0.0)
                 });
             let mut fills = Vec::new();
+            if !interactive {
+                fills.extend(dashed_outline_nodes(
+                    &format!("settings-row-{}-dash", row.id),
+                    scene_row.bounds,
+                    STATE_DISABLED_BORDER_TOKEN,
+                ));
+            }
             let mut text = Vec::new();
             for (line_index, line) in lines.iter().take(2).enumerate() {
                 let painted_line = if is_toggle || row.read_only.is_some() {
@@ -6349,20 +6549,84 @@ impl ShellCore {
             cursor += row_height + row_gap;
         }
         let teach_height = scaled_text_box_height(28.0, self.text_scale);
-        out.push(declared_multiline(
+        let teach_cap_width =
+            settings_scaled_box_width(56.0, &self.safe_return_binding, self.text_scale);
+        let teach_cap_height = KEYCAP_HEIGHT * scale;
+        let teach_cap_top = cursor + (teach_height - teach_cap_height) / 2.0;
+        let mut teach = node(
+            "safe-return-teach",
+            Role::Group,
+            &format!("{} returns you here.", self.safe_return_binding),
+            content_left,
+            cursor,
+            content_width,
+            teach_height,
+            SCENE_TRANSPARENT_TOKEN,
+        );
+        teach.children.push(
             node(
-                "safe-return-teach",
-                Role::Text,
-                &format!("{} returns you here.", self.safe_return_binding),
+                "safe-return-teach-keycap-border",
+                Role::Group,
+                "",
                 content_left,
+                teach_cap_top,
+                teach_cap_width,
+                teach_cap_height,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_corner_radius(if self.safe_return_binding.chars().count() > 1 {
+                RADIUS_S * scale
+            } else {
+                teach_cap_height / 2.0
+            })
+            .with_border(COLOR_BORDER_STRONG_TOKEN, KEYCAP_BORDER_WIDTH),
+        );
+        // PF is a device glyph rather than prose. Paint its compact block mark as
+        // geometry so the chip remains atomic and cannot be line-wrapped by a text
+        // shaper at narrow/scaled sizes.
+        let glyph_left = content_left + (teach_cap_width - 18.0 * scale) / 2.0;
+        let glyph_top = teach_cap_top + (teach_cap_height - 10.0 * scale) / 2.0;
+        for (index, (x, y, width, height)) in [
+            (0.0, 0.0, 2.0, 10.0),
+            (2.0, 0.0, 5.0, 2.0),
+            (2.0, 4.0, 5.0, 2.0),
+            (7.0, 0.0, 2.0, 6.0),
+            (11.0, 0.0, 2.0, 10.0),
+            (13.0, 0.0, 5.0, 2.0),
+            (13.0, 4.0, 4.0, 2.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            teach.children.push(
+                node(
+                    &format!("safe-return-teach-keycap-glyph-{index}"),
+                    Role::Group,
+                    "",
+                    glyph_left + x * scale,
+                    glyph_top + y * scale,
+                    width * scale,
+                    height * scale,
+                    COLOR_TEXT_SECONDARY_TOKEN,
+                )
+                .with_ink_token("--scene-overlay-role"),
+            );
+        }
+        teach.children.push(
+            node(
+                "safe-return-teach-copy",
+                Role::Text,
+                "returns you here.",
+                content_left + teach_cap_width + SPACE_2 * scale,
                 cursor,
-                content_width,
+                content_width - teach_cap_width - SPACE_2 * scale,
                 teach_height,
                 SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Caption)
             .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
-        ));
+        );
+        out.push(teach);
         cursor += teach_height + row_gap;
         let continue_height = (54.0 * scale).min(64.0);
         let mut continue_node = node(
@@ -6385,17 +6649,60 @@ impl ShellCore {
         continue_node.action = Some(NodeAction::Activate);
         continue_node.children.push(
             node(
+                "continue-keycap-activate-border",
+                Role::Group,
+                "",
+                content_left + content_width - 196.0,
+                cursor + 4.0,
+                44.0,
+                continue_height - 8.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_corner_radius((continue_height - 8.0) / 2.0)
+            .with_border(COLOR_TEXT_INVERSE_TOKEN, KEYCAP_BORDER_WIDTH),
+        );
+        continue_node.children.push(
+            node(
                 "continue-label",
                 Role::Text,
                 "Continue",
                 content_left + SPACE_4,
                 cursor + (continue_height - scaled_text_box_height(28.0, self.text_scale)) / 2.0,
-                content_width - 140.0,
+                content_width - 210.0,
                 scaled_text_box_height(28.0, self.text_scale),
                 SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Label)
             .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
+        );
+        continue_node.children.push(
+            node(
+                "continue-keycap-activate",
+                Role::Text,
+                "A",
+                content_left + content_width - 196.0,
+                cursor + 4.0,
+                44.0,
+                continue_height - 8.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_text_align(TextAlign::Center)
+            .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
+        );
+        continue_node.children.push(
+            node(
+                "continue-keycap-start-border",
+                Role::Group,
+                "",
+                content_left + content_width - 144.0,
+                cursor + 4.0,
+                120.0,
+                continue_height - 8.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_corner_radius(RADIUS_S * scale)
+            .with_border(COLOR_TEXT_INVERSE_TOKEN, KEYCAP_BORDER_WIDTH),
         );
         continue_node.children.push(
             node(
@@ -6406,10 +6713,11 @@ impl ShellCore {
                 cursor + 4.0,
                 120.0,
                 continue_height - 8.0,
-                COLOR_SURFACE_RAISED_TOKEN,
+                SCENE_TRANSPARENT_TOKEN,
             )
             .with_type_role(TypeRole::Caption)
-            .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+            .with_text_align(TextAlign::Center)
+            .with_ink_token(COLOR_TEXT_INVERSE_TOKEN),
         );
         out.push(continue_node);
     }
@@ -7618,6 +7926,31 @@ fn best_variant(item: &Item) -> Option<&Variant> {
         .find(|variant| matches!(variant.availability, Availability::Ready))
         .or_else(|| item.variants.first())
 }
+
+fn caseless_match_char_range(title: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut lowered_title = String::new();
+    let mut original_char_for_lowered_char = Vec::new();
+    for (original_char, ch) in title.chars().enumerate() {
+        for lowered in ch.to_lowercase() {
+            lowered_title.push(lowered);
+            original_char_for_lowered_char.push(original_char);
+        }
+    }
+
+    let lowered_query = query.to_lowercase();
+    let match_byte = lowered_title.find(&lowered_query)?;
+    let lowered_start = lowered_title[..match_byte].chars().count();
+    let lowered_len = lowered_query.chars().count();
+    let lowered_end = lowered_start.checked_add(lowered_len)?;
+    let original_start = *original_char_for_lowered_char.get(lowered_start)?;
+    let original_end = original_char_for_lowered_char.get(lowered_end.checked_sub(1)?)? + 1;
+    Some(original_start..original_end)
+}
+
 fn kind_text(kind: &AppKind) -> &'static str {
     match kind {
         AppKind::Media => "MEDIA",
@@ -7674,6 +8007,56 @@ fn node(id: &str, role: Role, label: &str, x: f32, y: f32, w: f32, h: f32, token
         Bounds::new(x, y, w, h),
         token,
     )
+}
+
+const SEARCH_KEYS: [&str; 39] = [
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S",
+    "T", "U", "V", "W", "X", "Y", "Z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "SPACE",
+    "DELETE", "DONE",
+];
+
+fn dashed_outline_nodes(prefix: &str, bounds: Bounds, token: &str) -> Vec<Node> {
+    const DASH: f32 = 8.0;
+    const STEP: f32 = 16.0;
+    let mut nodes = Vec::new();
+    let mut index = 0;
+    let mut x = bounds.x;
+    while x < bounds.x + bounds.width {
+        let width = DASH.min(bounds.x + bounds.width - x);
+        for y in [bounds.y, bounds.y + bounds.height - 1.0] {
+            nodes.push(node(
+                &format!("{prefix}-{index}"),
+                Role::Group,
+                "",
+                x,
+                y,
+                width,
+                1.0,
+                token,
+            ));
+            index += 1;
+        }
+        x += STEP;
+    }
+    let mut y = bounds.y + STEP;
+    while y < bounds.y + bounds.height - 1.0 {
+        let height = DASH.min(bounds.y + bounds.height - 1.0 - y);
+        for x in [bounds.x, bounds.x + bounds.width - 1.0] {
+            nodes.push(node(
+                &format!("{prefix}-{index}"),
+                Role::Group,
+                "",
+                x,
+                y,
+                1.0,
+                height,
+                token,
+            ));
+            index += 1;
+        }
+        y += STEP;
+    }
+    nodes
 }
 
 /// Thickness of the persistent-selection BOTTOM underline (shell.css `inset 0 -3px 0 accent`).
@@ -9691,6 +10074,18 @@ mod tests {
             "read-only value chips must not carry the accent CTA fill"
         );
         assert!(find("continue-keycap-start").is_some());
+        for id in [
+            "safe-return-teach-keycap-border",
+            "continue-keycap-activate-border",
+            "continue-keycap-start-border",
+        ] {
+            let chip = find(id).unwrap();
+            assert!((chip.border_width - KEYCAP_BORDER_WIDTH).abs() < f32::EPSILON);
+            assert!(
+                chip.border_token.is_some(),
+                "{id} must paint an outlined chip"
+            );
+        }
         assert!(find("safe-return-teach").is_some_and(|node| node.action.is_none()));
     }
 
@@ -10037,10 +10432,19 @@ mod tests {
         let scene = settings_scene(&core);
         let row = node_by_id(scene.root(), "settings-row-controls-remap").unwrap();
         assert_eq!(row.style_token, COLOR_SURFACE_RAISED_TOKEN);
-        assert_eq!(
-            row.border_token.as_deref(),
-            Some(STATE_DISABLED_BORDER_TOKEN)
-        );
+        assert!(row.border_token.is_none());
+        let dash_pixels: f32 = row
+            .children
+            .iter()
+            .filter(|node| {
+                node.id
+                    .as_str()
+                    .starts_with("settings-row-controls-remap-dash-")
+            })
+            .map(|node| node.bounds.width * node.bounds.height)
+            .sum();
+        let perimeter = 2.0 * (row.bounds.width + row.bounds.height);
+        assert!((0.45..=0.60).contains(&(dash_pixels / perimeter)));
         assert!(row.action.is_none());
         assert_ne!(row.style_token, STATE_REST_SURFACE_TOKEN);
     }
@@ -10691,6 +11095,7 @@ mod tests {
     fn details_back_restores_item_in_current_search_results() {
         let mut c = core();
         c.go(Route::Search);
+        c.search_key = None;
         c.search_results = vec![1, 0];
         c.focus = 0;
         c.action(&ShellAction::Activate);
@@ -10705,6 +11110,7 @@ mod tests {
     fn details_back_clamps_to_search_item_when_result_vanished() {
         let mut c = core();
         c.go(Route::Search);
+        c.search_key = None;
         c.focus = 1;
         c.action(&ShellAction::Activate);
         assert_eq!((c.route(), c.selected_item), (Route::Details, Some(1)));
@@ -11390,10 +11796,47 @@ mod tests {
         assert_eq!(row.accessible_label, format!("{title} · GAME · Ready"));
         assert!(painted_title.accessible_label.ends_with('…'));
         assert!(painted_title.bounds.x >= row.bounds.x);
-        assert!(painted_title.bounds.x + painted_title.bounds.width <= caption.bounds.x);
-        assert!(caption.bounds.x >= painted_title.bounds.x + painted_title.bounds.width);
+        assert!((painted_title.bounds.x - caption.bounds.x).abs() < f32::EPSILON);
+        assert!(painted_title.bounds.y + painted_title.bounds.height <= caption.bounds.y);
         assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
-        assert!(caption.bounds.width >= caption_text_width(" · GAME · Ready", 200));
+        assert!(caption.bounds.width > 0.0);
+    }
+
+    #[test]
+    fn search_match_underline_maps_casefolded_matches_to_original_title_chars() {
+        assert_eq!(caseless_match_char_range("Ridgeline", "LINE"), Some(5..9));
+        assert_eq!(caseless_match_char_range("İİA", "a"), Some(2..3));
+
+        let mut core = fixture_core(vec![item(
+            "unicode-search-result",
+            "İİA",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("a");
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let title = node_by_id(scene.root(), "search-result-unicode-search-result-title").unwrap();
+        let underline = node_by_id(
+            scene.root(),
+            "search-result-unicode-search-result-match-underline",
+        )
+        .unwrap();
+
+        let expected_x = title.bounds.x + TEXT_NODE_INLINE_INSET + 2.0 * CAPTION_GLYPH_ADVANCE;
+        assert!((underline.bounds.x - expected_x).abs() < f32::EPSILON);
+        assert!((underline.bounds.width - CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -11462,6 +11905,50 @@ mod tests {
         assert_eq!(focused.len(), 1);
         assert_eq!(focused[0].id.as_str(), "search-query");
         assert_eq!(empty.focused().map(NodeId::as_str), Some("search-query"));
+    }
+
+    #[test]
+    fn search_osk_is_complete_and_dpad_navigable_end_to_end() {
+        let mut core = fixture_core(vec![item(
+            "alpha",
+            "Alpha",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let keyboard = node_by_id(scene.root(), "search-keyboard").unwrap();
+        assert_eq!(keyboard.children.len(), SEARCH_KEYS.len());
+        assert_eq!(scene.focused().map(NodeId::as_str), Some("search-key-0"));
+        assert_eq!(
+            node_by_id(scene.root(), "search-results-heading")
+                .unwrap()
+                .accessible_label,
+            "IN YOUR LIBRARY · 1 MATCHES"
+        );
+
+        core.action(&ShellAction::Activate); // A
+        assert_eq!(core.search_query(), "A");
+        for _ in 0..6 {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        assert_eq!(core.search_key, Some(36));
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(core.search_key, Some(37));
+        core.action(&ShellAction::Activate); // DELETE
+        assert_eq!(core.search_query(), "");
+        core.action(&ShellAction::Move(AxisMove::Right));
+        core.action(&ShellAction::Activate); // DONE
+        assert_eq!(core.search_key, None);
+        assert_eq!(core.focused_item_index(), Some(0));
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.search_key, Some(0));
     }
 
     #[test]

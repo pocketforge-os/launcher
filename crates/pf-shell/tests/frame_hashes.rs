@@ -65,6 +65,29 @@ fn two_fresh_process_offscreen_runs_are_byte_identical() {
     }
 }
 
+#[test]
+fn focused_library_search_evidence_applies_a_distinct_focused_state() {
+    let out = tempfile::tempdir().unwrap();
+    render_evidence_set(out.path(), &[]);
+    let library = std::fs::read(out.path().join("library.png")).unwrap();
+    let focused = std::fs::read(out.path().join("library-focused-search.png")).unwrap();
+    assert_ne!(
+        library, focused,
+        "focused-search evidence must not duplicate the plain Library frame"
+    );
+
+    let semantic =
+        std::fs::read_to_string(out.path().join("library-focused-search.semantic.txt")).unwrap();
+    let search = semantic
+        .lines()
+        .find(|line| line.trim_start().starts_with("library-search "))
+        .expect("focused-search evidence must contain the Library search affordance");
+    assert!(
+        search.contains("focused: true"),
+        "focused-search evidence must focus the Library search affordance: {search}"
+    );
+}
+
 // Split per evidence route-set so the two subprocess renders schedule as separate
 // tests (was one fn looping both arg-sets, spawning them back-to-back). Routing
 // through `frame_hash_command` keeps the exact command the old inline build produced
@@ -281,7 +304,9 @@ fn vertical_slice_frame_hashes_are_stable() {
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
         "63bcd820e33b4b0e440dee6c269fab7ac360ec4af77cc00de293c2486ab38298  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
-        "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
+        // Plain Library now has its first grid item focused; the following route
+        // explicitly returns focus to search and retains its prior digest.
+        "014b8340a8b02e3261782f77fd21b98cb29ee1d469beb9b6039628518dd329e5  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
         "974780574547cc01aeee8fc0e92db2f71242ff8661d4538d7902f54ab848ba09  ",
         "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",

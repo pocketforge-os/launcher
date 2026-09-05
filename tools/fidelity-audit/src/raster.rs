@@ -62,6 +62,26 @@ impl Raster {
         })
     }
 
+    /// Assert this raster is in the documented audit coordinate space.
+    ///
+    /// A render (or golden) that is not exactly `w`x`h` was produced at a
+    /// different viewport than the design-facts were measured at, so every
+    /// mockup-space bbox the crop/color comparators clamp into it lands on the
+    /// wrong pixels — a plausible-but-wrong ledger. `label` names which raster.
+    ///
+    /// # Errors
+    /// Returns an error naming the got-vs-expected dimensions.
+    pub fn require_dims(&self, w: u32, h: u32, label: &str) -> Result<(), String> {
+        if self.width != w || self.height != h {
+            return Err(format!(
+                "{label} raster is {}x{}, not the documented audit coordinate space {w}x{h}; \
+                 re-render at the audit viewport",
+                self.width, self.height
+            ));
+        }
+        Ok(())
+    }
+
     /// Clamp a mockup-space bbox to an integer pixel rect inside the image.
     #[must_use]
     pub fn clamp_rect(&self, bbox: &BBox) -> Rect {
@@ -179,4 +199,33 @@ impl Raster {
 
 fn channel_distance(a: [u8; 4], b: [u8; 4]) -> u32 {
     (0..3).map(|c| u32::from(a[c].abs_diff(b[c]))).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank(width: u32, height: u32) -> Raster {
+        Raster {
+            width,
+            height,
+            rgba: vec![0; (width * height * 4) as usize],
+        }
+    }
+
+    #[test]
+    fn require_dims_accepts_the_audit_space() {
+        blank(1280, 720)
+            .require_dims(1280, 720, "shell render")
+            .expect("a 1280x720 raster must pass");
+    }
+
+    #[test]
+    fn require_dims_rejects_a_wrong_viewport() {
+        let err = blank(1024, 768)
+            .require_dims(1280, 720, "shell render")
+            .expect_err("a wrong-viewport raster must be a hard input error");
+        assert!(err.contains("audit coordinate space"), "err={err}");
+        assert!(err.contains("shell render"), "err names the raster: {err}");
+    }
 }

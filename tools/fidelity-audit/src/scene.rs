@@ -101,6 +101,33 @@ impl SceneTree {
     pub fn index(&self) -> BTreeMap<&str, &SceneNode> {
         self.nodes.iter().map(|n| (n.id.as_str(), n)).collect()
     }
+
+    /// Assert the scene's coordinate space is the documented audit space.
+    ///
+    /// `pf-shell`'s `semantic_snapshot` emits the scene root first (depth 0), so
+    /// the first parsed node's bounds are the whole coordinate space every other
+    /// node's bounds live in — the same space the design-facts geometry is
+    /// compared against. A scene rendered at any other viewport would produce a
+    /// plausible-but-wrong geometry ledger, so a root at the wrong size is a hard
+    /// input error, not silently-shifted bounds. `w`/`h` are the audit space.
+    ///
+    /// # Errors
+    /// Returns an error if the scene is empty or its root is not `w`x`h`.
+    pub fn require_coordinate_space(&self, w: u32, h: u32) -> Result<(), String> {
+        let root = self
+            .nodes
+            .first()
+            .ok_or("scene snapshot has no nodes (cannot establish a coordinate space)")?;
+        let (rw, rh) = (root.bounds.width, root.bounds.height);
+        if (rw - f64::from(w)).abs() > f64::EPSILON || (rh - f64::from(h)).abs() > f64::EPSILON {
+            return Err(format!(
+                "scene root `{}` is {rw}x{rh}, not the documented audit coordinate space {w}x{h}; \
+                 the shell was rendered at the wrong viewport and its bounds are meaningless here",
+                root.id
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Parse one non-blank semantic-snapshot line:
@@ -214,5 +241,39 @@ mod tests {
     fn indexes_by_id() {
         let tree = SceneTree::from_semantic_str(LINE).expect("parses");
         assert!(tree.index().contains_key("wifi-glyph"));
+    }
+
+    /// A root line (depth 0) with controllable bounds, as `semantic_snapshot`
+    /// emits it first.
+    fn root_line(w: f64, h: f64) -> String {
+        format!(
+            "root role=Group label=\"\" bounds=0.0,0.0,{w:.1},{h:.1} state=NodeState {{ }} action=None"
+        )
+    }
+
+    #[test]
+    fn a_root_at_the_audit_space_validates() {
+        let tree = SceneTree::from_semantic_str(&root_line(1280.0, 720.0)).expect("parses");
+        tree.require_coordinate_space(1280, 720)
+            .expect("a 1280x720 root must validate");
+    }
+
+    #[test]
+    fn a_root_at_the_wrong_viewport_is_rejected() {
+        let tree = SceneTree::from_semantic_str(&root_line(1024.0, 768.0)).expect("parses");
+        let err = tree
+            .require_coordinate_space(1280, 720)
+            .expect_err("a wrong-viewport root must be a hard input error");
+        assert!(err.contains("coordinate space"), "err={err}");
+        assert!(err.contains("root"), "err={err}");
+    }
+
+    #[test]
+    fn an_empty_scene_has_no_coordinate_space() {
+        let tree = SceneTree::from_semantic_str("").expect("empty parses");
+        let err = tree
+            .require_coordinate_space(1280, 720)
+            .expect_err("an empty scene cannot establish a coordinate space");
+        assert!(err.contains("no nodes"), "err={err}");
     }
 }

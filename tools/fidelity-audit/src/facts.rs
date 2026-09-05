@@ -9,6 +9,13 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::{AUDIT_H, AUDIT_W};
+
+/// The design-facts generator schema version this consumer understands. A file
+/// carrying any other version is a hard input error — its extraction semantics
+/// may differ, so trusting it would produce a plausible-but-wrong ledger.
+pub const SUPPORTED_GENERATOR_VERSION: u32 = 1;
+
 /// A whole route's ground-truth facts, as committed by the design generator.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DesignFacts {
@@ -25,6 +32,9 @@ pub struct Header {
     #[serde(default)]
     pub source: String,
     pub viewport: Viewport,
+    /// Generator schema version. REQUIRED (no default): a missing version is the
+    /// same input failure as an unsupported one.
+    pub generator_version: u32,
 }
 
 /// The mockup viewport the facts were measured at (fixed 1280x720).
@@ -106,6 +116,43 @@ impl DesignFacts {
             .map_err(|e| format!("parse design-facts {}: {e}", path.display()))
     }
 
+    /// Validate the trusted ground-truth contract before any comparison runs.
+    ///
+    /// Wrong ground truth produces a plausible-but-wrong ledger rather than a
+    /// hard error, so every trusted header invariant is enforced here, not
+    /// assumed: the generator schema version must be exactly the one this
+    /// consumer understands, the header route must be the route we are auditing,
+    /// and the viewport must be the documented audit coordinate space.
+    ///
+    /// # Errors
+    /// Returns an error naming the specific violated invariant.
+    pub fn validate(&self, expected_route: &str) -> Result<(), String> {
+        if self.header.generator_version != SUPPORTED_GENERATOR_VERSION {
+            return Err(format!(
+                "design-facts generator_version {} unsupported (this audit understands {SUPPORTED_GENERATOR_VERSION}); \
+                 regenerate the vendored facts with a matching generator",
+                self.header.generator_version
+            ));
+        }
+        if self.header.route != expected_route {
+            return Err(format!(
+                "design-facts header.route {:?} does not match the audited route {expected_route:?} \
+                 (wrong facts file vendored for this route)",
+                self.header.route
+            ));
+        }
+        let (vw, vh) = (self.header.viewport.w, self.header.viewport.h);
+        if (vw - f64::from(AUDIT_W)).abs() > f64::EPSILON
+            || (vh - f64::from(AUDIT_H)).abs() > f64::EPSILON
+        {
+            return Err(format!(
+                "design-facts viewport {vw}x{vh} is not the documented audit coordinate space \
+                 {AUDIT_W}x{AUDIT_H}; geometry/crop comparisons would be meaningless"
+            ));
+        }
+        Ok(())
+    }
+
     /// Look up a `unique` selector's facts.
     #[must_use]
     pub fn unique(&self, selector: &str) -> Option<&Facts> {
@@ -152,5 +199,91 @@ impl Border {
             .and_then(|w| w.trim().parse::<f64>().ok())
             .unwrap_or(0.0);
         self.bottom_style != "none" && self.bottom_style != "hidden" && width > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal facts document with a controllable header.
+    fn facts_json(generator_version: u32, route: &str, vw: f64, vh: f64) -> String {
+        format!(
+            r#"{{"header":{{"route":"{route}","viewport":{{"w":{vw},"h":{vh}}},
+               "generator_version":{generator_version}}},"unique":[],"instances":[]}}"#
+        )
+    }
+
+    fn load(json: &str) -> DesignFacts {
+        serde_json::from_str(json).expect("facts fixture parses")
+    }
+
+    #[test]
+    fn a_missing_generator_version_fails_to_deserialize() {
+        // No serde default: a facts file with no generator_version is as much an
+        // input failure as an unsupported one, never a silent default-to-1.
+        let json = r#"{"header":{"route":"quiet-console/home","viewport":{"w":1280,"h":720}}}"#;
+        let err = serde_json::from_str::<DesignFacts>(json)
+            .expect_err("a missing generator_version must not deserialize");
+        assert!(err.to_string().contains("generator_version"), "err={err}");
+    }
+
+    #[test]
+    fn an_unsupported_generator_version_is_rejected() {
+        let facts = load(&facts_json(
+            SUPPORTED_GENERATOR_VERSION + 1,
+            "quiet-console/home",
+            1280.0,
+            720.0,
+        ));
+        let err = facts
+            .validate("quiet-console/home")
+            .expect_err("an unsupported generator_version must be rejected");
+        assert!(err.contains("generator_version"), "err={err}");
+        assert!(
+            err.contains(&(SUPPORTED_GENERATOR_VERSION + 1).to_string()),
+            "err names the got version: {err}"
+        );
+    }
+
+    #[test]
+    fn a_route_mismatch_is_rejected() {
+        let facts = load(&facts_json(
+            SUPPORTED_GENERATOR_VERSION,
+            "quiet-console/library",
+            1280.0,
+            720.0,
+        ));
+        let err = facts
+            .validate("quiet-console/home")
+            .expect_err("wrong facts file for the route must be rejected");
+        assert!(err.contains("header.route"), "err={err}");
+    }
+
+    #[test]
+    fn a_wrong_viewport_is_rejected() {
+        let facts = load(&facts_json(
+            SUPPORTED_GENERATOR_VERSION,
+            "quiet-console/home",
+            1024.0,
+            768.0,
+        ));
+        let err = facts
+            .validate("quiet-console/home")
+            .expect_err("a non-audit viewport must be rejected");
+        assert!(err.contains("viewport"), "err={err}");
+    }
+
+    #[test]
+    fn a_conformant_header_validates() {
+        let facts = load(&facts_json(
+            SUPPORTED_GENERATOR_VERSION,
+            "quiet-console/home",
+            f64::from(AUDIT_W),
+            f64::from(AUDIT_H),
+        ));
+        facts
+            .validate("quiet-console/home")
+            .expect("the happy path must stay green");
     }
 }

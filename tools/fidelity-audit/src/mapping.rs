@@ -5,9 +5,16 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+/// The mapping-table schema version this consumer understands. A committed
+/// mapping carrying any other value is a hard input error — the audit trusts the
+/// mapping's shape (selector/node correspondence, comparator classes), so a
+/// schema it does not recognise must fail loudly, never be read on faith.
+pub const SUPPORTED_MAPPING_SCHEMA: u32 = 1;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Mapping {
-    #[serde(default)]
+    /// Mapping schema version. REQUIRED (no serde default): a missing version is
+    /// the same trusted-input failure as an unsupported one.
     pub schema_version: u32,
     pub routes: Vec<RouteMap>,
 }
@@ -93,7 +100,25 @@ impl Mapping {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("read mapping {}: {e}", path.display()))?;
-        serde_json::from_str(&raw).map_err(|e| format!("parse mapping {}: {e}", path.display()))
+        let mapping: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse mapping {}: {e}", path.display()))?;
+        mapping.validate()?;
+        Ok(mapping)
+    }
+
+    /// Reject an unsupported mapping schema version before any route is audited.
+    ///
+    /// # Errors
+    /// Returns an error naming the got-vs-supported schema version.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SUPPORTED_MAPPING_SCHEMA {
+            return Err(format!(
+                "mapping schema_version {} unsupported (this audit understands {SUPPORTED_MAPPING_SCHEMA}); \
+                 the mapping table's shape may have changed — update the tool, not just the file",
+                self.schema_version
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -111,5 +136,47 @@ impl Component {
             Some(i) => format!("{}[i{i}]", self.selector),
             None => self.selector.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_schema_version_fails_to_deserialize() {
+        // No serde default: a mapping with no schema_version is an input failure,
+        // never a silent default-to-0 that would then fail validation with a
+        // confusing "0 unsupported" instead of naming the real problem.
+        let json = r#"{"routes":[]}"#;
+        let err = serde_json::from_str::<Mapping>(json)
+            .expect_err("a missing schema_version must not deserialize");
+        assert!(err.to_string().contains("schema_version"), "err={err}");
+    }
+
+    #[test]
+    fn an_unsupported_schema_version_is_rejected() {
+        let json = format!(
+            r#"{{"schema_version":{},"routes":[]}}"#,
+            SUPPORTED_MAPPING_SCHEMA + 1
+        );
+        let mapping: Mapping = serde_json::from_str(&json).expect("parses");
+        let err = mapping
+            .validate()
+            .expect_err("an unsupported schema_version must be rejected");
+        assert!(err.contains("schema_version"), "err={err}");
+        assert!(
+            err.contains(&(SUPPORTED_MAPPING_SCHEMA + 1).to_string()),
+            "err names the got version: {err}"
+        );
+    }
+
+    #[test]
+    fn the_supported_schema_version_validates() {
+        let json = format!(r#"{{"schema_version":{SUPPORTED_MAPPING_SCHEMA},"routes":[]}}"#);
+        let mapping: Mapping = serde_json::from_str(&json).expect("parses");
+        mapping
+            .validate()
+            .expect("the supported schema must stay green");
     }
 }

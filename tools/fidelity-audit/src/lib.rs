@@ -36,6 +36,13 @@ pub mod mapping;
 pub mod raster;
 pub mod scene;
 
+/// The documented audit coordinate space — every trusted input (design-facts
+/// viewport, shell scene root, render rasters) must be in this exact space, or
+/// the ledger's geometry/crop comparisons are meaningless. Enforced, not assumed.
+pub const AUDIT_W: u32 = 1280;
+/// See [`AUDIT_W`].
+pub const AUDIT_H: u32 = 720;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -199,10 +206,19 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
             .join("design-facts")
             .join(&route.design_facts),
     )?;
+    // Validate the trusted ground-truth contract BEFORE any comparison: an
+    // unsupported generator, a facts file vendored for the wrong route, or a
+    // viewport that is not the documented audit space would each produce a
+    // plausible-but-wrong ledger, so each is a hard input error here.
+    design.validate(&route.route)?;
     let scene_path = config
         .renders_dir
         .join(format!("{}.semantic.txt", route.shell_slug));
     let tree = SceneTree::load_semantic(&scene_path)?;
+    // Self-sweep: the scene root's bounds declare the coordinate space every
+    // node's geometry lives in. A shell rendered at the wrong viewport is a hard
+    // input error, not silently-shifted bounds compared against the mockup.
+    tree.require_coordinate_space(AUDIT_W, AUDIT_H)?;
     let index = tree.index();
     let scale = tree.text_scale;
 
@@ -218,7 +234,12 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
 
     let shell_png = if needs_shell {
         let path = config.renders_dir.join(format!("{}.png", route.shell_slug));
-        Some(Raster::load(&path)?)
+        let raster = Raster::load(&path)?;
+        // Self-sweep: the render PNG's dimensions are a trusted input the crop /
+        // color comparators clamp mockup bboxes into. A render at any other
+        // viewport is a hard input error, not silently-wrong pixels.
+        raster.require_dims(AUDIT_W, AUDIT_H, "shell render")?;
+        Some(raster)
     } else {
         None
     };
@@ -229,7 +250,9 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
                 route.route
             )
         })?;
-        Some(Raster::load(&config.repo_root.join(rel))?)
+        let raster = Raster::load(&config.repo_root.join(rel))?;
+        raster.require_dims(AUDIT_W, AUDIT_H, "golden mockup")?;
+        Some(raster)
     } else {
         None
     };

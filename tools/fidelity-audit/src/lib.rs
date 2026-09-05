@@ -97,6 +97,26 @@ pub fn run(config: &Config) -> Result<RunResult, String> {
     let mapping = Mapping::load(&config.crate_dir.join("mapping/mapping.json"))?;
     let baseline = Baseline::load(&config.crate_dir.join("baseline/accepted.json"))?;
 
+    // Validate every requested --route against the mapping BEFORE filtering: a
+    // typo must be a hard error, not a zero-route empty-ledger exit-0.
+    let known: BTreeSet<&str> = mapping.routes.iter().map(|r| r.route.as_str()).collect();
+    if let Some(want) = &config.routes {
+        let unknown: Vec<&str> = want
+            .iter()
+            .map(String::as_str)
+            .filter(|w| !known.contains(w))
+            .collect();
+        if !unknown.is_empty() {
+            let mut all: Vec<&str> = known.iter().copied().collect();
+            all.sort_unstable();
+            return Err(format!(
+                "unknown --route id(s): {} (known routes: {})",
+                unknown.join(", "),
+                all.join(", ")
+            ));
+        }
+    }
+
     let selected: Vec<&RouteMap> = mapping
         .routes
         .iter()
@@ -107,6 +127,11 @@ pub fn run(config: &Config) -> Result<RunResult, String> {
                 .is_none_or(|want| want.iter().any(|w| w == &r.route))
         })
         .collect();
+
+    // An empty selection means zero work; never silently exit 0.
+    if selected.is_empty() {
+        return Err("no routes selected to audit (the mapping has no routes)".to_string());
+    }
 
     if let Some(bin) = &config.shell_bin {
         render_slugs(bin, &selected, &config.renders_dir)?;
@@ -160,6 +185,14 @@ fn render_slugs(bin: &Path, routes: &[&RouteMap], renders_dir: &Path) -> Result<
 }
 
 fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result<(), String> {
+    // A selected route that maps zero components does zero work — a mapping
+    // authoring error, not a silent pass.
+    if route.components.is_empty() {
+        return Err(format!(
+            "route {} has no components in the mapping (zero work)",
+            route.route
+        ));
+    }
     let design = DesignFacts::load(
         &config
             .crate_dir
@@ -210,22 +243,58 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
         out_dir: &config.out_dir,
     };
     for comp in &route.components {
-        let Some(mockup) = resolve_facts(&design, comp) else {
-            ledger.extend([info(
-                route,
-                comp,
-                "mapping",
-                "missing design-facts selector",
-            )]);
-            continue;
-        };
+        // A mapping selector that does not resolve in our OWN vendored ground
+        // truth is a config/drift error (the mapping-integrity test guards the
+        // committed state; this guards a drifted vendor at runtime) — hard-fail,
+        // never silently skip the component.
+        let mockup = resolve_facts(&design, comp).ok_or_else(|| {
+            format!(
+                "{} {}: mapping selector `{}` not found in vendored design-facts {} — \
+                 re-vendor the facts or fix the mapping",
+                route.route,
+                comp.label(),
+                comp.selector,
+                route.design_facts
+            )
+        })?;
         let Some(node) = index.get(comp.node.as_str()) else {
-            ledger.extend([info(route, comp, "mapping", "mapped scene node not found")]);
+            // A missing REQUIRED node is a gating divergence (a rename/removal
+            // must fail --gate, not silently skip every comparator). A node
+            // DECLARED optional in the mapping is the only non-gating carve-out.
+            ledger.extend([absent_node_finding(route, comp)]);
             continue;
         };
         run_comparators(&ctx, comp, mockup, node, ledger)?;
     }
     Ok(())
+}
+
+/// The finding for a mapped scene node that is absent from the shell scene:
+/// a gating divergence for a required node, a declared non-gating note for an
+/// `optional` one.
+fn absent_node_finding(route: &RouteMap, comp: &Component) -> Finding {
+    let severity = if comp.optional {
+        Severity::Info
+    } else {
+        Severity::Divergence
+    };
+    let detail = if comp.optional {
+        "declared-optional mapped scene node absent (non-gating carve-out)"
+    } else {
+        "required mapped scene node not found in the shell scene"
+    };
+    Finding {
+        route: route.route.clone(),
+        selector: comp.label(),
+        node: comp.node.clone(),
+        fact_class: "mapping".to_string(),
+        expected: format!("scene node `{}`", comp.node),
+        shipped: "absent".to_string(),
+        delta: detail.to_string(),
+        severity,
+        artifact: None,
+        accepted: false,
+    }
 }
 
 /// Shared inputs for one route's comparators.
@@ -251,9 +320,14 @@ fn run_comparators(
         ledger.extend(compare::geometry(route, comp, &mockup.bbox, &node.bounds));
     }
     if comp.wants(FactClass::FontSize) {
-        if let Some(px) = mockup.font.size_px() {
-            ledger.extend(compare::font_size(route, comp, px, node, ctx.scale));
-        }
+        let px = mockup.font.size_px().ok_or_else(|| {
+            format!(
+                "{route} {}: font-size enabled but mockup font size {:?} is unparseable",
+                comp.label(),
+                mockup.font.size
+            )
+        })?;
+        ledger.extend(compare::font_size(route, comp, px, node, ctx.scale));
     }
     if comp.wants(FactClass::Decoration) {
         let has_underline = comp
@@ -296,17 +370,38 @@ fn resolve_facts<'a>(design: &'a DesignFacts, comp: &Component) -> Option<&'a Fa
     }
 }
 
-fn info(route: &RouteMap, comp: &Component, class: &str, detail: &str) -> Finding {
-    Finding {
-        route: route.route.clone(),
-        selector: comp.label(),
-        node: comp.node.clone(),
-        fact_class: class.to_string(),
-        expected: String::new(),
-        shipped: String::new(),
-        delta: detail.to_string(),
-        severity: Severity::Info,
-        artifact: None,
-        accepted: false,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn component(json: &str) -> Component {
+        serde_json::from_str(json).expect("component fixture")
+    }
+
+    fn route() -> RouteMap {
+        serde_json::from_str(
+            r#"{"route":"r","design_facts":"d.json","shell_slug":"s","components":[]}"#,
+        )
+        .expect("route fixture")
+    }
+
+    #[test]
+    fn a_missing_required_node_is_a_gating_divergence() {
+        let comp = component(r#"{"selector":".x","node":"n","classes":["geometry"]}"#);
+        let f = absent_node_finding(&route(), &comp);
+        assert_eq!(f.severity, Severity::Divergence);
+        assert!(f.is_gating(), "a required node's absence must fail --gate");
+    }
+
+    #[test]
+    fn a_missing_optional_node_is_a_declared_noninfo_carveout() {
+        let comp =
+            component(r#"{"selector":".x","node":"n","classes":["geometry"],"optional":true}"#);
+        let f = absent_node_finding(&route(), &comp);
+        assert_eq!(f.severity, Severity::Info);
+        assert!(
+            !f.is_gating(),
+            "a declared-optional node's absence is non-gating"
+        );
     }
 }

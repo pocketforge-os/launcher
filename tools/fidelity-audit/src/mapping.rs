@@ -46,6 +46,12 @@ pub struct Component {
     /// treatment (consumed by the decoration comparator).
     #[serde(default)]
     pub underline_node: Option<String>,
+    /// When true, the mapped scene node being ABSENT is a DECLARED non-gating
+    /// carve-out (a component the shell intentionally does not render on this
+    /// route yet). When false (the default), a missing node is a gating
+    /// divergence — a node rename/removal must not silently skip comparators.
+    #[serde(default)]
+    pub optional: bool,
     #[serde(default)]
     pub note: Option<String>,
 }

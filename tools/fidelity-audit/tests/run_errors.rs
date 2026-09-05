@@ -74,3 +74,60 @@ fn run_errors_when_a_required_png_is_corrupt() {
         .expect_err("a corrupt required PNG must be a hard error");
     assert!(err.contains("png"), "unexpected error: {err}");
 }
+
+#[test]
+fn run_errors_on_an_unknown_route_id() {
+    // A typo'd --route must be a hard error, not a zero-route empty-ledger exit 0.
+    let renders = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = crate_dir();
+    let config = Config {
+        crate_dir: dir.clone(),
+        repo_root: dir.join("../.."),
+        renders_dir: renders.path().to_path_buf(),
+        out_dir: out.path().to_path_buf(),
+        shell_bin: None,
+        routes: Some(vec!["quiet-console/does-not-exist".to_string()]),
+        gate: false,
+        format: OutputFormat::Table,
+    };
+    let err = run(&config).expect_err("an unknown route id must be rejected");
+    assert!(err.contains("unknown --route"), "unexpected error: {err}");
+}
+
+#[test]
+fn a_missing_required_scene_node_is_a_gating_divergence() {
+    // Route `settings` needs no rasters (no crop/color), so a hand-written
+    // semantic dump omitting required nodes exercises the node-absence path.
+    // The dump has only `status-cluster`, so `.sys` resolves but every other
+    // required settings node is absent -> gating divergences (--gate would fail).
+    let renders = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let only_status = "  status-cluster role=Text label=\"82 9:41\" bounds=1144.0,16.0,152.0,32.0 state=NodeState { focused: false, selected: false } action=None\n";
+    std::fs::write(renders.path().join("settings.semantic.txt"), only_status).unwrap();
+    let dir = crate_dir();
+    let config = Config {
+        crate_dir: dir.clone(),
+        repo_root: dir.join("../.."),
+        renders_dir: renders.path().to_path_buf(),
+        out_dir: out.path().to_path_buf(),
+        shell_bin: None,
+        routes: Some(vec!["quiet-console/settings".to_string()]),
+        gate: false,
+        format: OutputFormat::Table,
+    };
+    let result = run(&config).expect("settings audits with no rasters");
+    assert!(
+        result.ledger.gating() > 0,
+        "a missing required scene node must produce a gating divergence; ledger: {:?}",
+        result.ledger.findings
+    );
+    assert!(
+        result
+            .ledger
+            .findings
+            .iter()
+            .any(|f| f.fact_class == "mapping" && f.is_gating()),
+        "expected a gating mapping divergence"
+    );
+}

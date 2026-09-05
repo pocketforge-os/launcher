@@ -168,7 +168,9 @@
           "node": "status-cluster",
           "classes": [
             "geometry"
-          ]
+          ],
+          "optional": true,
+          "note": "status cluster is not rendered on this f10-evidence route pre-.394 (which lands live-parity status); DECLARED optional so its absence is a non-gating carve-out, not a silent skip."
         },
         {
           "selector": ".rooms",
@@ -226,7 +228,9 @@
           "node": "status-cluster",
           "classes": [
             "geometry"
-          ]
+          ],
+          "optional": true,
+          "note": "status cluster is not rendered on this f10-evidence route pre-.394 (which lands live-parity status); DECLARED optional so its absence is a non-gating carve-out, not a silent skip."
         },
         {
           "selector": ".rooms",

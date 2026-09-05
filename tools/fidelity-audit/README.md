@@ -74,10 +74,31 @@ The ledger is written to `target/fidelity-audit/ledger.json`; crop delta artifac
 land beside it. Exit code: `0` report ok / gate passed, `1` gate failed, `2` usage
 or input error. CI runs it non-gating (`ci.yml` "Fidelity-audit report").
 
+## Silent-success is a defect — the audit fails loudly on broken inputs
+
+Report mode downgrades only *findings*, never *inputs*. Every path that would
+otherwise do zero work and exit 0 is a hard error or a gating divergence:
+- a typo'd `--route` (unknown id) or an empty route selection → error;
+- a route with no components → error;
+- a mapping selector absent from the vendored design-facts → error;
+- a required render (shell/golden PNG) absent or corrupt, or a golden/shell size
+  mismatch → error;
+- a malformed non-blank semantic record → error (names the line);
+- a **required** mapped scene node absent from the shell scene → a **gating
+  divergence** (fails `--gate`), so a node rename/removal cannot silently skip
+  its comparators.
+
+The one declared carve-out: a component marked `"optional": true` in the mapping
+whose node is absent is a **non-gating** note — used only where the shell
+intentionally does not render that component on a route yet (e.g. `.sys` on the
+`library`/`detail` f10-evidence routes pre-`tsp-op5a.394`). The carve-out is
+declared in the mapping, never implicit.
+
 ## Extending
 
 - **A new component** → add a `{selector, node, classes}` entry to the route in
-  `mapping/mapping.json` (`index` for an `instances` selector). `cargo test -p
+  `mapping/mapping.json` (`index` for an `instances` selector; `optional: true`
+  only when the shell legitimately may not render it yet). `cargo test -p
   fidelity-audit` fails if a selector does not resolve in the vendored facts.
 - **A new route** → vendor its `design-facts/quiet-console/<route>.json`
   (see `design-facts/VENDOR.md`) and add a route block to the mapping.

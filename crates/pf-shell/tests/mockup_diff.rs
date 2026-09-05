@@ -24,11 +24,21 @@ const HEIGHT: u32 = 720;
 // 0.915236572, quick 1.0. High-contrast dips ~5e-6 vs the Dusk-baked star it replaces
 // (the HC star is now white per --state-selected-accent) yet stays far above the
 // pre-Family-D 0.911737 floor.
+// tsp-op5a.395 (Family E heading/label hierarchy wiring) raises `detail` 0.940679 ->
+// 0.942868 (the Details title drops from the oversized Hero role to its Title role,
+// matching the mockup scale). `settings` moves the other way by a sub-perceptual
+// 9.4e-6 (0.969325054 -> 0.969316312): the Settings section title is now the dominant
+// H1 role (correct per the mockup, a clear visual win), but the row NAME adopts the
+// Label role (14px/600) where the mockup binds a 15px/700 pair the seven-role type
+// vocabulary cannot express without editing tokens (out of scope for a role-wiring
+// bead). The 1px name shrink costs the near-noise delta while restoring the
+// name>sublabel hierarchy the flattened Body/Body default had erased; the rig captures
+// confirm the screen reads better. home/library/high-contrast/quick are untouched.
 const SCREENS: [(&str, &str, f64); 6] = [
     ("home", "boot-home.png", 0.940_137),
     ("library", "library.png", 0.978_014),
-    ("detail", "details.png", 0.940_679),
-    ("settings", "settings.png", 0.969_325),
+    ("detail", "details.png", 0.942_868),
+    ("settings", "settings.png", 0.969_316),
     ("high-contrast", "high-contrast.png", 0.915_236),
     ("quick", "quick-power.png", 1.0),
 ];

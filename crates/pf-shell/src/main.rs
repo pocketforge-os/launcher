@@ -4921,6 +4921,91 @@ mod durable_tests {
     }
 
     #[test]
+    fn variant_chooser_header_stack_is_occlusion_safe_at_supported_scales() {
+        // Regression (tsp-op5a.395 review r2): the restored chooser eyebrow/title/note
+        // header used FIXED y positions while the boxes scale with text_scale, so at
+        // 150%/200% the eyebrow box grew into the title and the title box into the note.
+        // The chooser route was absent from the scaled occlusion matrix (the offscreen
+        // evidence renders it only at 100%), so the raster occlusion guard never saw the
+        // collision. Drive the real chooser scene at every supported scale and assert the
+        // header stack flows without overlap AND passes the offscreen occlusion guard.
+        fn find_node<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find_node(child, id)))
+        }
+        fn assert_below(scene: &pf_scene::Scene, upper: &str, lower: &str, scale: u16) {
+            let upper = find_node(scene.root(), upper)
+                .unwrap_or_else(|| panic!("{scale}% chooser: missing {upper}"));
+            let lower = find_node(scene.root(), lower)
+                .unwrap_or_else(|| panic!("{scale}% chooser: missing {lower}"));
+            assert!(
+                lower.bounds.y >= upper.bounds.y + upper.bounds.height,
+                "{scale}% chooser: {} {:?} overlaps {} {:?}",
+                upper.id.as_str(),
+                upper.bounds,
+                lower.id.as_str(),
+                lower.bounds
+            );
+        }
+
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let item = snapshot
+            .items
+            .iter_mut()
+            .find(|item| item.id == "moth-and-lantern")
+            .unwrap();
+        let mut second = item
+            .variants
+            .iter()
+            .find(|variant| matches!(variant.availability, pf_catalog::Availability::Ready))
+            .unwrap()
+            .clone();
+        second.id = "handheld".into();
+        second.provider_id = "fixture-c".into();
+        second.provenance.provider_id = "fixture-c".into();
+        second.launch_target.app_id = "moth-and-lantern-handheld".into();
+        item.variants.push(second);
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+
+        for text_scale in [100u16, 150, 200] {
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.authority_snapshot(false);
+            core.preference_changed(&EffectivePreference {
+                key: PreferenceKey("textScale".into()),
+                effective: PreferenceValue::Text(format!("{text_scale}%")),
+                stored: PreferenceValue::Text(format!("{text_scale}%")),
+                applied: true,
+            });
+            for _ in 0..3 {
+                core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+            }
+            core.action(&ShellAction::Activate);
+            assert_eq!(
+                core.route(),
+                pf_shell_core::Route::VariantChooser,
+                "must reach the chooser at {text_scale}%"
+            );
+            let scene = core.scene(metrics, "A Open").expect("chooser scene");
+            assert_below(&scene, "chooser-eyebrow", "chooser-title", text_scale);
+            assert_below(&scene, "chooser-title", "chooser-note", text_scale);
+            assert_below(&scene, "chooser-note", "chooser-scroll-region", text_scale);
+            assert_scene_occlusion_safe(&scene, metrics, pf_theme::Base::Dusk, text_scale)
+                .unwrap_or_else(|error| {
+                    panic!("variant chooser at {text_scale}% failed occlusion guard: {error}")
+                });
+        }
+    }
+
+    #[test]
     fn blanket_paint_guard_catches_wrap_into_bottom_clip() {
         let failure = paint_containment_failure(
             "chrome-r1-wrapped-label",

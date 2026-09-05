@@ -254,6 +254,16 @@ fn vertical_slice_frame_hashes_are_stable() {
         // a real glyph; and the Network/Update badges take the globe / info-i glyphs.
         // search and variant-chooser carry none of those and keep their digests.
         // All raster guards pass with PF_RASTER_INK_GUARD=1.
+        // tsp-op5a.395 (Family E heading/label hierarchy wiring) rebaselines the
+        // three Details/chooser routes: the Details title drops from the Hero role
+        // (52/800) to its Title role (34/800, ~25px cap), the option-card name/sub
+        // split onto the Label/Caption roles instead of the shared Body default, and
+        // the variant chooser now paints a game-name Eyebrow over a Title question
+        // (replacing the tiny small-caps route-heading Eyebrow that stood in for the
+        // whole heading). boot-home / focus-moved / launch-dimmed / returned /
+        // quick-power / library / library-focused-search / search carry none of the
+        // retuned type roles and keep their digests. All raster guards pass with
+        // PF_RASTER_INK_GUARD=1.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
@@ -262,9 +272,9 @@ fn vertical_slice_frame_hashes_are_stable() {
         "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
         "eb2bd01405de966cf2168c91f5e67202d42b67389b7614b35f8c09447e9b77ae  ",
         "b0e1e9b4bbfbdad1057e18bf22bf4251e81123d34922908fa6466d0acbf995e1  ",
-        "e61ece9c15e9ac63151f97fbc77c412de90ad41bd1f0984b53c438cdd1881dfc  ",
-        "412b9447ef8950e8d2be473402e5cb7525fbd3c3d19c9b0acd9c8e045178db08  ",
-        "5a57875e834d80bceaca128e5a17b64f31d8fd3035bd99d0dede4a188755ffa8  ",
+        "f9d5c93a37bfd26beb0d99d8f0149299290d1bd1e981e1419da830bdc91c164d  ",
+        "da222adf237f9a4eb113a95037a116f1323d019a6b8e0bba5174d486195ad372  ",
+        "37f8fb17e45b20794ed84edbd06b3dec51a774b8ec276e5085ec6f373a463b5f  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
@@ -321,23 +331,31 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // focused rows use the single state.focused ring+glow (the duplicate ring-colored border
     // is dropped — including the first-run row + its value chip). Every Settings/first-run
     // frame carries the rail, so all six shift; raster guards pass with PF_RASTER_INK_GUARD=1.
+    // tsp-op5a.395 (Family E heading/label hierarchy wiring) rebaselines all six
+    // frames: the Settings section title takes the H1 role (22/700) instead of the
+    // Body default (it had read at body scale), the row name/sublabel split onto the
+    // Label/Caption roles rather than sharing the Body default, and first-run repaints
+    // its Title-role heading (34/800, its box grown to keep the descenders contained)
+    // over an Eyebrow-role kicker (was a Label title under a Caption eyebrow). Every
+    // Settings frame carries the section title, so all six shift; raster guards pass
+    // with PF_RASTER_INK_GUARD=1.
     assert!(
-        transcript.contains("7668f3e29248f120c01bf15649bdcdb170957c02450033717fb9f5269d7e8cb8  ")
+        transcript.contains("1bc970c37f00b5fa377d14a26b4fa70b2ca968e8ccda41cc5221a54bb84f1dd9  ")
     );
     assert!(
-        transcript.contains("dd96a91c9bb7dce83ee2f53fa3d2475b72bffdde560095a1d109b2938b28d06d  ")
+        transcript.contains("09d5eedd6911ab05a06c32aabec8273a88875ed2382be89b976a3a0e9add0d0f  ")
     );
     assert!(
-        transcript.contains("c9a87e3964b707c4778b3d407fed6f1577664c644cc91726b1f69f6790754a22  ")
+        transcript.contains("9107e63b0bf5b77f5d77b67f8c65b00bfc5fcc43418c8190b4473fafd2592565  ")
     );
     assert!(
-        transcript.contains("b3604e7f68d0e6262abf5bedcc8b29f51a962950e605e130f734874455b7fe13  ")
+        transcript.contains("0372535b54b2a58befa71bb64053bd531e9949447668633e076282068792e1da  ")
     );
     assert!(
-        transcript.contains("584ba6a9dc657dce4e33d006bb2ce725cb7e9e1da06ecc40cf718a8126519647  ")
+        transcript.contains("ab7d0c6f1a2694d5ba523dae0d2e18ae7f053392f82750bf1b87a03022f303c1  ")
     );
     assert!(
-        transcript.contains("da8254f0e2dbc0fdc29e48f199f189f2cb36e057f5b833b6038b22355659f564  ")
+        transcript.contains("d597ec7d46d3bdea8ed92714f4f5d2886481e3d22b8f50f00cff4ea9feea5167  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

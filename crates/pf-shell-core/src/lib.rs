@@ -923,6 +923,7 @@ pub enum ArtTreatment {
     EditionPlate { palette: u8, motif: u8 },
 }
 
+#[derive(Clone)]
 pub struct ShellCore {
     revision: u64,
     route: Route,
@@ -3227,7 +3228,19 @@ impl ShellCore {
                 self.first_run_nodes(&mut children, w, h);
             }
             Presentation::Returned | Presentation::ForcedClose | Presentation::Crash => {
-                self.route_nodes(&mut children, metrics);
+                // A terminal receipt is a shell-owned modal, not an overlay on the
+                // caller's route. Compose a stable Home snapshot behind it, then make
+                // that snapshot inert so neither paint nor semantic focus can escape
+                // the summary controls.
+                let mut backdrop = self.clone();
+                backdrop.route = Route::Home;
+                backdrop.presentation = Presentation::Ready;
+                backdrop.focus = backdrop.saved_focus[backdrop.route_index()];
+                let backdrop_start = children.len();
+                backdrop.route_nodes(&mut children, metrics);
+                for node in &mut children[backdrop_start..] {
+                    make_backdrop_inert(node);
+                }
                 children.push(
                     node(
                         "return-summary-backdrop-dim",
@@ -8748,6 +8761,19 @@ fn focused_node_id(node: &Node) -> Option<&Node> {
         .or_else(|| node.children.iter().find_map(focused_node_id))
 }
 
+fn make_backdrop_inert(node: &mut Node) {
+    node.state.focused = false;
+    node.action = None;
+    if node.style_token == STATE_FOCUSED_RING_TOKEN {
+        node.style_token = STATE_REST_SURFACE_TOKEN.into();
+    } else if node.style_token == STATE_FOCUSED_TEXT_TOKEN {
+        node.style_token = STATE_REST_TEXT_TOKEN.into();
+    }
+    for child in &mut node.children {
+        make_backdrop_inert(child);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10932,6 +10958,62 @@ mod tests {
         assert_eq!(
             (c.route(), c.presentation()),
             (Route::Home, &Presentation::Starting)
+        );
+    }
+    #[test]
+    fn returned_summary_uses_an_inert_home_backdrop_and_owns_focus() {
+        let mut c = core();
+        c.go(Route::Library);
+        c.focus = 6;
+        c.action(&ShellAction::Activate);
+        assert_eq!(c.route(), Route::Details);
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let semantics = semantic_snapshot(scene.root());
+
+        assert!(
+            semantics
+                .iter()
+                .any(|(id, _, _, _, _)| id == "home-scroll-region")
+        );
+        assert!(
+            !semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "details-panel" || id.starts_with("library-") })
+        );
+        assert_eq!(
+            semantics
+                .iter()
+                .filter(|(_, _, _, _, focused)| *focused)
+                .map(|(id, _, _, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["return-summary-action-0"]
+        );
+        assert_eq!(
+            semantics
+                .iter()
+                .filter(|(_, _, _, action, _)| action.is_some())
+                .map(|(id, _, _, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["return-summary-action-0", "return-summary-action-1"]
         );
     }
     #[test]

@@ -159,13 +159,16 @@ pub fn crop(
     out_dir: &Path,
 ) -> Result<Option<Finding>, String> {
     if golden.width != shell.width || golden.height != shell.height {
-        let mut f = base(FactClass::Crop, route, comp, &comp.node);
-        f.severity = Severity::Info;
-        f.delta = format!(
-            "raster size mismatch golden={}x{} shell={}x{}",
-            golden.width, golden.height, shell.width, shell.height
-        );
-        return Ok(Some(f));
+        // A resolution mismatch is an INPUT failure (renders staged at the wrong
+        // size), not a finding — hard-error rather than emit a downgraded row.
+        return Err(format!(
+            "{route} {}: golden/shell render size mismatch golden={}x{} shell={}x{}",
+            comp.label(),
+            golden.width,
+            golden.height,
+            shell.width,
+            shell.height
+        ));
     }
     let rect = golden.clamp_rect(bbox);
     let mae = golden.crop_mae(shell, rect);

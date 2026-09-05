@@ -10,9 +10,9 @@
 //! and enumerates every divergence as a structured ledger row.
 //!
 //! It is a pure ARTIFACT consumer — it reads the committed design-facts ground
-//! truth, the shell's `<slug>.json` scene dump and `<slug>.png` render, and the
-//! approved golden renders. It never links pf-shell-core, so it is decoupled from
-//! scene-construction internals, and it never mutates pixels.
+//! truth, the shell's `<slug>.semantic.txt` scene snapshot and `<slug>.png`
+//! render, and the approved golden renders. It never links pf-shell-core, so it
+//! is decoupled from scene-construction internals, and it never mutates pixels.
 //!
 //! Layers (see the bead architecture): (1) deterministic structural facts diff
 //! (geometry / font-size / decoration), (2) perceptual per-component crop diff,
@@ -36,7 +36,7 @@ pub mod mapping;
 pub mod raster;
 pub mod scene;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -45,7 +45,7 @@ use facts::{DesignFacts, Facts};
 use ledger::{Finding, Ledger, Severity};
 use mapping::{Component, FactClass, Mapping, RouteMap};
 use raster::Raster;
-use scene::SceneTree;
+use scene::{SceneNode, SceneTree};
 
 /// How the ledger is printed to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub struct Config {
     pub crate_dir: PathBuf,
     /// Launcher repo root, for `golden_png` paths.
     pub repo_root: PathBuf,
-    /// Directory with `<slug>.json` + `<slug>.png` (produced by `pf-shell --offscreen`).
+    /// Directory with `<slug>.semantic.txt` + `<slug>.png` (produced by `pf-shell --offscreen`).
     pub renders_dir: PathBuf,
     /// Output directory for crop artifacts and the ledger JSON.
     pub out_dir: PathBuf,
@@ -173,16 +173,42 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
     let index = tree.index();
     let scale = tree.text_scale;
 
-    // PNGs are optional inputs; a comparator that needs a missing one degrades to
-    // an info finding rather than aborting the whole route.
-    let shell_png =
-        load_optional_raster(&config.renders_dir.join(format!("{}.png", route.shell_slug)));
-    let golden_png = route
-        .golden_png
-        .as_ref()
-        .map(|g| load_optional_raster(&config.repo_root.join(g)))
-        .and_then(|r| r);
+    // Renders are REQUIRED inputs wherever an enabled comparator reads them.
+    // Downgrade only FINDINGS, never INPUT failures: a render the audit was asked
+    // to read but is absent or corrupt is a hard error, not a silent info row +
+    // exit 0. Load a raster only when some component on this route needs it.
+    let needs_shell = route
+        .components
+        .iter()
+        .any(|c| c.wants(FactClass::Crop) || c.wants(FactClass::Color));
+    let needs_golden = route.components.iter().any(|c| c.wants(FactClass::Crop));
 
+    let shell_png = if needs_shell {
+        let path = config.renders_dir.join(format!("{}.png", route.shell_slug));
+        Some(Raster::load(&path)?)
+    } else {
+        None
+    };
+    let golden_png = if needs_golden {
+        let rel = route.golden_png.as_ref().ok_or_else(|| {
+            format!(
+                "route {} enables a crop comparator but has no golden_png in the mapping",
+                route.route
+            )
+        })?;
+        Some(Raster::load(&config.repo_root.join(rel))?)
+    } else {
+        None
+    };
+
+    let ctx = RouteCtx {
+        route,
+        index: &index,
+        scale,
+        shell: shell_png.as_ref(),
+        golden: golden_png.as_ref(),
+        out_dir: &config.out_dir,
+    };
     for comp in &route.components {
         let Some(mockup) = resolve_facts(&design, comp) else {
             ledger.extend([info(
@@ -197,83 +223,68 @@ fn audit_route(config: &Config, route: &RouteMap, ledger: &mut Ledger) -> Result
             ledger.extend([info(route, comp, "mapping", "mapped scene node not found")]);
             continue;
         };
-
-        if comp.wants(FactClass::Geometry) {
-            ledger.extend(compare::geometry(
-                &route.route,
-                comp,
-                &mockup.bbox,
-                &node.bounds,
-            ));
-        }
-        if comp.wants(FactClass::FontSize) {
-            if let Some(px) = mockup.font.size_px() {
-                ledger.extend(compare::font_size(&route.route, comp, px, node, scale));
-            }
-        }
-        if comp.wants(FactClass::Decoration) {
-            let has_underline = comp
-                .underline_node
-                .as_deref()
-                .is_some_and(|id| index.contains_key(id));
-            ledger.extend(compare::decoration(
-                &route.route,
-                comp,
-                mockup,
-                has_underline,
-            ));
-        }
-        if comp.wants(FactClass::Color) {
-            match &shell_png {
-                Some(shell) => {
-                    ledger.extend(compare::color(
-                        &route.route,
-                        comp,
-                        &mockup.color,
-                        shell,
-                        &mockup.bbox,
-                    ));
-                }
-                None => ledger.extend([info(route, comp, "color", "shell render png unavailable")]),
-            }
-        }
-        if comp.wants(FactClass::Crop) {
-            run_crop(
-                config,
-                route,
-                comp,
-                mockup,
-                shell_png.as_ref(),
-                golden_png.as_ref(),
-                ledger,
-            )?;
-        }
+        run_comparators(&ctx, comp, mockup, node, ledger)?;
     }
     Ok(())
 }
 
-fn run_crop(
-    config: &Config,
-    route: &RouteMap,
+/// Shared inputs for one route's comparators.
+struct RouteCtx<'a> {
+    route: &'a RouteMap,
+    index: &'a BTreeMap<&'a str, &'a SceneNode>,
+    scale: f64,
+    shell: Option<&'a Raster>,
+    golden: Option<&'a Raster>,
+    out_dir: &'a Path,
+}
+
+/// Run every opted-in comparator for one component.
+fn run_comparators(
+    ctx: &RouteCtx,
     comp: &Component,
     mockup: &Facts,
-    shell: Option<&Raster>,
-    golden: Option<&Raster>,
+    node: &SceneNode,
     ledger: &mut Ledger,
 ) -> Result<(), String> {
-    match (golden, shell) {
-        (Some(g), Some(s)) => {
-            if let Some(f) = compare::crop(&route.route, comp, &mockup.bbox, g, s, &config.out_dir)?
-            {
-                ledger.extend([f]);
-            }
+    let route = &ctx.route.route;
+    if comp.wants(FactClass::Geometry) {
+        ledger.extend(compare::geometry(route, comp, &mockup.bbox, &node.bounds));
+    }
+    if comp.wants(FactClass::FontSize) {
+        if let Some(px) = mockup.font.size_px() {
+            ledger.extend(compare::font_size(route, comp, px, node, ctx.scale));
         }
-        _ => ledger.extend([info(
+    }
+    if comp.wants(FactClass::Decoration) {
+        let has_underline = comp
+            .underline_node
+            .as_deref()
+            .is_some_and(|id| ctx.index.contains_key(id));
+        ledger.extend(compare::decoration(route, comp, mockup, has_underline));
+    }
+    if comp.wants(FactClass::Color) {
+        // `needs_shell` guaranteed this raster loaded (or we already errored).
+        let shell = ctx
+            .shell
+            .ok_or("internal: shell raster not loaded for an enabled color comparator")?;
+        ledger.extend(compare::color(
             route,
             comp,
-            "crop",
-            "golden or shell render unavailable",
-        )]),
+            &mockup.color,
+            shell,
+            &mockup.bbox,
+        ));
+    }
+    if comp.wants(FactClass::Crop) {
+        let golden = ctx
+            .golden
+            .ok_or("internal: golden raster not loaded for an enabled crop comparator")?;
+        let shell = ctx
+            .shell
+            .ok_or("internal: shell raster not loaded for an enabled crop comparator")?;
+        if let Some(f) = compare::crop(route, comp, &mockup.bbox, golden, shell, ctx.out_dir)? {
+            ledger.extend([f]);
+        }
     }
     Ok(())
 }
@@ -282,14 +293,6 @@ fn resolve_facts<'a>(design: &'a DesignFacts, comp: &Component) -> Option<&'a Fa
     match comp.index {
         Some(i) => design.instance(&comp.selector, i),
         None => design.unique(&comp.selector),
-    }
-}
-
-fn load_optional_raster(path: &Path) -> Option<Raster> {
-    if path.exists() {
-        Raster::load(path).ok()
-    } else {
-        None
     }
 }
 

@@ -59,11 +59,37 @@ impl SceneTree {
     /// Load and parse a `<slug>.semantic.txt` snapshot.
     ///
     /// # Errors
-    /// Returns an error if the file cannot be read.
+    /// Returns an error if the file cannot be read, or if any non-blank line is a
+    /// malformed record — a format change or truncation must be a hard input
+    /// error, never silently dropped into "missing nodes".
     pub fn load_semantic(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("read semantic snapshot {}: {e}", path.display()))?;
-        let nodes = raw.lines().filter_map(parse_line).collect();
+        Self::from_semantic_str(&raw)
+            .map_err(|e| format!("semantic snapshot {}: {e}", path.display()))
+    }
+
+    /// Parse a semantic snapshot from text, failing on any malformed non-blank
+    /// record (blank lines are skipped).
+    ///
+    /// # Errors
+    /// Returns an error naming the offending line number and content.
+    pub fn from_semantic_str(raw: &str) -> Result<Self, String> {
+        let mut nodes = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match parse_line(line) {
+                Ok(node) => nodes.push(node),
+                Err(e) => {
+                    return Err(format!(
+                        "malformed record at line {}: {e} — line: {line:?}",
+                        i + 1
+                    ));
+                }
+            }
+        }
         Ok(Self {
             nodes,
             text_scale: 1.0,
@@ -77,20 +103,20 @@ impl SceneTree {
     }
 }
 
-/// Parse one semantic-snapshot line:
+/// Parse one non-blank semantic-snapshot line:
 /// `  <id> role=<Role> label="<label>" bounds=<x>,<y>,<w>,<h> state=NodeState { .. } action=<..>`
-fn parse_line(line: &str) -> Option<SceneNode> {
+///
+/// # Errors
+/// Returns the reason a non-blank line does not match the expected record shape.
+fn parse_line(line: &str) -> Result<SceneNode, String> {
     let trimmed = line.trim_start();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let (id, rest) = trimmed.split_once(" role=")?;
+    let (id, rest) = trimmed.split_once(" role=").ok_or("missing ' role='")?;
     let role = rest.split(' ').next().unwrap_or("").to_string();
     let accessible_label = between(rest, "label=\"", "\" bounds=").unwrap_or_default();
-    let bounds_str = after(rest, "bounds=")?;
+    let bounds_str = after(rest, "bounds=").ok_or("missing 'bounds='")?;
     let bounds_str = bounds_str.split(" state=").next().unwrap_or(bounds_str);
-    let bounds = parse_bounds(bounds_str)?;
-    Some(SceneNode {
+    let bounds = parse_bounds(bounds_str).ok_or("unparseable bounds")?;
+    Ok(SceneNode {
         id: id.trim().to_string(),
         role,
         accessible_label,
@@ -162,16 +188,31 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_is_skipped() {
-        assert!(parse_line("   ").is_none());
+    fn skips_blank_lines_between_records() {
+        let raw = format!("{LINE}\n\n   \n{LINE}\n");
+        let tree = SceneTree::from_semantic_str(&raw).expect("parses with blanks");
+        assert_eq!(tree.nodes.len(), 2);
+    }
+
+    #[test]
+    fn errors_on_a_garbled_nonblank_line() {
+        let raw = format!("{LINE}\ngarbage line with no role or bounds\n");
+        let err = SceneTree::from_semantic_str(&raw)
+            .expect_err("a malformed non-blank record must be a hard error");
+        assert!(err.contains("line 2"), "err={err}");
+        assert!(err.contains("missing ' role='"), "err={err}");
+    }
+
+    #[test]
+    fn errors_on_unparseable_bounds() {
+        let raw = "  n role=Group label=\"\" bounds=nan,x,y,z state=NodeState { } action=None";
+        let err = SceneTree::from_semantic_str(raw).expect_err("bad bounds must error");
+        assert!(err.contains("unparseable bounds"), "err={err}");
     }
 
     #[test]
     fn indexes_by_id() {
-        let tree = SceneTree {
-            nodes: vec![parse_line(LINE).unwrap()],
-            text_scale: 1.0,
-        };
+        let tree = SceneTree::from_semantic_str(LINE).expect("parses");
         assert!(tree.index().contains_key("wifi-glyph"));
     }
 }

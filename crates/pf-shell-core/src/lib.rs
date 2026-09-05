@@ -1199,6 +1199,7 @@ impl ShellCore {
             }
         }
         self.focus = self.focus.min(self.focus_count().saturating_sub(1));
+        self.bump_revision();
     }
 
     pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {

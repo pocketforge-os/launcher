@@ -3,6 +3,7 @@
 //! red-first backing for dropping `continue-on-error` on the ci.yml audit step:
 //! report mode exits 0 on divergences, but a broken input is a hard error.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use fidelity_audit::{Config, OutputFormat, run};
@@ -88,6 +89,42 @@ fn run_errors_when_the_scene_is_at_the_wrong_coordinate_space() {
     let err = run(&config_for(renders.path(), out.path()))
         .expect_err("a wrong-viewport scene must be a hard input error");
     assert!(err.contains("coordinate space"), "unexpected error: {err}");
+}
+
+#[test]
+fn run_errors_when_a_stale_render_is_not_refreshed() {
+    // The render dir is persistent. A stale slug left from an EARLIER run must
+    // NOT be silently consumed: if this run's renderer (shell_bin) regresses and
+    // stops emitting a slug while still exiting 0, the audit must hard-error on
+    // the missing artifact, not read last run's file into a plausible ledger.
+    let renders = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    // A STALE settings scene, as if left by a previous run.
+    let stale = "root role=Group label=\"\" bounds=0.0,0.0,1280.0,720.0 state=NodeState { focused: false, selected: false } action=None\n  status-cluster role=Text label=\"stale\" bounds=1144.0,16.0,152.0,32.0 state=NodeState { focused: false, selected: false } action=None\n";
+    std::fs::write(renders.path().join("settings.semantic.txt"), stale).unwrap();
+    // A renderer that exits 0 but emits NOTHING (the regression this guards).
+    let fake = renders.path().join("noop-shell.sh");
+    std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dir = crate_dir();
+    let config = Config {
+        crate_dir: dir.clone(),
+        repo_root: dir.join("../.."),
+        renders_dir: renders.path().to_path_buf(),
+        out_dir: out.path().to_path_buf(),
+        shell_bin: Some(fake),
+        routes: Some(vec!["quiet-console/settings".to_string()]),
+        gate: false,
+        format: OutputFormat::Table,
+    };
+    let err = run(&config).expect_err(
+        "a stale render this run did not refresh must be a hard missing-artifact error",
+    );
+    assert!(
+        err.contains("semantic snapshot") || err.contains("read"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

@@ -22,20 +22,30 @@ fn shell_bin_stdout_does_not_corrupt_json_output() {
     let renders = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
 
-    // A valid `settings` scene (root at the audit space + one mapped node) so the
-    // audit runs to the point of printing its ledger. `settings` needs no
-    // rasters, so no PNGs are required.
-    let semantic = "root role=Group label=\"\" bounds=0.0,0.0,1280.0,720.0 state=NodeState { focused: false, selected: false } action=None\n  status-cluster role=Text label=\"82 9:41\" bounds=1144.0,16.0,152.0,32.0 state=NodeState { focused: false, selected: false } action=None\n";
-    std::fs::write(renders.path().join("settings.semantic.txt"), semantic).unwrap();
-
-    // A fake `--shell-bin` that only prints a hash line to stdout, exactly as the
-    // real renderer does. It writes nothing (the scene is pre-staged above).
+    // A fake `--shell-bin` that behaves like the real renderer: it prints a hash
+    // line to stdout AND emits the `settings` scene into its `--out` dir (root at
+    // the audit space + one mapped node). It must emit the artifact because the
+    // audit clears stale outputs before rendering (the provenance guard), so a
+    // renderer that wrote nothing would (correctly) fail with a missing artifact
+    // rather than exercising the stdout path this test is about. `settings` needs
+    // no rasters, so no PNG is required.
     let fake = renders.path().join("fake-shell.sh");
-    std::fs::write(
-        &fake,
-        format!("#!/bin/sh\necho \"{HASH_MARKER}\"\nexit 0\n"),
-    )
-    .unwrap();
+    let scene_body = "root role=Group label=\"\" bounds=0.0,0.0,1280.0,720.0 state=NodeState { focused: false, selected: false } action=None\n  status-cluster role=Text label=\"82 9:41\" bounds=1144.0,16.0,152.0,32.0 state=NodeState { focused: false, selected: false } action=None\n";
+    // Built by concatenation (not `format!`) so the scene's `NodeState { }` braces
+    // need no escaping. The `--out` scan mirrors how the audit invokes the shell.
+    let script = String::from("#!/bin/sh\n")
+        + "out=\"\"\n"
+        + "while [ $# -gt 0 ]; do\n"
+        + "  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; else shift; fi\n"
+        + "done\n"
+        + "echo \""
+        + HASH_MARKER
+        + "\"\n"
+        + "cat > \"$out/settings.semantic.txt\" <<'SCENE'\n"
+        + scene_body
+        + "SCENE\n"
+        + "exit 0\n";
+    std::fs::write(&fake, script).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let bin = env!("CARGO_BIN_EXE_fidelity-audit");

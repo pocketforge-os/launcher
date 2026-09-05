@@ -167,6 +167,26 @@ pub fn run(config: &Config) -> Result<RunResult, String> {
 fn render_slugs(bin: &Path, routes: &[&RouteMap], renders_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(renders_dir)
         .map_err(|e| format!("create renders dir {}: {e}", renders_dir.display()))?;
+    // Provenance: the render dir is PERSISTENT (`target/fidelity-audit/renders`
+    // by default). Remove the EXACT expected outputs for every selected slug
+    // BEFORE rendering, so if this run's renderer regresses and stops emitting a
+    // slug while still exiting 0, the audit hard-errors on the missing artifact
+    // (SceneTree/Raster load) instead of silently consuming last run's file and
+    // reporting a plausible stale ledger. Only reached when a `--shell-bin` is
+    // given; the "audit a pre-produced dir" mode never deletes the user's files.
+    for r in routes {
+        for name in [
+            format!("{}.png", r.shell_slug),
+            format!("{}.semantic.txt", r.shell_slug),
+        ] {
+            let path = renders_dir.join(&name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("clear stale render {}: {e}", path.display())),
+            }
+        }
+    }
     // One `--offscreen` invocation per distinct flag-set covers every slug it emits.
     let mut flag_sets: BTreeSet<Vec<String>> = BTreeSet::new();
     for r in routes {

@@ -4591,6 +4591,10 @@ impl ShellCore {
                     content_width * 100.0 / f32::from(self.text_scale),
                     1,
                 );
+                let painted_title_chars = painted_title
+                    .chars()
+                    .count()
+                    .saturating_sub(usize::from(painted_title.ends_with('…')));
                 let mut row = node(
                     &format!("search-result-{}", item.id),
                     Role::Button,
@@ -4663,7 +4667,8 @@ impl ShellCore {
                         .into_iter()
                         .enumerate()
                 {
-                    let match_chars = match_range.end - match_range.start;
+                    let visible_match_end = match_range.end.min(painted_title_chars);
+                    let match_chars = visible_match_end.saturating_sub(match_range.start);
                     if match_chars > 0 {
                         row.children.push(node(
                             &if match_index == 0 {
@@ -11825,6 +11830,40 @@ mod tests {
         assert!(painted_title.bounds.y + painted_title.bounds.height <= caption.bounds.y);
         assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
         assert!(caption.bounds.width > 0.0);
+    }
+
+    #[test]
+    fn ellipsized_search_title_omits_match_underline_beyond_painted_text() {
+        let title = "An Extraordinary Ridgeline Adventure With A Deliberately Long Title";
+        let mut core = fixture_core(vec![item(
+            "long-search-result",
+            title,
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.text_scale = 200;
+        core.go(Route::Search);
+        core.set_search_query("deliberately");
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 640.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let row = node_by_id(scene.root(), "search-result-long-search-result").unwrap();
+        let painted_title = node_by_id(row, "search-result-long-search-result-title").unwrap();
+
+        assert!(painted_title.accessible_label.ends_with('…'));
+        assert!(
+            node_by_id(row, "search-result-long-search-result-match-underline").is_none(),
+            "a match entirely beyond the painted title must not create an underline"
+        );
     }
 
     #[test]

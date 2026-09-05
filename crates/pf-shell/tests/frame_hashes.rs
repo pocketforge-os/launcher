@@ -279,6 +279,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         // tsp-op5a.398 intentionally rebaselines Search only: the formerly blank left
         // pane now contains the 7-column controller OSK, while the right pane gains its
         // result heading/count, two-line 40px-thumbnail rows, and match underline.
+        // tsp-op5a.422 intentionally rebaselines Search only: match underlines now use
+        // the same Label glyph advance as their title text.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
@@ -286,7 +288,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
-        "8e1fc30087f4d185ac89ef1f61f9f5fd6ac9c84389a0643398cbfd4fa331c697  ",
+        "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
         "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
         "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
         "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",

@@ -4401,9 +4401,12 @@ impl ShellCore {
             let scale = f32::from(self.text_scale) / 100.0;
             let gutter = SPACE_5 * scale;
             let keyboard_left = SPACE_7;
-            let keyboard_width = (w * 0.43 - SPACE_7).max(180.0);
+            let available_width = w - keyboard_left - SPACE_7 - gutter;
+            let keyboard_width = (w * 0.43 - SPACE_7)
+                .max(180.0)
+                .min((available_width - 320.0).max(180.0));
             let column_left = keyboard_left + keyboard_width + gutter;
-            let column_width = (w - column_left - SPACE_7).max(320.0);
+            let column_width = w - column_left - SPACE_7;
             let search_top = chrome_row_bottom(metrics.safe_insets.top, self.text_scale) + SPACE_5;
             let search_height = 52.0 * scale;
             let key_gap = SPACE_2;
@@ -4680,9 +4683,9 @@ impl ShellCore {
                             "",
                             text_left
                                 + TEXT_NODE_INLINE_INSET * scale
-                                + match_range.start as f32 * CAPTION_GLYPH_ADVANCE * scale,
+                                + match_range.start as f32 * LABEL_GLYPH_ADVANCE * scale,
                             result_top + row_height / 2.0 - 5.0 * scale,
-                            (match_chars as f32 * CAPTION_GLYPH_ADVANCE * scale).min(content_width),
+                            (match_chars as f32 * LABEL_GLYPH_ADVANCE * scale).min(content_width),
                             2.0 * scale,
                             STATE_SELECTED_ACCENT_TOKEN,
                         ));
@@ -11833,6 +11836,40 @@ mod tests {
     }
 
     #[test]
+    fn narrow_search_result_column_stays_inside_safe_margin_at_all_text_scales() {
+        let mut core = fixture_core(vec![item(
+            "search-result",
+            "Ridgeline",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("ridge");
+
+        for text_scale in [100, 150, 200] {
+            core.text_scale = text_scale;
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 640.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "A Open     PF Safe Return",
+                )
+                .unwrap();
+            let row = node_by_id(scene.root(), "search-result-search-result").unwrap();
+
+            assert!(
+                row.bounds.x + row.bounds.width <= 640.0 - SPACE_7 + 0.001,
+                "search result right edge {} exceeds the safe margin at {text_scale}%",
+                row.bounds.x + row.bounds.width
+            );
+        }
+    }
+
+    #[test]
     fn ellipsized_search_title_omits_match_underline_beyond_painted_text() {
         let title = "An Extraordinary Ridgeline Adventure With A Deliberately Long Title";
         let mut core = fixture_core(vec![item(
@@ -11898,9 +11935,9 @@ mod tests {
         )
         .unwrap();
 
-        let expected_x = title.bounds.x + TEXT_NODE_INLINE_INSET + 2.0 * CAPTION_GLYPH_ADVANCE;
+        let expected_x = title.bounds.x + TEXT_NODE_INLINE_INSET + 2.0 * LABEL_GLYPH_ADVANCE;
         assert!((underline.bounds.x - expected_x).abs() < f32::EPSILON);
-        assert!((underline.bounds.width - CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
+        assert!((underline.bounds.width - LABEL_GLYPH_ADVANCE).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -11940,16 +11977,16 @@ mod tests {
         .unwrap();
 
         assert!((first.bounds.x - title.bounds.x - TEXT_NODE_INLINE_INSET).abs() < f32::EPSILON);
-        assert!((first.bounds.width - 5.0 * CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
+        assert!((first.bounds.width - 5.0 * LABEL_GLYPH_ADVANCE).abs() < f32::EPSILON);
         assert!(
             (second.bounds.x
                 - title.bounds.x
                 - TEXT_NODE_INLINE_INSET
-                - 24.0 * CAPTION_GLYPH_ADVANCE)
+                - 24.0 * LABEL_GLYPH_ADVANCE)
                 .abs()
                 < f32::EPSILON
         );
-        assert!((second.bounds.width - 9.0 * CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
+        assert!((second.bounds.width - 9.0 * LABEL_GLYPH_ADVANCE).abs() < f32::EPSILON);
     }
 
     #[test]

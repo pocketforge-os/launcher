@@ -2082,9 +2082,9 @@ impl ShellCore {
                     None
                 }
                 ShellAction::Activate => {
+                    let request = self.active_launch_request.clone()?;
                     self.presentation = Presentation::Ready;
                     self.go(Route::Home);
-                    let request = self.active_launch_request.clone()?;
                     self.presentation = Presentation::Starting;
                     Some(Effect::Launch(request))
                 }
@@ -6867,7 +6867,12 @@ impl ShellCore {
             .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
             .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
         );
-        for (i, label) in ["Back to Home", "Open again"].iter().enumerate() {
+        let actions = if self.active_launch_request.is_some() {
+            &["Back to Home", "Open again"][..]
+        } else {
+            &["Back to Home"][..]
+        };
+        for (i, label) in actions.iter().enumerate() {
             let mut n = node(
                 &format!("return-summary-action-{i}"),
                 Role::Button,
@@ -10930,6 +10935,45 @@ mod tests {
             }))
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+    #[test]
+    fn boot_restored_summary_without_launch_request_omits_open_again() {
+        let mut c = core();
+        assert_eq!(c.active_launch_request, None);
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-restored".into(),
+        }));
+
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let semantics = semantic_snapshot(scene.root());
+        assert!(
+            semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "return-summary-action-0" })
+        );
+        assert!(
+            !semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "return-summary-action-1" })
+        );
+
+        c.focus = 1;
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Returned)
+        );
     }
     #[test]
     fn returned_summary_open_again_relaunches_library_item_not_home_focus() {

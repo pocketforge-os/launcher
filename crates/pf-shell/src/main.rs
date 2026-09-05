@@ -985,7 +985,14 @@ fn emit_f10_evidence(
         }),
     }]);
     core.action(&ShellAction::Custom("Room.next".into()));
+    // Library opens with focus on its search affordance. Move into the grid for the
+    // plain route, then explicitly navigate back to search for the focused-state
+    // evidence. Previously these frames were emitted back-to-back from the same
+    // default focus state, making the supposedly stateful route a byte duplicate.
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     emit(host, &mut core, footer, out, "library")?;
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Up));
+    core.action(&ShellAction::Move(pf_scene::AxisMove::Up));
     emit(host, &mut core, footer, out, "library-focused-search")?;
     core.action(&ShellAction::Custom("Search".into()));
     // Keep Search's evidence state populated deeply enough to exercise the

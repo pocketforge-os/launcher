@@ -245,7 +245,7 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 
 #[test]
 fn vertical_slice_frame_hashes_are_stable() {
-    let (_out, lines) = render_offscreen();
+    let (out, lines) = render_offscreen();
     for expected in [
         // Home intentionally rebaselines for the corrected attention-pill dot geometry.
         // Details routes rebaseline for the quiet-console layout polish, including
@@ -302,7 +302,9 @@ fn vertical_slice_frame_hashes_are_stable() {
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
-        "63bcd820e33b4b0e440dee6c269fab7ac360ec4af77cc00de293c2486ab38298  ",
+        // Receipt-driven safe-return and crash summary cards, respectively.
+        "1d86084ebcf2127da609a429104a21e06d6c2ccf626b2bb6667478de947b5730  ",
+        "10ecba603f235b9d6132f8cfd7e147155175ec093c266d4f12baea5713a2ba8d  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -317,9 +319,20 @@ fn vertical_slice_frame_hashes_are_stable() {
     }
     assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("63bcd820"),
-        "Returned must restore focused Home with the just-now acknowledgement"
+        lines.lines().nth(3).unwrap().starts_with("1d86084e"),
+        "Returned must show the safe-return summary card"
     );
+    assert_ne!(
+        std::fs::read(out.path().join("boot-home.png")).unwrap(),
+        std::fs::read(out.path().join("returned.png")).unwrap(),
+        "Returned evidence must materially differ from plain Home"
+    );
+    let returned_semantics =
+        std::fs::read_to_string(out.path().join("returned.semantic.txt")).unwrap();
+    assert!(returned_semantics.contains("✓ RETURNED SAFELY"));
+    let crash_semantics =
+        std::fs::read_to_string(out.path().join("safe-return-crash.semantic.txt")).unwrap();
+    assert!(crash_semantics.contains("⚠ CLOSED UNEXPECTEDLY"));
     for route in [
         "library.png",
         "library-focused-search.png",

@@ -940,8 +940,26 @@ fn main() -> Result<(), String> {
     emit(&mut host, &mut core, &footer, out, "returned")?;
     core.action(&ShellAction::Custom("Quick".into()));
     emit(&mut host, &mut core, &footer, out, "quick-power")?;
-    emit_f10_evidence(&mut host, &snapshot, &theme, &footer, out)?;
+    emit_f10_evidence(&mut host, &snapshot, &theme, &footer, &glyphs, out)?;
     Ok(())
+}
+
+/// Give an offscreen evidence core the same status/network/time providers and control
+/// bindings the live shell (and the default offscreen path, main.rs setup) load, so
+/// every evidence route renders the full live-parity chrome: the top-right status
+/// cluster (Wi-Fi / battery / clock) and the per-route hint-legend prompt bar. Without
+/// this a bare `fixture_core` renders UNDERSTATED frames — no device-status provider
+/// leaves the status cluster empty (`battery_percent`/`time_state` unset), and no
+/// control bindings leave routes whose legend is built from `binding_prompt` (Library,
+/// Details) with a blank prompt bar. The vision-review gate then reviews frames the live
+/// shell never draws. Theme-resolved chrome ink still comes from the supplied theme via
+/// the core (tsp-op5a.390 r2 precedent), never a static flagship.
+fn apply_evidence_chrome(core: &mut ShellCore, glyphs: &EffectiveMap) {
+    core.set_control_bindings(control_bindings(glyphs));
+    let (mut network, time, transfer) = fixture_device_ports();
+    core.load_network(&mut network);
+    core.load_system(&time, &transfer);
+    core.load_device_status(&FakeDeviceStatusPort { attention: false });
 }
 
 fn emit_f10_evidence(
@@ -949,9 +967,11 @@ fn emit_f10_evidence(
     snapshot: &CatalogSnapshot,
     theme: &pf_theme::Theme,
     footer: &str,
+    glyphs: &EffectiveMap,
     out: &Path,
 ) -> Result<(), String> {
     let mut core = fixture_core(snapshot, theme, false);
+    apply_evidence_chrome(&mut core, glyphs);
     core.authority_snapshot(false);
     let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
     core.load_history(&[HistoryEntry {
@@ -985,6 +1005,7 @@ fn emit_f10_evidence(
         .variants
         .retain(|variant| !matches!(variant.availability, pf_catalog::Availability::Ready));
     let mut unavailable = fixture_core(&unavailable_snapshot, theme, false);
+    apply_evidence_chrome(&mut unavailable, glyphs);
     unavailable.authority_snapshot(false);
     unavailable.action(&ShellAction::Custom("Room.next".into()));
     for _ in 0..8 {
@@ -1011,6 +1032,7 @@ fn emit_f10_evidence(
     second.launch_target.app_id = "moth-and-lantern-handheld".into();
     item.variants.push(second);
     let mut chooser = fixture_core(&chooser_snapshot, theme, false);
+    apply_evidence_chrome(&mut chooser, glyphs);
     chooser.authority_snapshot(false);
     for _ in 0..3 {
         chooser.action(&ShellAction::Move(pf_scene::AxisMove::Down));

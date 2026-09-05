@@ -34,10 +34,24 @@ const HEIGHT: u32 = 720;
 // bead). The 1px name shrink costs the near-noise delta while restoring the
 // name>sublabel hierarchy the flattened Body/Body default had erased; the rig captures
 // confirm the screen reads better. home/library/high-contrast/quick are untouched.
+// tsp-op5a.394 (evidence-harness chrome parity, ledger sweep 1) makes every offscreen
+// evidence route render the live-parity status cluster (Wi-Fi/battery/clock) + hint
+// legend the shell draws on ALL screens — the f10-evidence cores previously drew a blank
+// top-right on Library/Details/Search. Library and detail therefore now carry the SAME
+// renderer-vs-mockup chrome delta Home already carries (Home renders the cluster yet
+// scores 0.940, not 1.0): adding it legitimately paints more content and lowers
+// whole-frame similarity to the design golden. Thresholds below are the achieved scores
+// on the MERGED pixels (this bead's chrome atop tsp-op5a.395's Family E type roles),
+// truncated to 6 decimals; both decreases have exact RATCHET-WAIVER entries in
+// tests/goldens/RATCHET_WAIVERS.md (same content-addition mechanism as commit 9bd715f's
+// library waiver), COORDINATOR-RATIFIED for tsp-op5a.394. settings keeps tsp-op5a.395's
+// 0.969316 (this bead does not touch the Settings routes). The raster guards stay green
+// on the new pixels (the evidence render is invoked with PF_RASTER_INK_GUARD=1 in
+// frame_hashes).
 const SCREENS: [(&str, &str, f64); 6] = [
     ("home", "boot-home.png", 0.940_137),
-    ("library", "library.png", 0.978_014),
-    ("detail", "details.png", 0.942_868),
+    ("library", "library.png", 0.977_743),
+    ("detail", "details.png", 0.942_459),
     ("settings", "settings.png", 0.969_316),
     ("high-contrast", "high-contrast.png", 0.915_236),
     ("quick", "quick-power.png", 1.0),

@@ -1181,6 +1181,12 @@ impl ShellCore {
             .and_then(|id| self.items.iter().position(|item| item.id == id));
         self.set_search_query(self.search_query.clone());
         self.refresh_library_items();
+        if selected_id.is_some()
+            && self.selected_item.is_none()
+            && matches!(self.route, Route::Details | Route::VariantChooser)
+        {
+            self.go(Route::Home);
+        }
         if let Some(id) = focused_id {
             if let Some(index) = self.items.iter().position(|item| item.id == id) {
                 self.focus = match self.route {
@@ -8993,6 +8999,52 @@ mod tests {
         c.authority_snapshot(false);
         c
     }
+
+    #[test]
+    fn catalog_reload_removing_open_item_returns_to_home_with_valid_scene() {
+        for route in [Route::Details, Route::VariantChooser] {
+            let mut core = core();
+            core.selected_item = Some(1);
+            core.go(route);
+
+            let mut reloaded = snapshot();
+            reloaded.items.remove(1);
+            core.reload_catalog_with_art(&reloaded, |_, _| None);
+
+            assert_eq!(core.route(), Route::Home);
+            assert_eq!(core.selected_item, None);
+            assert_eq!(core.focus(), 0);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            assert!(node_by_id(scene.root(), "home-shelf-label").is_some());
+        }
+    }
+
+    #[test]
+    fn catalog_reload_remaps_open_item_by_id_when_it_remains() {
+        let mut core = core();
+        core.selected_item = Some(1);
+        core.go(Route::Details);
+
+        let mut reloaded = snapshot();
+        reloaded.items.swap(0, 1);
+        core.reload_catalog_with_art(&reloaded, |_, _| None);
+
+        assert_eq!(core.route(), Route::Details);
+        assert_eq!(core.selected_item, Some(0));
+        assert_eq!(core.items[0].id, "i1");
+    }
+
     fn preferences(applied: bool) -> FakePreferencePort {
         FakePreferencePort::new(
             [

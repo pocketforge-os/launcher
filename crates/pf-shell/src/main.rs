@@ -353,18 +353,22 @@ fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bo
     })
 }
 
-enum ArtBase {
+enum ArtPolicy {
     DescriptorDirectory,
+    SnapshotDirectory(PathBuf),
+    VendoredFixture,
 }
 
-fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase) -> Option<&'a Path> {
+fn art_base_path<'a>(item: &'a CatalogItem, policy: &'a ArtPolicy) -> Option<&'a Path> {
     match policy {
-        ArtBase::DescriptorDirectory => item
+        ArtPolicy::DescriptorDirectory => item
             .variants
             .first()?
             .launch_target
             .descriptor_path
             .parent(),
+        ArtPolicy::SnapshotDirectory(directory) => Some(directory),
+        ArtPolicy::VendoredFixture => None,
     }
 }
 
@@ -391,47 +395,55 @@ fn resolve_art(base: Option<&Path>, reference: &str) -> Option<Arc<[u8]>> {
     }
 }
 
-fn manifest_art_core(
+fn resolved_art(item: &CatalogItem, reference: &str, policy: &ArtPolicy) -> Option<Arc<[u8]>> {
+    match policy {
+        ArtPolicy::VendoredFixture => vendored_art(reference),
+        _ => resolve_art(art_base_path(item, policy), reference),
+    }
+}
+
+fn catalog_art_core(
     snapshot: &CatalogSnapshot,
     theme: &pf_theme::Theme,
     reduced: bool,
-    policy: ArtBase,
+    policy: &ArtPolicy,
 ) -> ShellCore {
-    ShellCore::boot_with_art(snapshot, theme, reduced, move |item, reference| {
-        resolve_art(art_base_path(item, &policy), reference)
+    ShellCore::boot_with_art(snapshot, theme, reduced, |item, reference| {
+        resolved_art(item, reference, policy)
     })
 }
 
+#[cfg(test)]
 fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
-    manifest_art_core(snapshot, theme, reduced, ArtBase::DescriptorDirectory)
+    catalog_art_core(snapshot, theme, reduced, &ArtPolicy::DescriptorDirectory)
 }
 
+#[cfg(test)]
 fn snapshot_core(
     snapshot: &CatalogSnapshot,
     snapshot_path: &Path,
     theme: &pf_theme::Theme,
     reduced: bool,
 ) -> ShellCore {
-    let directory = snapshot_path.parent().unwrap_or_else(|| Path::new(""));
-    ShellCore::boot_with_art(snapshot, theme, reduced, move |_, reference| {
-        resolve_art(Some(directory), reference)
-    })
+    let directory = snapshot_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    catalog_art_core(
+        snapshot,
+        theme,
+        reduced,
+        &ArtPolicy::SnapshotDirectory(directory),
+    )
 }
 
 fn selected_core(
     snapshot: &CatalogSnapshot,
-    snapshot_path: Option<&Path>,
-    fixture_mode: bool,
+    art_policy: &ArtPolicy,
     theme: &pf_theme::Theme,
     reduced: bool,
 ) -> ShellCore {
-    if let Some(path) = snapshot_path {
-        snapshot_core(snapshot, path, theme, reduced)
-    } else if fixture_mode {
-        fixture_core(snapshot, theme, reduced)
-    } else {
-        catalog_core(snapshot, theme, reduced)
-    }
+    catalog_art_core(snapshot, theme, reduced, art_policy)
 }
 struct SnapshotCatalog(CatalogSnapshot);
 
@@ -712,6 +724,20 @@ fn main() -> Result<(), String> {
         });
     let theme = pf_theme::flagship();
     let reduced = env::var_os("PF_REDUCE_MOTION").is_some();
+    let art_policy = snapshot_path.as_ref().map_or_else(
+        || {
+            if fixture_mode {
+                ArtPolicy::VendoredFixture
+            } else {
+                ArtPolicy::DescriptorDirectory
+            }
+        },
+        |path| {
+            ArtPolicy::SnapshotDirectory(
+                path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            )
+        },
+    );
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
         .map_err(|e| format!("{e:?}"))?;
     let options = safe_return_options(&contract);
@@ -723,13 +749,7 @@ fn main() -> Result<(), String> {
         load_durable_map_or_shipped(contract.clone(), &remap_path)?
     };
     let footer = footer_prompt(&glyphs);
-    let mut core = selected_core(
-        &snapshot,
-        snapshot_path.as_deref(),
-        fixture_mode,
-        &theme,
-        reduced,
-    );
+    let mut core = selected_core(&snapshot, &art_policy, &theme, reduced);
     core.set_control_bindings(control_bindings(&glyphs));
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
@@ -861,6 +881,7 @@ fn main() -> Result<(), String> {
             power,
             glyphs,
             catalog.expect("fbdev catalog"),
+            &art_policy,
             Path::new(session_socket),
             network,
             time,
@@ -894,6 +915,7 @@ fn main() -> Result<(), String> {
                 power,
                 glyphs,
                 catalog.expect("wayland catalog"),
+                &art_policy,
                 Path::new(session_socket),
                 network,
                 time,
@@ -917,6 +939,7 @@ fn main() -> Result<(), String> {
             power,
             glyphs,
             catalog.expect("wayland catalog"),
+            &art_policy,
             Path::new(session_socket),
             network,
             time,
@@ -1464,6 +1487,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     power: &mut dyn PowerPort,
     map: EffectiveMap,
     catalog: &dyn FavoriteCatalog,
+    art_policy: &ArtPolicy,
     session_socket: &Path,
     network: &mut dyn NetworkPort,
     time: &mut dyn TimePort,
@@ -1502,6 +1526,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 core,
                 &activate,
                 &snapshot,
+                art_policy,
                 &mut frames,
                 &mut presented_revision,
                 latency_trace,
@@ -1683,21 +1708,20 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_catalog_reload(
     host: &mut impl RenderedFrameHost,
     core: &mut ShellCore,
     activate: &str,
     snapshot: &CatalogSnapshot,
+    art_policy: &ArtPolicy,
     frames: &mut automation::FrameCounter,
     presented_revision: &mut u64,
     latency_trace: &mut Option<LatencyTrace>,
 ) -> Result<(), String> {
     let item_count = snapshot.items.len();
     core.reload_catalog_with_art(snapshot, |item, reference| {
-        resolve_art(
-            art_base_path(item, &ArtBase::DescriptorDirectory),
-            reference,
-        )
+        resolved_art(item, reference, art_policy)
     });
     if present_interactive(host, core, activate)? {
         frames.increment();
@@ -7466,9 +7490,8 @@ exec="./launch"
     }
 
     #[test]
-    fn snapshot_resolver_is_selected_in_fixture_and_interactive_modes() {
+    fn snapshot_resolver_is_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let snapshot_path = dir.path().join("catalog.json");
         fs::create_dir(dir.path().join("art")).unwrap();
         fs::write(
             dir.path().join("art/cover.png"),
@@ -7480,20 +7503,16 @@ exec="./launch"
         snapshot.items.truncate(1);
         snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
 
-        for fixture_mode in [true, false] {
-            let core = selected_core(
-                &snapshot,
-                Some(&snapshot_path),
-                fixture_mode,
-                &pf_theme::flagship(),
-                false,
-            );
-            assert_eq!(
-                core.art_treatment("ridgeline"),
-                Some(pf_shell_core::ArtTreatment::CatalogArt),
-                "snapshot resolver must win when fixture_mode={fixture_mode}"
-            );
-        }
+        let core = selected_core(
+            &snapshot,
+            &ArtPolicy::SnapshotDirectory(dir.path().to_path_buf()),
+            &pf_theme::flagship(),
+            false,
+        );
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
     }
 
     #[test]
@@ -8612,12 +8631,14 @@ exec="./launch"
         let mut frames = automation::FrameCounter::default();
         let mut presented_revision = 0;
         let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
+        let revision_before = core.revision();
 
         apply_catalog_reload(
             &mut host,
             &mut core,
             "A Open",
             &reloaded,
+            &ArtPolicy::VendoredFixture,
             &mut frames,
             &mut presented_revision,
             &mut trace,
@@ -8630,6 +8651,7 @@ exec="./launch"
         assert!(!semantic.contains(&original.items[1].title));
         assert_eq!(frames.get(), 1);
         assert_eq!(presented_revision, core.revision());
+        assert!(core.revision() > revision_before);
         drop(trace);
         let acknowledgement = fs::read_to_string(trace_path)
             .unwrap()
@@ -8639,6 +8661,55 @@ exec="./launch"
             .unwrap();
         assert_eq!(acknowledgement["event"], "catalog_reloaded");
         assert_eq!(acknowledgement["items"], reloaded.items.len());
+    }
+
+    #[test]
+    fn catalog_reload_preserves_snapshot_relative_art_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("art")).unwrap();
+        fs::write(
+            dir.path().join("art/cover.png"),
+            include_bytes!("../fixtures/art/hollow-tides.png"),
+        )
+        .unwrap();
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
+        snapshot.items[0].presentation.icon_decodable = true;
+        snapshot.items[0].variants[0].launch_target.descriptor_path =
+            dir.path().join("unrelated/app.toml");
+        let policy = ArtPolicy::SnapshotDirectory(dir.path().to_path_buf());
+        let mut core = selected_core(&snapshot, &policy, &pf_theme::flagship(), false);
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
+
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        apply_catalog_reload(
+            &mut host,
+            &mut core,
+            "A Open",
+            &snapshot,
+            &policy,
+            &mut automation::FrameCounter::default(),
+            &mut 0,
+            &mut None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt),
+            "reload must continue resolving art beside the snapshot, not the descriptor"
+        );
     }
 
     #[test]
@@ -8687,6 +8758,7 @@ exec="./launch"
             &mut power,
             map,
             &catalog,
+            &ArtPolicy::VendoredFixture,
             &dir.path().join("missing-session.sock"),
             &mut network,
             &mut time,

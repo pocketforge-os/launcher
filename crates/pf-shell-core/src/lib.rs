@@ -998,44 +998,13 @@ pub struct ShellCore {
 }
 
 impl ShellCore {
-    fn preference_is_applied(key: &str) -> bool {
-        matches!(
-            key,
-            "textScale" | "highContrast" | "reduceMotion" | "appearance"
-        )
-    }
-
-    fn preference_label(row: &DisplayPreference) -> String {
-        let value = match &row.effective {
-            PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
-            PreferenceValue::Text(value) => value.clone(),
-            PreferenceValue::Integer(value) => value.to_string(),
-        };
-        if Self::preference_is_applied(row.key) {
-            format!("{} · {value}", row.label)
-        } else {
-            format!("{} · {value} · not applied on this build", row.label)
-        }
-    }
-
-    #[must_use]
-    pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
-        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
-    }
-
-    #[must_use]
-    pub fn boot_with_art<F>(
-        snapshot: &CatalogSnapshot,
-        theme: &Theme,
-        reduced_motion: bool,
-        mut resolve_art: F,
-    ) -> Self
+    fn catalog_items<F>(snapshot: &CatalogSnapshot, mut resolve_art: F) -> Vec<Item>
     where
         F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let favorites = &snapshot.user_projection.favorite_item_ids;
         let pins = &snapshot.user_projection.pinned_variant_ids;
-        let items: Vec<_> = snapshot
+        snapshot
             .items
             .iter()
             .map(|item| {
@@ -1081,7 +1050,45 @@ impl ShellCore {
                     pinned_variant_id: pins.get(&item.id).cloned(),
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    fn preference_is_applied(key: &str) -> bool {
+        matches!(
+            key,
+            "textScale" | "highContrast" | "reduceMotion" | "appearance"
+        )
+    }
+
+    fn preference_label(row: &DisplayPreference) -> String {
+        let value = match &row.effective {
+            PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
+            PreferenceValue::Text(value) => value.clone(),
+            PreferenceValue::Integer(value) => value.to_string(),
+        };
+        if Self::preference_is_applied(row.key) {
+            format!("{} · {value}", row.label)
+        } else {
+            format!("{} · {value} · not applied on this build", row.label)
+        }
+    }
+
+    #[must_use]
+    pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
+        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
+    }
+
+    #[must_use]
+    pub fn boot_with_art<F>(
+        snapshot: &CatalogSnapshot,
+        theme: &Theme,
+        reduced_motion: bool,
+        mut resolve_art: F,
+    ) -> Self
+    where
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
+    {
+        let items = Self::catalog_items(snapshot, &mut resolve_art);
         Self {
             revision: 0,
             route: Route::Home,
@@ -1158,6 +1165,41 @@ impl ShellCore {
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
         }
+    }
+
+    pub fn reload_catalog_with_art<F>(&mut self, snapshot: &CatalogSnapshot, resolve_art: F)
+    where
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
+    {
+        let focused_id = self
+            .focused_item_index()
+            .map(|index| self.items[index].id.clone());
+        let selected_id = self.selected_item.map(|index| self.items[index].id.clone());
+        self.items = Self::catalog_items(snapshot, resolve_art);
+        self.selected_item = selected_id
+            .as_deref()
+            .and_then(|id| self.items.iter().position(|item| item.id == id));
+        self.set_search_query(self.search_query.clone());
+        self.refresh_library_items();
+        if let Some(id) = focused_id {
+            if let Some(index) = self.items.iter().position(|item| item.id == id) {
+                self.focus = match self.route {
+                    Route::Library => self
+                        .library_items
+                        .iter()
+                        .position(|candidate| *candidate == index)
+                        .map_or(0, |position| position + 5),
+                    Route::Search => self
+                        .search_results
+                        .iter()
+                        .position(|candidate| *candidate == index)
+                        .unwrap_or(0),
+                    _ => index,
+                };
+            }
+        }
+        self.focus = self.focus.min(self.focus_count().saturating_sub(1));
+        self.bump_revision();
     }
 
     pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {

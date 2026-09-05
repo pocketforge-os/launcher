@@ -38,8 +38,8 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -56,7 +56,99 @@ const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
 const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const LOW_BATTERY_PERCENT: u8 = 20;
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+static CATALOG_RELOAD_REQUESTED: LazyLock<Arc<AtomicBool>> =
+    LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+
+struct LatencyTrace {
+    writer: BufWriter<fs::File>,
+    epoch: Instant,
+    seq: u64,
+}
+
+impl LatencyTrace {
+    fn open(path: &Path, host: &str) -> Result<Self, String> {
+        let file = fs::File::create(path)
+            .map_err(|error| format!("latency trace {}: {error}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "{}",
+            serde_json::json!({
+                "event": "header",
+                "clock_source": "process_relative_monotonic_at_decode",
+                "host": host,
+                "pid": std::process::id(),
+            })
+        )
+        .map_err(|error| format!("latency trace: {error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("latency trace: {error}"))?;
+        Ok(Self {
+            writer,
+            epoch: Instant::now(),
+            seq: 0,
+        })
+    }
+
+    fn now_us(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    fn action(
+        &mut self,
+        action: &ShellAction,
+        ingress: u64,
+        presented: bool,
+        revision: u64,
+    ) -> Result<(), String> {
+        self.seq += 1;
+        let present = presented.then(|| self.now_us());
+        let latency = present.map(|timestamp| timestamp.saturating_sub(ingress));
+        writeln!(
+            self.writer,
+            "{}",
+            serde_json::json!({
+                "seq": self.seq,
+                "action": format!("{action:?}"),
+                "t_ingress_us": ingress,
+                "t_present_us": present,
+                "latency_us": latency,
+                "presented": presented,
+                "revision": revision,
+            })
+        )
+        .map_err(|error| format!("latency trace: {error}"))?;
+        self.writer
+            .flush()
+            .map_err(|error| format!("latency trace: {error}"))
+    }
+
+    fn catalog_reloaded(&mut self, items: usize) -> Result<(), String> {
+        writeln!(
+            self.writer,
+            "{}",
+            serde_json::json!({"event":"catalog_reloaded", "items":items})
+        )
+        .map_err(|error| format!("latency trace: {error}"))?;
+        self.writer
+            .flush()
+            .map_err(|error| format!("latency trace: {error}"))
+    }
+}
+
+fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
+    let Some(path) = env::var_os("PF_SHELL_LATENCY_TRACE") else {
+        return Ok(None);
+    };
+    signal_hook::flag::register(
+        signal_hook::consts::signal::SIGHUP,
+        Arc::clone(&CATALOG_RELOAD_REQUESTED),
+    )
+    .map_err(|error| format!("latency trace signal: {error}"))?;
+    LatencyTrace::open(Path::new(&path), host).map(Some)
+}
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -261,18 +353,22 @@ fn fixture_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bo
     })
 }
 
-enum ArtBase {
+enum ArtPolicy {
     DescriptorDirectory,
+    SnapshotDirectory(PathBuf),
+    VendoredFixture,
 }
 
-fn art_base_path<'a>(item: &'a CatalogItem, policy: &ArtBase) -> Option<&'a Path> {
+fn art_base_path<'a>(item: &'a CatalogItem, policy: &'a ArtPolicy) -> Option<&'a Path> {
     match policy {
-        ArtBase::DescriptorDirectory => item
+        ArtPolicy::DescriptorDirectory => item
             .variants
             .first()?
             .launch_target
             .descriptor_path
             .parent(),
+        ArtPolicy::SnapshotDirectory(directory) => Some(directory),
+        ArtPolicy::VendoredFixture => None,
     }
 }
 
@@ -299,47 +395,55 @@ fn resolve_art(base: Option<&Path>, reference: &str) -> Option<Arc<[u8]>> {
     }
 }
 
-fn manifest_art_core(
+fn resolved_art(item: &CatalogItem, reference: &str, policy: &ArtPolicy) -> Option<Arc<[u8]>> {
+    match policy {
+        ArtPolicy::VendoredFixture => vendored_art(reference),
+        _ => resolve_art(art_base_path(item, policy), reference),
+    }
+}
+
+fn catalog_art_core(
     snapshot: &CatalogSnapshot,
     theme: &pf_theme::Theme,
     reduced: bool,
-    policy: ArtBase,
+    policy: &ArtPolicy,
 ) -> ShellCore {
-    ShellCore::boot_with_art(snapshot, theme, reduced, move |item, reference| {
-        resolve_art(art_base_path(item, &policy), reference)
+    ShellCore::boot_with_art(snapshot, theme, reduced, |item, reference| {
+        resolved_art(item, reference, policy)
     })
 }
 
+#[cfg(test)]
 fn catalog_core(snapshot: &CatalogSnapshot, theme: &pf_theme::Theme, reduced: bool) -> ShellCore {
-    manifest_art_core(snapshot, theme, reduced, ArtBase::DescriptorDirectory)
+    catalog_art_core(snapshot, theme, reduced, &ArtPolicy::DescriptorDirectory)
 }
 
+#[cfg(test)]
 fn snapshot_core(
     snapshot: &CatalogSnapshot,
     snapshot_path: &Path,
     theme: &pf_theme::Theme,
     reduced: bool,
 ) -> ShellCore {
-    let directory = snapshot_path.parent().unwrap_or_else(|| Path::new(""));
-    ShellCore::boot_with_art(snapshot, theme, reduced, move |_, reference| {
-        resolve_art(Some(directory), reference)
-    })
+    let directory = snapshot_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    catalog_art_core(
+        snapshot,
+        theme,
+        reduced,
+        &ArtPolicy::SnapshotDirectory(directory),
+    )
 }
 
 fn selected_core(
     snapshot: &CatalogSnapshot,
-    snapshot_path: Option<&Path>,
-    fixture_mode: bool,
+    art_policy: &ArtPolicy,
     theme: &pf_theme::Theme,
     reduced: bool,
 ) -> ShellCore {
-    if let Some(path) = snapshot_path {
-        snapshot_core(snapshot, path, theme, reduced)
-    } else if fixture_mode {
-        fixture_core(snapshot, theme, reduced)
-    } else {
-        catalog_core(snapshot, theme, reduced)
-    }
+    catalog_art_core(snapshot, theme, reduced, art_policy)
 }
 struct SnapshotCatalog(CatalogSnapshot);
 
@@ -620,6 +724,20 @@ fn main() -> Result<(), String> {
         });
     let theme = pf_theme::flagship();
     let reduced = env::var_os("PF_REDUCE_MOTION").is_some();
+    let art_policy = snapshot_path.as_ref().map_or_else(
+        || {
+            if fixture_mode {
+                ArtPolicy::VendoredFixture
+            } else {
+                ArtPolicy::DescriptorDirectory
+            }
+        },
+        |path| {
+            ArtPolicy::SnapshotDirectory(
+                path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            )
+        },
+    );
     let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json"))
         .map_err(|e| format!("{e:?}"))?;
     let options = safe_return_options(&contract);
@@ -631,13 +749,7 @@ fn main() -> Result<(), String> {
         load_durable_map_or_shipped(contract.clone(), &remap_path)?
     };
     let footer = footer_prompt(&glyphs);
-    let mut core = selected_core(
-        &snapshot,
-        snapshot_path.as_deref(),
-        fixture_mode,
-        &theme,
-        reduced,
-    );
+    let mut core = selected_core(&snapshot, &art_policy, &theme, reduced);
     core.set_control_bindings(control_bindings(&glyphs));
     core.authority_snapshot(false);
     if args.iter().any(|arg| arg == "--session-unavailable") {
@@ -759,6 +871,7 @@ fn main() -> Result<(), String> {
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut input = EvdevInteractiveInput::new(&mut actions);
         let mut automation = automation_server(&args)?;
+        let mut latency_trace = latency_trace("fbdev")?;
         return run_interactive(
             &mut host,
             &mut input,
@@ -768,6 +881,7 @@ fn main() -> Result<(), String> {
             power,
             glyphs,
             catalog.expect("fbdev catalog"),
+            &art_policy,
             Path::new(session_socket),
             network,
             time,
@@ -777,6 +891,7 @@ fn main() -> Result<(), String> {
             JsonRemapStore::at(remap_path),
             &mut automation,
             "evdev",
+            &mut latency_trace,
         );
     }
     #[cfg(feature = "wayland")]
@@ -790,6 +905,7 @@ fn main() -> Result<(), String> {
                 EvdevActionSource::open_with_map(input_path, &contract, glyphs.clone())
                     .map_err(|e| format!("input adapter: {e:?}"))?;
             let mut input = EvdevInteractiveInput::new(&mut source);
+            let mut latency_trace = latency_trace("wayland")?;
             return run_interactive(
                 &mut host,
                 &mut input,
@@ -799,6 +915,7 @@ fn main() -> Result<(), String> {
                 power,
                 glyphs,
                 catalog.expect("wayland catalog"),
+                &art_policy,
                 Path::new(session_socket),
                 network,
                 time,
@@ -808,9 +925,11 @@ fn main() -> Result<(), String> {
                 JsonRemapStore::at(remap_path),
                 &mut automation,
                 "evdev",
+                &mut latency_trace,
             );
         }
         let mut input = WaylandInteractiveInput::new(glyphs.clone());
+        let mut latency_trace = latency_trace("wayland")?;
         return run_interactive(
             &mut host,
             &mut input,
@@ -820,6 +939,7 @@ fn main() -> Result<(), String> {
             power,
             glyphs,
             catalog.expect("wayland catalog"),
+            &art_policy,
             Path::new(session_socket),
             network,
             time,
@@ -829,6 +949,7 @@ fn main() -> Result<(), String> {
             JsonRemapStore::at(remap_path),
             &mut automation,
             "wayland-keyboard",
+            &mut latency_trace,
         );
     }
     let out = Path::new(value(&args, "--out").unwrap_or("evidence/offscreen"));
@@ -1373,6 +1494,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     power: &mut dyn PowerPort,
     map: EffectiveMap,
     catalog: &dyn FavoriteCatalog,
+    art_policy: &ArtPolicy,
     session_socket: &Path,
     network: &mut dyn NetworkPort,
     time: &mut dyn TimePort,
@@ -1382,6 +1504,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     remap_store: JsonRemapStore,
     automation: &mut Option<automation::AutomationServer>,
     input_source: &str,
+    latency_trace: &mut Option<LatencyTrace>,
 ) -> Result<(), String> {
     let deadline = Deadline(MonotonicTime::ZERO);
     let mut session = SessionClient::new(
@@ -1403,6 +1526,19 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     loop {
+        if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
+            let snapshot = catalog.snapshot()?;
+            apply_catalog_reload(
+                host,
+                core,
+                &activate,
+                &snapshot,
+                art_policy,
+                &mut frames,
+                &mut presented_revision,
+                latency_trace,
+            )?;
+        }
         let before = redraw_state(core);
         drive_socket_session(core, &mut session)?;
         drive_automation(
@@ -1430,9 +1566,14 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
             continue;
         };
+        let ingress_us = latency_trace.as_ref().map(LatencyTrace::now_us);
+        let trace_scene_before = latency_trace
+            .as_ref()
+            .map(|_| format!("{:?}", core.scene(host.metrics(), &activate)));
         if let Some(server) = automation.as_mut() {
             server.note_action();
         }
+        let mut presented = false;
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
                 request_safe_return_if_active(core, &session);
@@ -1445,6 +1586,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                     if present_interactive(host, core, &activate)? {
                         frames.increment();
                         presented_revision = core.revision();
+                        presented = true;
                     }
                     drive_socket_session(core, &mut session)?;
                 }
@@ -1554,15 +1696,48 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
             None => {}
         }
-        if before != redraw_state(core) {
+        let changed = before != redraw_state(core)
+            && trace_scene_before.as_ref().is_none_or(|before_scene| {
+                *before_scene != format!("{:?}", core.scene(host.metrics(), &activate))
+            });
+        if changed {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
             if present_interactive(host, core, &activate)? {
                 frames.increment();
                 presented_revision = core.revision();
+                presented = true;
             }
         }
+        if let (Some(trace), Some(ingress_us)) = (latency_trace.as_mut(), ingress_us) {
+            trace.action(&action, ingress_us, presented, core.revision())?;
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_catalog_reload(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    activate: &str,
+    snapshot: &CatalogSnapshot,
+    art_policy: &ArtPolicy,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+    latency_trace: &mut Option<LatencyTrace>,
+) -> Result<(), String> {
+    let item_count = snapshot.items.len();
+    core.reload_catalog_with_art(snapshot, |item, reference| {
+        resolved_art(item, reference, art_policy)
+    });
+    if present_interactive(host, core, activate)? {
+        frames.increment();
+        *presented_revision = core.revision();
+    }
+    if let Some(trace) = latency_trace.as_mut() {
+        trace.catalog_reloaded(item_count)?;
+    }
+    Ok(())
 }
 
 fn automation_server(args: &[String]) -> Result<Option<automation::AutomationServer>, String> {
@@ -7322,9 +7497,8 @@ exec="./launch"
     }
 
     #[test]
-    fn snapshot_resolver_is_selected_in_fixture_and_interactive_modes() {
+    fn snapshot_resolver_is_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let snapshot_path = dir.path().join("catalog.json");
         fs::create_dir(dir.path().join("art")).unwrap();
         fs::write(
             dir.path().join("art/cover.png"),
@@ -7336,20 +7510,16 @@ exec="./launch"
         snapshot.items.truncate(1);
         snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
 
-        for fixture_mode in [true, false] {
-            let core = selected_core(
-                &snapshot,
-                Some(&snapshot_path),
-                fixture_mode,
-                &pf_theme::flagship(),
-                false,
-            );
-            assert_eq!(
-                core.art_treatment("ridgeline"),
-                Some(pf_shell_core::ArtTreatment::CatalogArt),
-                "snapshot resolver must win when fixture_mode={fixture_mode}"
-            );
-        }
+        let core = selected_core(
+            &snapshot,
+            &ArtPolicy::SnapshotDirectory(dir.path().to_path_buf()),
+            &pf_theme::flagship(),
+            false,
+        );
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
     }
 
     #[test]
@@ -8425,5 +8595,206 @@ exec="./launch"
             device_status_root(Some(std::ffi::OsStr::new("/tmp/fake-power"))),
             PathBuf::from("/tmp/fake-power")
         );
+    }
+
+    struct ScriptedInteractiveInput {
+        polls: VecDeque<ActionPoll>,
+    }
+
+    impl InteractiveInput<OffscreenHost> for ScriptedInteractiveInput {
+        fn next_action(
+            &mut self,
+            _host: &mut OffscreenHost,
+            _deadline: Deadline,
+        ) -> Result<ActionPoll, String> {
+            Ok(self.polls.pop_front().unwrap_or(ActionPoll::Closed))
+        }
+        fn capture_next_button(&mut self) {}
+        fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+        fn has_pending(&self) -> bool {
+            !self.polls.is_empty()
+        }
+    }
+
+    #[test]
+    fn catalog_reload_applies_and_presents_new_snapshot_before_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("latency.jsonl");
+        let original: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut reloaded = original.clone();
+        reloaded.items.truncate(1);
+        reloaded.items[0].title = "Reloaded Catalog Title".into();
+
+        let mut core = fixture_core(&original, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+        let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
+        let revision_before = core.revision();
+
+        apply_catalog_reload(
+            &mut host,
+            &mut core,
+            "A Open",
+            &reloaded,
+            &ArtPolicy::VendoredFixture,
+            &mut frames,
+            &mut presented_revision,
+            &mut trace,
+        )
+        .unwrap();
+
+        let scene = core.scene(host.metrics(), "A Open").unwrap();
+        let semantic = semantic_snapshot(&scene);
+        assert!(semantic.contains("Reloaded Catalog Title"));
+        assert!(!semantic.contains(&original.items[1].title));
+        assert_eq!(frames.get(), 1);
+        assert_eq!(presented_revision, core.revision());
+        assert!(core.revision() > revision_before);
+        drop(trace);
+        let acknowledgement = fs::read_to_string(trace_path)
+            .unwrap()
+            .lines()
+            .last()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .unwrap();
+        assert_eq!(acknowledgement["event"], "catalog_reloaded");
+        assert_eq!(acknowledgement["items"], reloaded.items.len());
+    }
+
+    #[test]
+    fn catalog_reload_preserves_snapshot_relative_art_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("art")).unwrap();
+        fs::write(
+            dir.path().join("art/cover.png"),
+            include_bytes!("../fixtures/art/hollow-tides.png"),
+        )
+        .unwrap();
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        snapshot.items[0].presentation.icon_reference = Some("art/cover.png".into());
+        snapshot.items[0].presentation.icon_decodable = true;
+        snapshot.items[0].variants[0].launch_target.descriptor_path =
+            dir.path().join("unrelated/app.toml");
+        let policy = ArtPolicy::SnapshotDirectory(dir.path().to_path_buf());
+        let mut core = selected_core(&snapshot, &policy, &pf_theme::flagship(), false);
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt)
+        );
+
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        apply_catalog_reload(
+            &mut host,
+            &mut core,
+            "A Open",
+            &snapshot,
+            &policy,
+            &mut automation::FrameCounter::default(),
+            &mut 0,
+            &mut None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            core.art_treatment("ridgeline"),
+            Some(pf_shell_core::ArtTreatment::CatalogArt),
+            "reload must continue resolving art beside the snapshot, not the descriptor"
+        );
+    }
+
+    #[test]
+    fn interactive_actions_write_presented_and_filtered_latency_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("latency.jsonl");
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let catalog = SnapshotCatalog(snapshot.clone());
+        let theme = pf_theme::flagship();
+        let mut core = fixture_core(&snapshot, &theme, false);
+        core.authority_snapshot(false);
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        core.set_control_bindings(control_bindings(&map));
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        let mut input = ScriptedInteractiveInput {
+            polls: VecDeque::from([
+                ActionPoll::Event(ActionEvent::Action(ShellAction::Move(
+                    pf_scene::AxisMove::Down,
+                ))),
+                ActionPoll::Event(ActionEvent::Action(ShellAction::Custom(
+                    "not-an-action".into(),
+                ))),
+                ActionPoll::Closed,
+            ]),
+        };
+        let mut preferences = fixture_preferences();
+        let mut power = FakePowerPort::new(Vec::new(), IdlePolicy::default());
+        let (mut network, mut time, mut transfer) = fixture_device_ports();
+        let status = FakeDeviceStatusPort { attention: false };
+        let mut automation = None;
+        let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
+        run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer_prompt(&map),
+            &mut preferences,
+            &mut power,
+            map,
+            &catalog,
+            &ArtPolicy::VendoredFixture,
+            &dir.path().join("missing-session.sock"),
+            &mut network,
+            &mut time,
+            &mut transfer,
+            &status,
+            dir.path(),
+            JsonRemapStore::at(dir.path().join("remaps.json")),
+            &mut automation,
+            "scripted",
+            &mut trace,
+        )
+        .unwrap();
+
+        drop(trace);
+        let rows = fs::read_to_string(trace_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows[1]["seq"], 1);
+        assert_eq!(rows[2]["seq"], 2);
+        assert_eq!(rows[1]["presented"], true);
+        assert!(rows[1]["latency_us"].as_u64().unwrap() > 0);
+        let filtered = rows
+            .iter()
+            .skip(1)
+            .find(|row| row["presented"] == false)
+            .unwrap();
+        assert!(filtered["latency_us"].is_null());
+        assert!(filtered["t_present_us"].is_null());
     }
 }

@@ -445,11 +445,13 @@ fn selected_core(
 ) -> ShellCore {
     catalog_art_core(snapshot, theme, reduced, art_policy)
 }
-struct SnapshotCatalog(CatalogSnapshot);
+struct SnapshotCatalog {
+    path: PathBuf,
+}
 
 impl FavoriteCatalog for SnapshotCatalog {
     fn snapshot(&self) -> Result<CatalogSnapshot, String> {
-        Ok(self.0.clone())
+        load_catalog_snapshot(&self.path)
     }
 
     fn set_favorite(
@@ -713,7 +715,7 @@ fn main() -> Result<(), String> {
     };
     let snapshot_catalog = snapshot_path
         .as_ref()
-        .map(|_| SnapshotCatalog(snapshot.clone()));
+        .map(|path| SnapshotCatalog { path: path.clone() });
     let catalog: Option<&dyn FavoriteCatalog> = installed
         .as_ref()
         .map(|provider| provider as &dyn FavoriteCatalog)
@@ -1520,17 +1522,18 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     loop {
         if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
-            let snapshot = catalog.snapshot()?;
-            apply_catalog_reload(
+            if let Err(error) = reload_catalog(
+                catalog,
                 host,
                 core,
                 &activate,
-                &snapshot,
                 art_policy,
                 &mut frames,
                 &mut presented_revision,
                 latency_trace,
-            )?;
+            ) {
+                eprintln!("catalog reload failed: {error}");
+            }
         }
         let before = redraw_state(core);
         drive_socket_session(core, &mut session)?;
@@ -1706,6 +1709,30 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             trace.action(&action, ingress_us, presented, core.revision())?;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reload_catalog(
+    catalog: &dyn FavoriteCatalog,
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    activate: &str,
+    art_policy: &ArtPolicy,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+    latency_trace: &mut Option<LatencyTrace>,
+) -> Result<(), String> {
+    let snapshot = catalog.snapshot()?;
+    apply_catalog_reload(
+        host,
+        core,
+        activate,
+        &snapshot,
+        art_policy,
+        frames,
+        presented_revision,
+        latency_trace,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8613,11 +8640,17 @@ exec="./launch"
     fn catalog_reload_applies_and_presents_new_snapshot_before_acknowledgement() {
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("latency.jsonl");
+        let snapshot_path = dir.path().join("catalog.json");
         let original: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
         let mut reloaded = original.clone();
         reloaded.items.truncate(1);
         reloaded.items[0].title = "Reloaded Catalog Title".into();
+        fs::write(&snapshot_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let catalog = SnapshotCatalog {
+            path: snapshot_path.clone(),
+        };
+        fs::write(&snapshot_path, serde_json::to_vec(&reloaded).unwrap()).unwrap();
 
         let mut core = fixture_core(&original, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
@@ -8633,11 +8666,11 @@ exec="./launch"
         let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
         let revision_before = core.revision();
 
-        apply_catalog_reload(
+        reload_catalog(
+            &catalog,
             &mut host,
             &mut core,
             "A Open",
-            &reloaded,
             &ArtPolicy::VendoredFixture,
             &mut frames,
             &mut presented_revision,
@@ -8661,6 +8694,53 @@ exec="./launch"
             .unwrap();
         assert_eq!(acknowledgement["event"], "catalog_reloaded");
         assert_eq!(acknowledgement["items"], reloaded.items.len());
+    }
+
+    #[test]
+    fn malformed_snapshot_reload_keeps_catalog_and_emits_no_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("latency.jsonl");
+        let snapshot_path = dir.path().join("catalog.json");
+        let original: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        fs::write(&snapshot_path, b"not json").unwrap();
+        let catalog = SnapshotCatalog {
+            path: snapshot_path,
+        };
+        let mut core = fixture_core(&original, &pf_theme::flagship(), false);
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        let semantic_before = semantic_snapshot(&core.scene(host.metrics(), "A Open").unwrap());
+        let mut trace = Some(LatencyTrace::open(&trace_path, "offscreen-test").unwrap());
+
+        let error = reload_catalog(
+            &catalog,
+            &mut host,
+            &mut core,
+            "A Open",
+            &ArtPolicy::VendoredFixture,
+            &mut automation::FrameCounter::default(),
+            &mut 0,
+            &mut trace,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("catalog snapshot"));
+        assert_eq!(
+            semantic_snapshot(&core.scene(host.metrics(), "A Open").unwrap()),
+            semantic_before
+        );
+        drop(trace);
+        assert!(
+            !fs::read_to_string(trace_path)
+                .unwrap()
+                .contains("catalog_reloaded")
+        );
     }
 
     #[test]
@@ -8718,7 +8798,11 @@ exec="./launch"
         let trace_path = dir.path().join("latency.jsonl");
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
-        let catalog = SnapshotCatalog(snapshot.clone());
+        let snapshot_path = dir.path().join("catalog.json");
+        fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let catalog = SnapshotCatalog {
+            path: snapshot_path,
+        };
         let theme = pf_theme::flagship();
         let mut core = fixture_core(&snapshot, &theme, false);
         core.authority_snapshot(false);

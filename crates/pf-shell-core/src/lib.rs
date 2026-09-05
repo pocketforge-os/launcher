@@ -4663,12 +4663,8 @@ impl ShellCore {
                     .with_type_role(TypeRole::Caption)
                     .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                 ]);
-                if !self.search_query.is_empty()
-                    && let Some(match_byte) =
-                        title.to_lowercase().find(&self.search_query.to_lowercase())
-                {
-                    let match_start = title[..match_byte].chars().count();
-                    let match_chars = self.search_query.chars().count();
+                if let Some(match_range) = caseless_match_char_range(title, &self.search_query) {
+                    let match_chars = match_range.end - match_range.start;
                     if match_chars > 0 {
                         row.children.push(node(
                             &format!("search-result-{}-match-underline", item.id),
@@ -4676,7 +4672,7 @@ impl ShellCore {
                             "",
                             text_left
                                 + TEXT_NODE_INLINE_INSET * scale
-                                + match_start as f32 * CAPTION_GLYPH_ADVANCE * scale,
+                                + match_range.start as f32 * CAPTION_GLYPH_ADVANCE * scale,
                             result_top + row_height / 2.0 - 5.0 * scale,
                             (match_chars as f32 * CAPTION_GLYPH_ADVANCE * scale).min(content_width),
                             2.0 * scale,
@@ -7930,6 +7926,31 @@ fn best_variant(item: &Item) -> Option<&Variant> {
         .find(|variant| matches!(variant.availability, Availability::Ready))
         .or_else(|| item.variants.first())
 }
+
+fn caseless_match_char_range(title: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut lowered_title = String::new();
+    let mut original_char_for_lowered_char = Vec::new();
+    for (original_char, ch) in title.chars().enumerate() {
+        for lowered in ch.to_lowercase() {
+            lowered_title.push(lowered);
+            original_char_for_lowered_char.push(original_char);
+        }
+    }
+
+    let lowered_query = query.to_lowercase();
+    let match_byte = lowered_title.find(&lowered_query)?;
+    let lowered_start = lowered_title[..match_byte].chars().count();
+    let lowered_len = lowered_query.chars().count();
+    let lowered_end = lowered_start.checked_add(lowered_len)?;
+    let original_start = *original_char_for_lowered_char.get(lowered_start)?;
+    let original_end = original_char_for_lowered_char.get(lowered_end.checked_sub(1)?)? + 1;
+    Some(original_start..original_end)
+}
+
 fn kind_text(kind: &AppKind) -> &'static str {
     match kind {
         AppKind::Media => "MEDIA",
@@ -11779,6 +11800,43 @@ mod tests {
         assert!(painted_title.bounds.y + painted_title.bounds.height <= caption.bounds.y);
         assert!(caption.bounds.x + caption.bounds.width <= row.bounds.x + row.bounds.width);
         assert!(caption.bounds.width > 0.0);
+    }
+
+    #[test]
+    fn search_match_underline_maps_casefolded_matches_to_original_title_chars() {
+        assert_eq!(caseless_match_char_range("Ridgeline", "LINE"), Some(5..9));
+        assert_eq!(caseless_match_char_range("İİA", "a"), Some(2..3));
+
+        let mut core = fixture_core(vec![item(
+            "unicode-search-result",
+            "İİA",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("a");
+
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let title = node_by_id(scene.root(), "search-result-unicode-search-result-title").unwrap();
+        let underline = node_by_id(
+            scene.root(),
+            "search-result-unicode-search-result-match-underline",
+        )
+        .unwrap();
+
+        let expected_x = title.bounds.x + TEXT_NODE_INLINE_INSET + 2.0 * CAPTION_GLYPH_ADVANCE;
+        assert!((underline.bounds.x - expected_x).abs() < f32::EPSILON);
+        assert!((underline.bounds.width - CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
     }
 
     #[test]

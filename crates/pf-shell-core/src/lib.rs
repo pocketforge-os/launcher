@@ -1662,18 +1662,12 @@ impl ShellCore {
     }
 
     fn refresh_search_results(&mut self) {
-        let words = self
-            .search_query
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>();
         self.search_results = self
             .items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                let haystack = format!("{} {}", item.title, item.tags.join(" ")).to_lowercase();
-                words.iter().all(|word| haystack.contains(word))
+                search_match_char_ranges(&item.title, &item.tags, &self.search_query).is_some()
             })
             .map(|(index, _)| index)
             .collect();
@@ -4663,11 +4657,20 @@ impl ShellCore {
                     .with_type_role(TypeRole::Caption)
                     .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
                 ]);
-                if let Some(match_range) = caseless_match_char_range(title, &self.search_query) {
+                for (match_index, match_range) in
+                    search_match_char_ranges(title, &item.tags, &self.search_query)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                {
                     let match_chars = match_range.end - match_range.start;
                     if match_chars > 0 {
                         row.children.push(node(
-                            &format!("search-result-{}-match-underline", item.id),
+                            &if match_index == 0 {
+                                format!("search-result-{}-match-underline", item.id)
+                            } else {
+                                format!("search-result-{}-match-underline-{match_index}", item.id)
+                            },
                             Role::Group,
                             "",
                             text_left
@@ -4682,7 +4685,7 @@ impl ShellCore {
                 }
                 // Focus is the renderer's single offset ring + glow (state.focused), not an
                 // inset ring-colored border layered on top of it.
-                row.state.focused = self.focus == result;
+                row.state.focused = self.search_key.is_none() && self.focus == result;
                 row.action = Some(NodeAction::Activate);
                 results_region.children.push(row);
             }
@@ -7949,6 +7952,28 @@ fn caseless_match_char_range(title: &str, query: &str) -> Option<std::ops::Range
     let original_start = *original_char_for_lowered_char.get(lowered_start)?;
     let original_end = original_char_for_lowered_char.get(lowered_end.checked_sub(1)?)? + 1;
     Some(original_start..original_end)
+}
+
+fn search_match_char_ranges(
+    title: &str,
+    tags: &[String],
+    query: &str,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    let haystack = format!("{} {}", title, tags.join(" ")).to_lowercase();
+    query.split_whitespace().map(str::to_lowercase).try_fold(
+        Vec::new(),
+        |mut title_ranges, word| {
+            if !haystack.contains(&word) {
+                return None;
+            }
+            if let Some(range) = caseless_match_char_range(title, &word) {
+                if !title_ranges.contains(&range) {
+                    title_ranges.push(range);
+                }
+            }
+            Some(title_ranges)
+        },
+    )
 }
 
 fn kind_text(kind: &AppKind) -> &'static str {
@@ -11840,6 +11865,55 @@ mod tests {
     }
 
     #[test]
+    fn search_match_underlines_each_noncontiguous_query_word() {
+        let mut core = fixture_core(vec![item(
+            "multi-word-search-result",
+            "Extraordinary Ridgeline Adventure",
+            vec![variant("native", "game", Availability::Ready)],
+        )]);
+        core.go(Route::Search);
+        core.set_search_query("extra adventure");
+
+        assert_eq!(core.search_result_ids(), vec!["multi-word-search-result"]);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "A Open     PF Safe Return",
+            )
+            .unwrap();
+        let title =
+            node_by_id(scene.root(), "search-result-multi-word-search-result-title").unwrap();
+        let first = node_by_id(
+            scene.root(),
+            "search-result-multi-word-search-result-match-underline",
+        )
+        .unwrap();
+        let second = node_by_id(
+            scene.root(),
+            "search-result-multi-word-search-result-match-underline-1",
+        )
+        .unwrap();
+
+        assert!((first.bounds.x - title.bounds.x - TEXT_NODE_INLINE_INSET).abs() < f32::EPSILON);
+        assert!((first.bounds.width - 5.0 * CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
+        assert!(
+            (second.bounds.x
+                - title.bounds.x
+                - TEXT_NODE_INLINE_INSET
+                - 24.0 * CAPTION_GLYPH_ADVANCE)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!((second.bounds.width - 9.0 * CAPTION_GLYPH_ADVANCE).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn search_has_one_semantic_focus_owner_and_grouped_prompts() {
         fn focused_nodes<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
             if node.state.focused {
@@ -11864,6 +11938,22 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
+
+        core.go(Route::Search);
+        let osk_focused = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let mut focused = Vec::new();
+        focused_nodes(osk_focused.root(), &mut focused);
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].id.as_str(), "search-key-0");
+        assert!(
+            !node_by_id(osk_focused.root(), "search-result-search-result")
+                .unwrap()
+                .state
+                .focused
+        );
+
+        core.action(&ShellAction::Move(AxisMove::Left));
+        assert_eq!(core.search_key, None);
 
         let populated = core.scene(metrics, "A Open     PF Safe Return").unwrap();
         let mut focused = Vec::new();

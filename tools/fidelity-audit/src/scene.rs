@@ -155,17 +155,30 @@ fn parse_line(line: &str) -> Result<SceneNode, String> {
 }
 
 fn parse_bounds(s: &str) -> Option<Bounds> {
-    let mut it = s.split(',').map(str::trim);
-    let x = it.next()?.parse().ok()?;
-    let y = it.next()?.parse().ok()?;
-    let width = it.next()?.parse().ok()?;
-    let height = it.next()?.parse().ok()?;
+    // Exactly four fields — a record with more or fewer is malformed, never
+    // silently truncated to the first four.
+    let parts: [&str; 4] = s
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
     Some(Bounds {
-        x,
-        y,
-        width,
-        height,
+        x: finite(parts[0])?,
+        y: finite(parts[1])?,
+        width: finite(parts[2])?,
+        height: finite(parts[3])?,
     })
+}
+
+/// Parse one bounds coordinate, rejecting non-finite values. Rust's float parser
+/// ACCEPTS `NaN`/`inf`/`-inf`, and every `> epsilon` tolerance comparison
+/// downstream (`require_coordinate_space`, the geometry comparator) is FALSE for
+/// NaN — so a non-finite coordinate would parse, pass validation, and emit NO
+/// divergence, silently trusting an invalid ledger. Reject it at the boundary.
+fn finite(s: &str) -> Option<f64> {
+    let v: f64 = s.parse().ok()?;
+    v.is_finite().then_some(v)
 }
 
 fn state_flag(s: &str, flag: &str) -> bool {
@@ -234,6 +247,37 @@ mod tests {
     fn errors_on_unparseable_bounds() {
         let raw = "  n role=Group label=\"\" bounds=nan,x,y,z state=NodeState { } action=None";
         let err = SceneTree::from_semantic_str(raw).expect_err("bad bounds must error");
+        assert!(err.contains("unparseable bounds"), "err={err}");
+    }
+
+    #[test]
+    fn errors_on_a_non_finite_bounds_coordinate() {
+        // A FULLY PARSEABLE record whose bounds carry NaN: Rust's float parser
+        // accepts "NaN", and `> epsilon` is false for NaN, so without an
+        // is_finite() guard this record would pass require_coordinate_space and
+        // emit no divergence — silently trusting an invalid ledger.
+        let raw = "root role=Group label=\"\" bounds=0,0,NaN,720 state=NodeState { } action=None";
+        let err = SceneTree::from_semantic_str(raw)
+            .expect_err("a non-finite bounds coordinate must be a hard error");
+        assert!(err.contains("unparseable bounds"), "err={err}");
+    }
+
+    #[test]
+    fn errors_on_an_infinite_bounds_coordinate() {
+        let raw = "root role=Group label=\"\" bounds=0,0,inf,720 state=NodeState { } action=None";
+        let err = SceneTree::from_semantic_str(raw)
+            .expect_err("an infinite bounds coordinate must be a hard error");
+        assert!(err.contains("unparseable bounds"), "err={err}");
+    }
+
+    #[test]
+    fn errors_on_the_wrong_bounds_field_count() {
+        // Five comma-separated values is a malformed record, not a bounds
+        // silently truncated to its first four fields.
+        let raw =
+            "root role=Group label=\"\" bounds=0,0,1280,720,5 state=NodeState { } action=None";
+        let err = SceneTree::from_semantic_str(raw)
+            .expect_err("a wrong bounds field count must be a hard error");
         assert!(err.contains("unparseable bounds"), "err={err}");
     }
 

@@ -940,7 +940,7 @@ pub struct ShellCore {
     library_filter: LibraryFilter,
     library_items: Vec<usize>,
     library_surface_width: Cell<f32>,
-    launch_focus: usize,
+    active_launch_request: Option<LaunchRequest>,
     active_title: String,
     crash_summary: String,
     crash_receipt_id: String,
@@ -1099,7 +1099,7 @@ impl ShellCore {
             library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
             library_surface_width: Cell::new(1280.0),
-            launch_focus: 0,
+            active_launch_request: None,
             active_title: String::new(),
             crash_summary: String::new(),
             crash_receipt_id: String::new(),
@@ -2081,10 +2081,11 @@ impl ShellCore {
                     None
                 }
                 ShellAction::Activate => {
-                    self.focus = self.launch_focus;
                     self.presentation = Presentation::Ready;
                     self.go(Route::Home);
-                    self.activate()
+                    let request = self.active_launch_request.clone()?;
+                    self.presentation = Presentation::Starting;
+                    Some(Effect::Launch(request))
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                     self.focus = 1;
@@ -2555,14 +2556,11 @@ impl ShellCore {
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
         let selected = &self.items[item];
         let request = selected.variants.get(variant)?.launch_target.app_id.clone();
-        self.launch_focus = if self.caller_route == Route::Home {
-            item
-        } else {
-            self.caller_focus
-        };
+        let request = LaunchRequest { item_id: request };
+        self.active_launch_request = Some(request.clone());
         self.active_title.clone_from(&selected.title);
         self.presentation = Presentation::Starting;
-        Some(Effect::Launch(LaunchRequest { item_id: request }))
+        Some(Effect::Launch(request))
     }
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
@@ -10899,11 +10897,42 @@ mod tests {
             session_id: "receipt-again".into(),
         }));
         c.action(&ShellAction::Move(AxisMove::Right));
-        assert!(matches!(
+        assert_eq!(
             c.action(&ShellAction::Activate),
-            Some(Effect::Launch(_))
-        ));
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
         assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+    #[test]
+    fn returned_summary_open_again_relaunches_library_item_not_home_focus() {
+        let mut c = core();
+        c.go(Route::Library);
+        c.focus = 6;
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(c.route(), Route::Details);
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Starting)
+        );
     }
     #[test]
     fn terminal_summary_scenes_are_driven_by_their_receipts() {

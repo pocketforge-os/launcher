@@ -171,11 +171,18 @@ fn chrome_row_bottom(safe_top: f32, text_scale: u16) -> f32 {
 /// Group disc is the deterministic, theme-token-colored 8px cue the mockups pin,
 /// centered on the phrase's optical midline.
 const STATUS_DOT_DIAMETER: f32 = 8.0;
-/// The one optical centerline every status-bar chrome item (wifi glyph, battery
-/// capsule, and the battery%/clock text) is centered on, so all sit within 1px of
-/// each other. Empirically the caption text's ink midline lands here at 100% scale;
-/// the icons are placed around it rather than each carrying its own hard-coded y.
-const STATUS_CLUSTER_CENTER_Y: f32 = 34.0;
+/// The caption's ink midline is 12px below its box top at 100% and scales with the
+/// text. Keep that ink at the cluster centerline and center the fixed-size icons on
+/// the same derived line. Enlarged caption boxes move up to preserve the chrome row's
+/// vertical budget.
+const STATUS_CAPTION_INK_CENTER_OFFSET_100: f32 = 12.0;
+fn status_caption_top(text_scale: u16) -> f32 {
+    if text_scale == 100 { 22.0 } else { 16.0 }
+}
+fn status_cluster_center_y(text_scale: u16) -> f32 {
+    status_caption_top(text_scale)
+        + measured_text_advance(STATUS_CAPTION_INK_CENTER_OFFSET_100, text_scale)
+}
 const STATUS_CLUSTER_SHIFT_X: f32 = 31.0;
 fn status_cluster_shift_x(text_scale: u16) -> f32 {
     if text_scale == 100 {
@@ -3250,6 +3257,7 @@ impl ShellCore {
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         scene_core.library_surface_width.set(w);
         let mut children = Vec::new();
+        let status_center_y = status_cluster_center_y(scene_core.text_scale);
         let battery_x = w - 168.0 + status_cluster_shift_x(scene_core.text_scale);
         let room_width = room_strip_width(scene_core.text_scale);
         let room_left = (w - room_width) / 2.0;
@@ -3297,7 +3305,7 @@ impl ShellCore {
                     Role::Group,
                     "Wi-Fi connected",
                     battery_x - 17.0,
-                    STATUS_CLUSTER_CENTER_Y - 3.5,
+                    status_center_y - 3.5,
                     9.0,
                     7.0,
                     SCENE_TRANSPARENT_TOKEN,
@@ -3313,7 +3321,7 @@ impl ShellCore {
             // centerline, not the near-solid filled block the four opaque rects drew.
             // The outline is a 1px themed border on a transparent body; the charge is a
             // small inner fill, and a short nub is the terminal.
-            let cy = STATUS_CLUSTER_CENTER_Y;
+            let cy = status_center_y;
             let level_width = (9.0 * f32::from(battery_percent) / 100.0).max(1.5);
             children.extend([
                 node(
@@ -3358,7 +3366,7 @@ impl ShellCore {
                     Role::Text,
                     &status_text,
                     status_left,
-                    16.0,
+                    status_caption_top(scene_core.text_scale),
                     status_width,
                     scaled_text_box_height(32.0, scene_core.text_scale),
                     SCENE_TRANSPARENT_TOKEN,
@@ -8595,30 +8603,30 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16
         return;
     }
     for node in &mut system_nodes {
-        // Every status-bar item is centered on STATUS_CLUSTER_CENTER_Y (28) so the
-        // wifi glyph, battery capsule, and the %/clock text share ONE optical
-        // centerline within 1px. `right` is the gap from the surface right edge to the
-        // node's right edge; `top`/`height` place it around the centerline. The wifi
-        // (9x7) tucks just left of the delicate 12x7 battery capsule.
-        const CY: f32 = STATUS_CLUSTER_CENTER_Y;
+        // Every status-bar item is centered on the scale-aware centerline (34 at
+        // 100%) so the wifi glyph, battery capsule, and the %/clock text share ONE
+        // optical line. `right` is the gap from the surface right edge to the node's
+        // right edge; `top`/`height` place it around that line. The wifi (9x7) tucks
+        // just left of the delicate 12x7 battery capsule.
+        let center_y = status_cluster_center_y(text_scale);
         let shift_x = status_cluster_shift_x(text_scale);
         let (right, top, width, height) = match node.id.as_str() {
-            "wifi-glyph" => (164.0 - shift_x, CY - 3.5, 9.0, 7.0),
-            "battery-outline" => (144.0 - shift_x, CY - 3.5, 12.0, 7.0),
+            "wifi-glyph" => (164.0 - shift_x, center_y - 3.5, 9.0, 7.0),
+            "battery-outline" => (144.0 - shift_x, center_y - 3.5, 12.0, 7.0),
             "battery-level" => (
                 154.5 - shift_x - node.bounds.width,
-                CY - 1.5,
+                center_y - 1.5,
                 node.bounds.width,
                 3.0,
             ),
-            "battery-terminal" => (142.5 - shift_x, CY - 1.5, 1.5, 3.0),
+            "battery-terminal" => (142.5 - shift_x, center_y - 1.5, 1.5, 3.0),
             "status-cluster" => (
                 if text_scale == 100 {
                     -16.0 - shift_x
                 } else {
                     -shift_x
                 },
-                if text_scale == 100 { 22.0 } else { 16.0 },
+                status_caption_top(text_scale),
                 node.bounds.width.max(152.0),
                 node.bounds.height,
             ),
@@ -16943,6 +16951,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn assert_status_cluster_centerline_at_scale(text_scale: u16) {
+        let mut core = fixture_core(vec![]);
+        core.text_scale = text_scale;
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let centerline = status_cluster_center_y(text_scale);
+        let top = |id: &str| {
+            let node = node_by_id(scene.root(), id).unwrap();
+            let Some(layout) = &node.layout else {
+                return node.bounds.y;
+            };
+            let LayoutValue::Px(top) = layout.inset.top else {
+                panic!("{id} must have an absolute pixel top");
+            };
+            top
+        };
+        let height = |id: &str| node_by_id(scene.root(), id).unwrap().bounds.height;
+
+        for id in [
+            "wifi-glyph",
+            "battery-outline",
+            "battery-level",
+            "battery-terminal",
+        ] {
+            let member_center = top(id) + height(id) / 2.0;
+            assert!(
+                (member_center - centerline).abs() < 0.01,
+                "{id} center {member_center} must equal the {text_scale}% cluster centerline {centerline}"
+            );
+        }
+        let caption_ink_center = top("status-cluster")
+            + measured_text_advance(STATUS_CAPTION_INK_CENTER_OFFSET_100, text_scale);
+        assert!(
+            (caption_ink_center - centerline).abs() < 0.01,
+            "caption ink center {caption_ink_center} must equal the {text_scale}% cluster centerline {centerline}"
+        );
+    }
+
+    #[test]
+    fn status_cluster_shares_scale_aware_centerline_at_150() {
+        assert_status_cluster_centerline_at_scale(150);
+    }
+
+    #[test]
+    fn status_cluster_shares_scale_aware_centerline_at_200() {
+        assert_status_cluster_centerline_at_scale(200);
     }
 
     #[test]

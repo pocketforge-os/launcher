@@ -2185,6 +2185,13 @@ impl ShellCore {
             };
         }
         if self.route == Route::Search {
+            if matches!(&action, ShellAction::Custom(name) if name == "Filter.next") {
+                self.search_query.pop();
+                self.bump_revision();
+                self.refresh_search_results();
+                self.focus = 0;
+                return None;
+            }
             if let Some(key) = self.search_key {
                 const COLS: usize = 7;
                 return match action {
@@ -3592,13 +3599,22 @@ impl ShellCore {
                 if let Some(prompt) = scene_core.binding_prompt("Filter.next", "Filter") {
                     prompts.push(prompt);
                 }
-                if scene_core.focus >= 5
+                if !scene_core.library_items.is_empty()
                     && let Some(prompt) = scene_core.binding_prompt("Activate", "Details")
                 {
                     prompts.push(prompt);
                 }
-                prompts.join("     ")
+                prompts.join(" · ")
             }
+            Route::Search => [
+                Some(scene_core.binding_prompt_or("Back", "Back", "B")),
+                Some(scene_core.binding_prompt_or("Search.submit", "Delete", "Y")),
+                Some(scene_core.binding_prompt_or("Activate", "Type", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
             Route::Details => {
                 let ready = scene_core
                     .selected_item
@@ -3639,23 +3655,28 @@ impl ShellCore {
                 prompts.join(" · ")
             }
             Route::Settings => {
-                let mut prompts = scene_core
-                    .binding_prompt("Back", "Back")
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if scene_core.settings_in_rows
-                    && scene_core.settings_row_focused
-                    && scene_core
-                        .settings_scene_rows()
-                        .get(scene_core.focus)
-                        .is_some_and(|row| row.action.is_some())
-                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Change")
-                {
-                    prompts.push(prompt);
-                }
+                let prompts = [
+                    scene_core.binding_prompt_or("Back", "Back", "B"),
+                    scene_core.binding_prompt_or("Activate", "Change", "A"),
+                ];
                 prompts.join(" · ")
             }
-            _ => supplied_footer,
+            Route::Quick => [
+                Some(scene_core.binding_prompt_or("Back", "Close", "B")),
+                Some(scene_core.binding_prompt_or("Activate", "Choose", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+            Route::VariantChooser => [
+                Some(scene_core.binding_prompt_or("Back", "Back", "B")),
+                Some(scene_core.binding_prompt_or("Activate", "Choose", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
         };
         if !matches!(
             self.presentation,
@@ -3734,6 +3755,11 @@ impl ShellCore {
             .iter()
             .find(|binding| binding.action == action)
             .map(|binding| format!("{} {label}", binding.binding))
+    }
+
+    fn binding_prompt_or(&self, action: &str, label: &str, fallback: &str) -> String {
+        self.binding_prompt(action, label)
+            .unwrap_or_else(|| format!("{fallback} {label}"))
     }
 
     fn route_nodes(&self, out: &mut Vec<Node>, metrics: SurfaceMetrics) {
@@ -8707,7 +8733,8 @@ fn home_prompt_nodes(
     text_scale: u16,
 ) -> Vec<Node> {
     fn binding_width(binding: &str, scale: f32) -> f32 {
-        let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 9.6;
+        // Mockup chips leave about 6.5px of inline breathing room on both sides.
+        let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 13.0;
         let delta = (measured - KEYCAP_MIN_WIDTH).max(0.0).ceil();
         (KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0) * scale
             + if scale > 1.0 { 1.0 } else { 0.0 }
@@ -8909,6 +8936,35 @@ fn right_aligned_prompt_nodes(
     for node in &mut nodes {
         translate(node, offset, 0.0);
     }
+    // Large accessibility scales can make the complete legend wider than a narrow
+    // surface. Drop whole leading pairs instead of painting clipped keycap/verb ink;
+    // the highest-priority action remains anchored at the right edge.
+    let clipped_indices = nodes
+        .iter()
+        .filter(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-keycap-")
+                .is_some_and(|suffix| !suffix.ends_with("-border"))
+                && node.bounds.x < 0.0
+        })
+        .filter_map(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-keycap-")
+                .and_then(|index| index.parse::<usize>().ok())
+        })
+        .collect::<Vec<_>>();
+    nodes.retain(|node| {
+        let index = node
+            .id
+            .as_str()
+            .strip_prefix("home-prompt-keycap-")
+            .or_else(|| node.id.as_str().strip_prefix("home-prompt-verb-"))
+            .and_then(|suffix| suffix.split('-').next())
+            .and_then(|index| index.parse::<usize>().ok());
+        index.is_none_or(|index| !clipped_indices.contains(&index))
+    });
     nodes
 }
 
@@ -9323,7 +9379,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         })
     };
     let radius = if prompt_keycap {
-        Some(if node.bounds.width > KEYCAP_MIN_WIDTH {
+        Some(if node.bounds.width > node.bounds.height + 1.0 {
             RADIUS_S
         } else {
             RADIUS_PILL
@@ -9414,21 +9470,14 @@ fn append_prompt_footer(
     ));
     let prompt_height = scaled_text_box_height(32.0, text_scale);
     let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-    let prompt_label = if matches!(route, Route::Search | Route::Details) {
-        ""
-    } else {
+    let prompt_label = if matches!(route, Route::Home | Route::Library) {
         footer
+    } else {
+        ""
     };
     let mut prompt_node = node(
         "prompts",
-        if matches!(
-            route,
-            Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
-        ) {
-            Role::Group
-        } else {
-            Role::Text
-        },
+        Role::Group,
         prompt_label,
         if route == Route::Home {
             w - 660.0
@@ -9441,14 +9490,7 @@ fn append_prompt_footer(
         SCENE_TRANSPARENT_TOKEN,
     )
     .with_type_role(TypeRole::Label);
-    if route == Route::Home {
-        prompt_node.children = home_prompt_nodes(footer, w, h, text_scale);
-    } else if matches!(
-        route,
-        Route::Library | Route::Details | Route::Quick | Route::Search
-    ) {
-        prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
-    }
+    prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
     children.push(prompt_node);
 }
 
@@ -16315,7 +16357,10 @@ mod tests {
             )
             .unwrap();
         let prompts = node_by_id(scene.root(), "prompts").unwrap();
-        assert!(!prompts.accessible_label.contains('·'));
+        assert_eq!(
+            prompts.accessible_label,
+            "SELECT Search · Y Filter · A Details"
+        );
         assert!(
             !prompts
                 .children
@@ -17096,7 +17141,7 @@ mod tests {
             node_by_id(scene.root(), "prompts")
                 .unwrap()
                 .accessible_label,
-            "SELECT Search     Y Filter     A Details"
+            "SELECT Search · Y Filter · A Details"
         );
 
         core.action(&ShellAction::Custom("Filter.next".into()));
@@ -18629,6 +18674,113 @@ mod tests {
         let unavailable_labels = prompt_labels(find(unavailable.root(), "prompts").unwrap());
         assert!(!unavailable_labels.contains(&"Play"));
         assert!(!unavailable_labels.contains(&"Open"));
+    }
+
+    #[test]
+    fn every_route_uses_its_mockup_hint_set_and_badge_renderer() {
+        fn prompt_labels(scene: &Scene) -> Vec<&str> {
+            node_by_id(scene.root(), "prompts")
+                .unwrap()
+                .children
+                .iter()
+                .filter(|node| {
+                    node.id.as_str().starts_with("home-prompt-keycap-")
+                        && !node.id.as_str().ends_with("-border")
+                        || node.id.as_str().starts_with("home-prompt-verb-")
+                })
+                .map(|node| node.accessible_label.as_str())
+                .collect()
+        }
+
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![
+                variant("native", "ready-native", Availability::Ready),
+                variant("stream", "ready-stream", Availability::Ready),
+            ],
+        )]);
+        core.set_control_bindings(
+            [
+                ("Search.open", "SELECT"),
+                ("Filter.next", "Y"),
+                ("Search.submit", "Y"),
+                ("Activate", "A"),
+                ("Back", "B"),
+            ]
+            .into_iter()
+            .map(|(action, binding)| ControlBinding {
+                context: "shell".into(),
+                action: action.into(),
+                label: action.into(),
+                binding: binding.into(),
+            })
+            .collect(),
+        );
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        core.go(Route::Library);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["SELECT", "Search", "Y", "Filter", "A", "Details"]
+        );
+        core.go(Route::Search);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Back", "Y", "Delete", "A", "Type"]
+        );
+        core.search_query = "AB".into();
+        core.action(&ShellAction::Custom("Filter.next".into()));
+        assert_eq!(
+            core.search_query, "A",
+            "the advertised Delete action must work"
+        );
+        core.selected_item = Some(0);
+        core.go(Route::VariantChooser);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Back", "A", "Choose"]
+        );
+        core.go(Route::Quick);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Close", "A", "Choose"]
+        );
+        core.go(Route::Settings);
+        let settings = core.scene(metrics, "ignored").unwrap();
+        assert_eq!(prompt_labels(&settings), ["B", "Back", "A", "Change"]);
+        let prompts = node_by_id(settings.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert!(prompts.accessible_label.is_empty());
+    }
+
+    #[test]
+    fn prompt_chip_padding_pf_width_and_inter_item_gap_match_mockup() {
+        let nodes = right_aligned_prompt_nodes(
+            "SELECT Search · Y Filter · PF Safe Return",
+            1280.0,
+            720.0,
+            100,
+        );
+        let find = |id: &str| nodes.iter().find(|node| node.id.as_str() == id).unwrap();
+        let select = find("home-prompt-keycap-0-border");
+        let select_inline_padding =
+            select.bounds.width - "SELECT".chars().count() as f32 * CAPTION_GLYPH_ADVANCE;
+        assert!((13.0..=15.0).contains(&select_inline_padding));
+        let pf = find("home-prompt-keycap-2-border");
+        assert!(
+            pf.bounds.width > pf.bounds.height,
+            "PF must use a two-character chip"
+        );
+        let filter = find("home-prompt-verb-1");
+        let gap = pf.bounds.x - (filter.bounds.x + filter.bounds.width);
+        assert!((gap - 24.0).abs() < f32::EPSILON);
     }
 
     #[test]

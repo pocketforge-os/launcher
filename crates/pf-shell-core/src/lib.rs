@@ -2159,24 +2159,13 @@ impl ShellCore {
                     None
                 }
                 ShellAction::Activate => {
-                    let request = self.bound_launch()?.request.clone();
-                    let (item, variant) =
-                        self.items.iter().enumerate().find_map(|(item, entry)| {
-                            entry
-                                .variants
-                                .iter()
-                                .enumerate()
-                                .find_map(|(variant, candidate)| {
-                                    (candidate.launch_target.app_id == request.item_id)
-                                        .then_some((item, variant))
-                                })
-                        })?;
+                    let target = self.relaunch_target();
                     self.presentation = Presentation::Ready;
                     self.return_home_from_summary();
-                    self.launch_variant(item, variant)
+                    target.and_then(|(item, variant)| self.launch_variant(item, variant))
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                    self.focus = usize::from(self.bound_launch().is_some());
+                    self.focus = usize::from(self.relaunch_target().is_some());
                     None
                 }
                 ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
@@ -2777,6 +2766,21 @@ impl ShellCore {
         self.active_launch
             .as_ref()
             .filter(|launch| launch.session_id.as_deref() == Some(self.crash_receipt_id.as_str()))
+    }
+
+    fn relaunch_target(&self) -> Option<(usize, usize)> {
+        let request = &self.bound_launch()?.request;
+        self.items.iter().enumerate().find_map(|(item, entry)| {
+            entry
+                .variants
+                .iter()
+                .enumerate()
+                .find_map(|(variant, candidate)| {
+                    (candidate.launch_target.app_id == request.item_id
+                        && matches!(candidate.availability, Availability::Ready))
+                    .then_some((item, variant))
+                })
+        })
     }
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
@@ -7352,7 +7356,7 @@ impl ShellCore {
             .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
             .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
         );
-        let actions = if self.bound_launch().is_some() {
+        let actions = if self.relaunch_target().is_some() {
             &["Back to Home", "Open again"][..]
         } else {
             &["Back to Home"][..]
@@ -11738,6 +11742,74 @@ mod tests {
             }))
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+
+    #[test]
+    fn unavailable_relaunch_before_receipt_only_returns_home() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-unavailable-before".into(),
+        });
+
+        let mut reloaded = snapshot();
+        reloaded.items[1].variants[0].availability = Availability::NeedsSetup {
+            reason: "install required".into(),
+        };
+        c.reload_catalog_with_art(&reloaded, |_, _| None);
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-unavailable-before".into(),
+        }));
+
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert!(node_by_id(scene.root(), "return-summary-action-0").is_some());
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+    }
+
+    #[test]
+    fn unavailable_relaunch_after_receipt_rejects_stale_open_again_focus() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-unavailable-after".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-unavailable-after".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 1);
+
+        let mut reloaded = snapshot();
+        reloaded.items[1].variants[0].availability = Availability::UnsupportedCapability {
+            capability: "controller".into(),
+        };
+        c.reload_catalog_with_art(&reloaded, |_, _| None);
+
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert!(node_by_id(scene.root(), "return-summary-action-0").is_some());
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.focus = 1;
+        assert_eq!(c.focus(), 1);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
     }
 
     #[test]

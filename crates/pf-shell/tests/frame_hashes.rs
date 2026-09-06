@@ -304,8 +304,11 @@ fn vertical_slice_frame_hashes_are_stable() {
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
-        "12716eb15efd92fb060dc8e66334d612e9e07c436f0dc761c3913816b151a1e9  ",
-        "b4524b15936e140e6ff13501302f9fa20ecc6662e9f96efae37aa3012f71a4b3  ",
+        // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
+        // Home backdrops now select the launched item rather than stale index 0. The
+        // returned frame also retains that launched-item selection after dismissal.
+        "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
+        "f3445db1b77fc6ba6384983decffa22186a37308b9d512c52381ae41d53aa153  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -320,7 +323,7 @@ fn vertical_slice_frame_hashes_are_stable() {
     }
     assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("12716eb1"),
+        lines.lines().nth(3).unwrap().starts_with("f489ef19"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(

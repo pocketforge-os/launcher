@@ -41,17 +41,17 @@ mod design_manual;
 
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
-    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
-    COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN, COLOR_SURFACE_CANVAS_TOKEN,
-    COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN, COLOR_SURFACE_SCRIM_TOKEN,
-    COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN,
-    COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH,
-    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2,
-    SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_FOCUS_RING_TOKEN,
+    COLOR_STATUS_ATTENTION_TOKEN, COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN,
+    COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
+    COLOR_SURFACE_SCRIM_TOKEN, COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN,
+    COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT,
+    KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT,
+    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING,
+    ROOM_STRIP_GAP, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN,
+    STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN,
+    STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN,
+    STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -146,6 +146,15 @@ fn library_prompt_verb_width(text: &str) -> f32 {
 
 fn text_node_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * TEXT_NODE_INLINE_INSET
+}
+
+fn join_metadata_fields(fields: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    fields
+        .into_iter()
+        .map(|field| field.as_ref().trim().to_owned())
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
@@ -2176,6 +2185,13 @@ impl ShellCore {
             };
         }
         if self.route == Route::Search {
+            if matches!(&action, ShellAction::Custom(name) if name == "Filter.next") {
+                self.search_query.pop();
+                self.bump_revision();
+                self.refresh_search_results();
+                self.focus = 0;
+                return None;
+            }
             if let Some(key) = self.search_key {
                 const COLS: usize = 7;
                 return match action {
@@ -3583,13 +3599,22 @@ impl ShellCore {
                 if let Some(prompt) = scene_core.binding_prompt("Filter.next", "Filter") {
                     prompts.push(prompt);
                 }
-                if scene_core.focus >= 5
+                if !scene_core.library_items.is_empty()
                     && let Some(prompt) = scene_core.binding_prompt("Activate", "Details")
                 {
                     prompts.push(prompt);
                 }
-                prompts.join("     ")
+                prompts.join(" · ")
             }
+            Route::Search => [
+                Some(scene_core.binding_prompt_or("Back", "Back", "B")),
+                Some(scene_core.binding_prompt_or("Search.submit", "Delete", "Y")),
+                Some(scene_core.binding_prompt_or("Activate", "Type", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
             Route::Details => {
                 let ready = scene_core
                     .selected_item
@@ -3630,23 +3655,28 @@ impl ShellCore {
                 prompts.join(" · ")
             }
             Route::Settings => {
-                let mut prompts = scene_core
-                    .binding_prompt("Back", "Back")
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if scene_core.settings_in_rows
-                    && scene_core.settings_row_focused
-                    && scene_core
-                        .settings_scene_rows()
-                        .get(scene_core.focus)
-                        .is_some_and(|row| row.action.is_some())
-                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Change")
-                {
-                    prompts.push(prompt);
-                }
+                let prompts = [
+                    scene_core.binding_prompt_or("Back", "Back", "B"),
+                    scene_core.binding_prompt_or("Activate", "Change", "A"),
+                ];
                 prompts.join(" · ")
             }
-            _ => supplied_footer,
+            Route::Quick => [
+                Some(scene_core.binding_prompt_or("Back", "Close", "B")),
+                Some(scene_core.binding_prompt_or("Activate", "Choose", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+            Route::VariantChooser => [
+                Some(scene_core.binding_prompt_or("Back", "Back", "B")),
+                Some(scene_core.binding_prompt_or("Activate", "Choose", "A")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
         };
         if !matches!(
             self.presentation,
@@ -3727,6 +3757,11 @@ impl ShellCore {
             .map(|binding| format!("{} {label}", binding.binding))
     }
 
+    fn binding_prompt_or(&self, action: &str, label: &str, fallback: &str) -> String {
+        self.binding_prompt(action, label)
+            .unwrap_or_else(|| format!("{fallback} {label}"))
+    }
+
     fn route_nodes(&self, out: &mut Vec<Node>, metrics: SurfaceMetrics) {
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         let heading = match self.route {
@@ -3796,7 +3831,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Starting · {kind} · {cue}")
+                            join_metadata_fields(["● Starting", kind, cue])
                         }
                         Availability::Ready => {
                             let cue = item
@@ -3807,7 +3842,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Ready · {kind} · {cue}")
+                            join_metadata_fields(["● Ready", kind, cue])
                         }
                         Availability::NeedsSetup { .. } => format!("⊘ Needs setup · {kind}"),
                         Availability::NeedsNetwork { .. } => {
@@ -3820,12 +3855,13 @@ impl ShellCore {
                     }
                 },
             );
-            let hero_status = format!(
-                "{}{}",
-                hero_status,
-                focused
-                    .and_then(|item| item.playtime_fact.as_deref())
-                    .map_or(String::new(), |fact| format!(" · {fact}"))
+            let hero_status = join_metadata_fields(
+                [
+                    Some(hero_status.as_str()),
+                    focused.and_then(|item| item.playtime_fact.as_deref()),
+                ]
+                .into_iter()
+                .flatten(),
             );
             let vertical = home_vertical_layout(self.text_scale);
             let hero_title_height = scaled_text_box_height(72.0, self.text_scale);
@@ -3896,11 +3932,13 @@ impl ShellCore {
             // wider than the conservative label advance, so a tight box wraps it
             // (the single-line raster guard rejects that). SPACE_5 of slack keeps
             // "● Ready" et al. on one line while the meta run still follows closely.
-            let status_lead_width = (text_node_box_width(measured_text_advance(
-                label_text_width(status_lead),
+            let status_lead_advance = text_node_box_width(measured_text_advance(
+                label_text_width(lead_display),
                 self.text_scale,
-            )) + SPACE_5)
-                .min(hero_status_width);
+            ));
+            let status_lead_width = (status_lead_advance
+                + measured_text_advance(SPACE_5, self.text_scale))
+            .min(hero_status_width);
             let mut hero_status_children = Vec::new();
             if ready_dot {
                 hero_status_children.push(status_dot_node(
@@ -3929,9 +3967,9 @@ impl ShellCore {
                     "hero-status-meta",
                     Role::Text,
                     status_meta,
-                    48.0 + status_lead_width,
+                    48.0 + lead_offset + status_lead_advance,
                     vertical.status_y,
-                    (hero_status_width - status_lead_width).max(0.0),
+                    (hero_status_width - lead_offset - status_lead_advance).max(0.0),
                     hero_status_height,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -4988,10 +5026,19 @@ impl ShellCore {
                 )
             };
             let availability = if matches!(detail_availability, Availability::Ready) {
-                [item.last_played_fact.as_deref(), item.size_fact.as_deref()]
+                let last_played = item
+                    .last_played_fact
+                    .as_deref()
+                    .map(|fact| format!("Last played {fact}"));
+                join_metadata_fields(
+                    [
+                        Some(availability.as_str()),
+                        last_played.as_deref(),
+                        item.size_fact.as_deref(),
+                    ]
                     .into_iter()
-                    .flatten()
-                    .fold(availability, |status, fact| format!("{status} · {fact}"))
+                    .flatten(),
+                )
             } else {
                 availability
             };
@@ -5019,10 +5066,8 @@ impl ShellCore {
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 let lead_x = detail_column_left + 16.0;
-                let lead_width = (text_node_box_width(measured_text_advance(
-                    label_text_width(lead),
-                    self.text_scale,
-                )) + SPACE_5)
+                let lead_advance = text_node_box_width(caption_text_width(lead, self.text_scale));
+                let lead_width = (lead_advance + measured_text_advance(SPACE_5, self.text_scale))
                     .min(detail_column_width - 16.0);
                 container.children.push(status_dot_node(
                     "detail-availability-dot",
@@ -5049,9 +5094,9 @@ impl ShellCore {
                         "detail-availability-meta",
                         Role::Text,
                         meta,
-                        lead_x + lead_width,
+                        lead_x + lead_advance,
                         availability_top,
-                        (detail_column_width - lead_width - 16.0).max(0.0),
+                        (detail_column_width - lead_advance - 16.0).max(0.0),
                         availability_height,
                         SCENE_TRANSPARENT_TOKEN,
                     )
@@ -5422,9 +5467,12 @@ impl ShellCore {
                     } else {
                         "Choose how to play"
                     };
+                    // shell.css `.btn` uses the wider primary-action rhythm from the
+                    // detail mockup. Keep the reserve explicit here because the scene
+                    // graph is absolute-positioned rather than CSS-laid out.
                     let open_width =
                         (measured_text_advance(label_text_width(open_label), self.text_scale)
-                            + 48.0)
+                            + 72.0)
                             .min(detail_column_width);
                     let mut open = node(
                         "detail-open",
@@ -5434,21 +5482,33 @@ impl ShellCore {
                         buttons_top,
                         open_width,
                         54.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
-                    );
+                        COLOR_FOCUS_RING_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_FOCUS_RING_TOKEN, 1.0)
+                    // The parent owns the accessible name; visible ink is composed by
+                    // the child so it is not painted twice at Body weight underneath.
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
                     let mut open_label_node = node(
                         "detail-open-label",
                         Role::Text,
-                        &open.accessible_label,
-                        open.bounds.x + 16.0,
+                        if open_label == "▶ Play" {
+                            // The scene text run has no inline-flex gap primitive;
+                            // three shaped spaces reproduce the mockup's 12px glyph gap.
+                            "▶   Play"
+                        } else {
+                            open_label
+                        },
+                        open.bounds.x + 12.0,
                         open.bounds.y + 13.0,
-                        open.bounds.width - 32.0,
+                        open.bounds.width - 24.0,
                         28.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
+                        COLOR_FOCUS_RING_TOKEN,
                     )
                     .with_type_role(TypeRole::Label)
+                    .with_text_align(TextAlign::Center)
                     .with_ink_token(COLOR_TEXT_INVERSE_TOKEN);
                     open_label_node.state.focused = open.state.focused;
                     open.children.push(open_label_node);
@@ -5483,7 +5543,10 @@ impl ShellCore {
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
-                    );
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5491,13 +5554,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             pin_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
@@ -5526,8 +5590,11 @@ impl ShellCore {
                         detail_wrap_top + 388.0,
                         detail_column_width,
                         54.0,
-                        STATE_FOCUSED_RING_TOKEN,
-                    );
+                        STATE_REST_SURFACE_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5535,13 +5602,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             &pin.accessible_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     detail_wrap_top + 442.0
@@ -8680,7 +8748,8 @@ fn home_prompt_nodes(
     text_scale: u16,
 ) -> Vec<Node> {
     fn binding_width(binding: &str, scale: f32) -> f32 {
-        let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 9.6;
+        // Mockup chips leave about 6.5px of inline breathing room on both sides.
+        let measured = binding.chars().count() as f32 * CAPTION_GLYPH_ADVANCE + 13.0;
         let delta = (measured - KEYCAP_MIN_WIDTH).max(0.0).ceil();
         (KEYCAP_MIN_WIDTH + (delta / 2.0).ceil() * 2.0) * scale
             + if scale > 1.0 { 1.0 } else { 0.0 }
@@ -8882,6 +8951,35 @@ fn right_aligned_prompt_nodes(
     for node in &mut nodes {
         translate(node, offset, 0.0);
     }
+    // Large accessibility scales can make the complete legend wider than a narrow
+    // surface. Drop whole leading pairs instead of painting clipped keycap/verb ink;
+    // the highest-priority action remains anchored at the right edge.
+    let clipped_indices = nodes
+        .iter()
+        .filter(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-keycap-")
+                .is_some_and(|suffix| !suffix.ends_with("-border"))
+                && node.bounds.x < 0.0
+        })
+        .filter_map(|node| {
+            node.id
+                .as_str()
+                .strip_prefix("home-prompt-keycap-")
+                .and_then(|index| index.parse::<usize>().ok())
+        })
+        .collect::<Vec<_>>();
+    nodes.retain(|node| {
+        let index = node
+            .id
+            .as_str()
+            .strip_prefix("home-prompt-keycap-")
+            .or_else(|| node.id.as_str().strip_prefix("home-prompt-verb-"))
+            .and_then(|suffix| suffix.split('-').next())
+            .and_then(|index| index.parse::<usize>().ok());
+        index.is_none_or(|index| !clipped_indices.contains(&index))
+    });
     nodes
 }
 
@@ -9296,7 +9394,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
         })
     };
     let radius = if prompt_keycap {
-        Some(if node.bounds.width > KEYCAP_MIN_WIDTH {
+        Some(if node.bounds.width > node.bounds.height + 1.0 {
             RADIUS_S
         } else {
             RADIUS_PILL
@@ -9387,21 +9485,14 @@ fn append_prompt_footer(
     ));
     let prompt_height = scaled_text_box_height(32.0, text_scale);
     let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-    let prompt_label = if matches!(route, Route::Search | Route::Details) {
-        ""
-    } else {
+    let prompt_label = if matches!(route, Route::Home | Route::Library) {
         footer
+    } else {
+        ""
     };
     let mut prompt_node = node(
         "prompts",
-        if matches!(
-            route,
-            Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
-        ) {
-            Role::Group
-        } else {
-            Role::Text
-        },
+        Role::Group,
         prompt_label,
         if route == Route::Home {
             w - 660.0
@@ -9414,14 +9505,7 @@ fn append_prompt_footer(
         SCENE_TRANSPARENT_TOKEN,
     )
     .with_type_role(TypeRole::Label);
-    if route == Route::Home {
-        prompt_node.children = home_prompt_nodes(footer, w, h, text_scale);
-    } else if matches!(
-        route,
-        Route::Library | Route::Details | Route::Quick | Route::Search
-    ) {
-        prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
-    }
+    prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
     children.push(prompt_node);
 }
 
@@ -14692,6 +14776,74 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // Scene geometry is assigned directly from these constants.
+    fn detail_actions_keep_primary_and_outline_button_treatment() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("native", "ready", Availability::Ready)],
+            ),
+            item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant(
+                    "stream",
+                    "offline",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                )],
+            ),
+        ]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let ready = core.scene(metrics, "").unwrap();
+        let play = find(ready.root(), "detail-open").unwrap();
+        assert_eq!(play.style_token, COLOR_FOCUS_RING_TOKEN);
+        assert_eq!(play.border_token.as_deref(), Some(COLOR_FOCUS_RING_TOKEN));
+        assert_eq!(play.border_width, 1.0);
+        assert_eq!(play.corner_radius, RADIUS_M);
+        assert!(
+            play.bounds.width >= 120.0,
+            "Play must retain wide CTA padding"
+        );
+        assert_eq!(
+            find(play, "detail-open-label").unwrap().type_role,
+            TypeRole::Label,
+            "Play must use the semibold button-label role rather than regular Body"
+        );
+
+        core.selected_item = Some(1);
+        let unavailable = core.scene(metrics, "").unwrap();
+        for pin in [
+            find(ready.root(), "detail-pin").unwrap(),
+            find(unavailable.root(), "detail-pin").unwrap(),
+        ] {
+            assert_eq!(pin.corner_radius, RADIUS_M);
+            assert_eq!(
+                pin.border_token.as_deref(),
+                Some(COLOR_BORDER_HAIRLINE_TOKEN)
+            );
+            assert_eq!(pin.border_width, 1.0);
+            assert_eq!(pin.style_token, STATE_REST_SURFACE_TOKEN);
+        }
+    }
+
+    #[test]
     fn details_selection_focus_and_play_follow_the_launchable_variant() {
         let mut core = fixture_core(vec![item(
             "game",
@@ -16220,7 +16372,10 @@ mod tests {
             )
             .unwrap();
         let prompts = node_by_id(scene.root(), "prompts").unwrap();
-        assert!(!prompts.accessible_label.contains('·'));
+        assert_eq!(
+            prompts.accessible_label,
+            "SELECT Search · Y Filter · A Details"
+        );
         assert!(
             !prompts
                 .children
@@ -17001,7 +17156,7 @@ mod tests {
             node_by_id(scene.root(), "prompts")
                 .unwrap()
                 .accessible_label,
-            "SELECT Search     Y Filter     A Details"
+            "SELECT Search · Y Filter · A Details"
         );
 
         core.action(&ShellAction::Custom("Filter.next".into()));
@@ -18537,6 +18692,113 @@ mod tests {
     }
 
     #[test]
+    fn every_route_uses_its_mockup_hint_set_and_badge_renderer() {
+        fn prompt_labels(scene: &Scene) -> Vec<&str> {
+            node_by_id(scene.root(), "prompts")
+                .unwrap()
+                .children
+                .iter()
+                .filter(|node| {
+                    node.id.as_str().starts_with("home-prompt-keycap-")
+                        && !node.id.as_str().ends_with("-border")
+                        || node.id.as_str().starts_with("home-prompt-verb-")
+                })
+                .map(|node| node.accessible_label.as_str())
+                .collect()
+        }
+
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![
+                variant("native", "ready-native", Availability::Ready),
+                variant("stream", "ready-stream", Availability::Ready),
+            ],
+        )]);
+        core.set_control_bindings(
+            [
+                ("Search.open", "SELECT"),
+                ("Filter.next", "Y"),
+                ("Search.submit", "Y"),
+                ("Activate", "A"),
+                ("Back", "B"),
+            ]
+            .into_iter()
+            .map(|(action, binding)| ControlBinding {
+                context: "shell".into(),
+                action: action.into(),
+                label: action.into(),
+                binding: binding.into(),
+            })
+            .collect(),
+        );
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        core.go(Route::Library);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["SELECT", "Search", "Y", "Filter", "A", "Details"]
+        );
+        core.go(Route::Search);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Back", "Y", "Delete", "A", "Type"]
+        );
+        core.search_query = "AB".into();
+        core.action(&ShellAction::Custom("Filter.next".into()));
+        assert_eq!(
+            core.search_query, "A",
+            "the advertised Delete action must work"
+        );
+        core.selected_item = Some(0);
+        core.go(Route::VariantChooser);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Back", "A", "Choose"]
+        );
+        core.go(Route::Quick);
+        assert_eq!(
+            prompt_labels(&core.scene(metrics, "ignored").unwrap()),
+            ["B", "Close", "A", "Choose"]
+        );
+        core.go(Route::Settings);
+        let settings = core.scene(metrics, "ignored").unwrap();
+        assert_eq!(prompt_labels(&settings), ["B", "Back", "A", "Change"]);
+        let prompts = node_by_id(settings.root(), "prompts").unwrap();
+        assert_eq!(prompts.role, Role::Group);
+        assert!(prompts.accessible_label.is_empty());
+    }
+
+    #[test]
+    fn prompt_chip_padding_pf_width_and_inter_item_gap_match_mockup() {
+        let nodes = right_aligned_prompt_nodes(
+            "SELECT Search · Y Filter · PF Safe Return",
+            1280.0,
+            720.0,
+            100,
+        );
+        let find = |id: &str| nodes.iter().find(|node| node.id.as_str() == id).unwrap();
+        let select = find("home-prompt-keycap-0-border");
+        let select_inline_padding =
+            select.bounds.width - "SELECT".chars().count() as f32 * CAPTION_GLYPH_ADVANCE;
+        assert!((13.0..=15.0).contains(&select_inline_padding));
+        let pf = find("home-prompt-keycap-2-border");
+        assert!(
+            pf.bounds.width > pf.bounds.height,
+            "PF must use a two-character chip"
+        );
+        let filter = find("home-prompt-verb-1");
+        let gap = pf.bounds.x - (filter.bounds.x + filter.bounds.width);
+        assert!((gap - 24.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn emitted_text_on_light_surfaces_has_a_declared_paired_on_color() {
         fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
             (node.id.as_str() == id)
@@ -19045,6 +19307,18 @@ mod tests {
             node_by_id(root, "detail-title").unwrap().type_role,
             TypeRole::Title
         );
+        assert_eq!(
+            node_by_id(root, "detail-availability-reason")
+                .unwrap()
+                .accessible_label,
+            "● Ready · Last played Yesterday · 2.4 GB"
+        );
+        assert_eq!(
+            node_by_id(root, "detail-availability-meta")
+                .unwrap()
+                .accessible_label,
+            " · Last played Yesterday · 2.4 GB"
+        );
         let first = node_by_id(root, "detail-variant-0").unwrap();
         let second = node_by_id(root, "detail-variant-1").unwrap();
         assert!(first.bounds.y + first.bounds.height < second.bounds.y);
@@ -19075,6 +19349,18 @@ mod tests {
         assert!(
             prompt_right > 1200.0,
             "prompt keycaps must remain right-aligned"
+        );
+    }
+
+    #[test]
+    fn metadata_fields_join_without_a_leading_or_doubled_separator() {
+        assert_eq!(
+            join_metadata_fields(["Ready", "Game", "Installed"]),
+            "Ready · Game · Installed"
+        );
+        assert_eq!(
+            join_metadata_fields(["Ready", "", "Installed"]),
+            "Ready · Installed"
         );
     }
 

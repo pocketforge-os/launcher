@@ -5912,7 +5912,6 @@ mod durable_tests {
             assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
             assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
             let mut saw_single_letter_keycap = false;
-            let mut saw_wide_keycap = false;
             for keycap in prompt.children.iter().filter(|node| {
                 let id = node.id.as_str();
                 id.starts_with("home-prompt-keycap-") && !id.ends_with("-border")
@@ -5926,7 +5925,6 @@ mod durable_tests {
                 let expected_keycap_height = 24.0 * scale;
                 assert!((border.bounds.height - expected_keycap_height).abs() < f32::EPSILON);
                 let expected_radius = if keycap.accessible_label.chars().count() > 1 {
-                    saw_wide_keycap = true;
                     6.0 * scale
                 } else {
                     saw_single_letter_keycap = true;
@@ -5940,7 +5938,6 @@ mod durable_tests {
             }
             if !prompt.children.is_empty() {
                 assert!(saw_single_letter_keycap);
-                assert!(saw_wide_keycap);
             }
             let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
             let root = Node::new(

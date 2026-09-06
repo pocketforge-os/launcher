@@ -348,13 +348,16 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
-        // tsp-op5a.410 intentionally rebaselines details-unavailable only: its
-        // emitter now selects the mutated Steam Link fixture by identity instead of
-        // accidentally opening a Ready Library item. The frame therefore carries
-        // the network-unavailable reason, muted way-to-play row, and no Play action.
-        "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
-        "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
-        "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
+        // tsp-op5a.407 rebaselines the footer pixels on every route after unifying
+        // badge chrome, restoring the per-route verbs, and correcting chip spacing.
+        // tsp-op5a.408 rebaselines the five Home-backed frames after removing the
+        // hidden bullet-width reserve between the styled status lead and metadata.
+        // tsp-q0k8t records their union: boot-home, focus-moved, launch-dimmed,
+        // returned, and safe-return-crash combine .407's footer with .408's metadata
+        // spacing; quick-power changes only for .407's footer.
+        "2cc632f0ae6625263bde438fc7c75adc80c691a940cc9f8e878555e84a152165  ",
+        "83b6895791847eea1b9aa1932906666ca5b8f5ebd5a45e46d97596516557f423  ",
+        "a3236c423b7590de4fc27afc9dc5cda5643bc2edb27f3b156ab5a1868dfea4dd  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -365,23 +368,32 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
-        "ea60462a9386ee36dd78fad03c6a7969aefd8df3dba0e720c5d1543f9b1ffb87  ",
-        "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
+        "5407418787967132733408c64e65ef7f24495a0dc7155c7ed9add6894d78c775  ",
+        "51c0a79f1b7194c0667164e6ca8c3c513aea0e65764d8495f7018a89949bb537  ",
+        "24a4814e5f9df18b2a5d4887db781b65ab851a40d54756226955be95bf7c0d2b  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
-        "014b8340a8b02e3261782f77fd21b98cb29ee1d469beb9b6039628518dd329e5  ",
-        "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
-        "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
-        "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
-        "acd25cfab77948fa5f964a720c79fa66f1e3c1a9e933d18e422cedbd901834ab  ",
-        "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
+        // Library, focused Library, and Search change only for .407's route hints.
+        "d7ae1d1c67e9adade81ba8c1fb8109ea9d86e5fa147441550194b8484797e792  ",
+        "9631d37bceb75d2b1008316ed43d72a79faf4f550e0afc9c17f6b449acb059f9  ",
+        "b73943e33c1a6f062564042ef5ca7b07795f761dfe607f4af52c750cf2205e24  ",
+        // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
+        // accent with wide rounded primary geometry, while Pin is a rounded outline
+        // button on both ready and unavailable routes. Details and Details Unavailable
+        // change for that .405 CTA repaint. tsp-op5a.410 additionally changes only
+        // Details Unavailable: the emitter selects the mutated Steam Link fixture by
+        // identity, so the frame combines main's outlined Pin CTA and .407 hint footer
+        // with the intended network-unavailable reason, muted way-to-play row, and no
+        // Play action. Variant Chooser changes only for .407's hint footer.
+        "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
+        "2b35018615d0978e34d79c551a01cbc8fdf8dbcc49b920334a732cbacd65e48b  ",
+        "0af05320a447e85d2a99db4b189cfb75de30dd2f704134195cddea9a75f63a4a  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("83b68957"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("f489ef19"),
+        lines.lines().nth(3).unwrap().starts_with("54074187"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -459,20 +471,22 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // dashed unavailable outline, and first-run for its outlined PF/A/START teaching
     // chips. These are intentional component-grammar changes, guarded by structural
     // coverage/ink assertions in pf-shell-core.
+    // tsp-op5a.407 rebaselines the five Settings-family frames for the shared
+    // right-aligned B Back / A Change badge renderer; first-run remains unchanged.
     assert!(
-        transcript.contains("cae0516a72da02d1345aa6b53d14c8206db97517d7cfdf30bdd0d3f399093c8f  ")
+        transcript.contains("e03d94a4bab56278efe44e45299276897f22788e314cef2c7996ebf0ec984cd4  ")
     );
     assert!(
-        transcript.contains("c3888eacfa0780c0f1e46cc652bd2cfca3e72fa575a511e010a7921bace68f29  ")
+        transcript.contains("35d1c9b6b7b0f65bedd51d68ae1ac938e2788150e855c441401a794c69d29eda  ")
     );
     assert!(
-        transcript.contains("95f84565193c463326654b34c64810393db64d85ad172f04dbcfa26dac997136  ")
+        transcript.contains("0b3b4ccb2fd61a10ad0c06d60c26c9ecb895dc325e97dac2d5671398f0a89dd4  ")
     );
     assert!(
-        transcript.contains("f136a0899281b53eae23d6255e6e51509390ffe76bcc42c2c63360ce99188f95  ")
+        transcript.contains("04a9fa6c2c0bab5930f750aca586916be79c5b360399582f8f42780a3bad3155  ")
     );
     assert!(
-        transcript.contains("91dfd233c71be2abc61424d3254d6ed527604ac4581f4d2d0240ad07805b7f21  ")
+        transcript.contains("db746113e510210a74992548bb791d50ef68da24232f961202068062655854fd  ")
     );
     assert!(
         transcript.contains("5ed2bd4a74fd003e585524023fe612416577ec064bccdaeb4e76fad655d9a3c1  ")
@@ -499,8 +513,12 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
+    // tsp-op5a.407 rebaselines it for corrected keycap padding and PF chip geometry.
+    // tsp-op5a.408 rebaselines the degraded-session Home frame for the corrected
+    // styled-status-to-metadata spacing.
+    // tsp-q0k8t combines that spacing with .407's corrected hint badge geometry.
     assert!(
-        transcript.contains("8edba36cfeb1c7732087ce6c7d486d5a8411e8c4e63f49fd0c47028eb0f05841  ")
+        transcript.contains("afa66e1103b863cb4c228b238140f5ca614606379f8549aaed3eaf25d2bc0104  ")
     );
 }
 

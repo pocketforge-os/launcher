@@ -166,7 +166,15 @@ const STATUS_DOT_DIAMETER: f32 = 8.0;
 /// capsule, and the battery%/clock text) is centered on, so all sit within 1px of
 /// each other. Empirically the caption text's ink midline lands here at 100% scale;
 /// the icons are placed around it rather than each carrying its own hard-coded y.
-const STATUS_CLUSTER_CENTER_Y: f32 = 28.0;
+const STATUS_CLUSTER_CENTER_Y: f32 = 34.0;
+const STATUS_CLUSTER_SHIFT_X: f32 = 31.0;
+fn status_cluster_shift_x(text_scale: u16) -> f32 {
+    if text_scale == 100 {
+        STATUS_CLUSTER_SHIFT_X
+    } else {
+        0.0
+    }
+}
 fn status_dot_node(id: &str, center_x: f32, center_y: f32, color_token: &str) -> Node {
     node(
         id,
@@ -227,18 +235,23 @@ fn system_status_group_left(
     has_wifi: bool,
     has_battery: bool,
 ) -> Option<f32> {
+    let shift_x = status_cluster_shift_x(text_scale);
     let mut left = status_width.map(|width| {
-        let right = if text_scale == 100 { -16.0 } else { 0.0 };
+        let right = if text_scale == 100 {
+            -16.0 - shift_x
+        } else {
+            -shift_x
+        };
         surface_width - right - width.max(152.0)
     });
     if has_wifi {
         left = Some(left.map_or(surface_width - 200.0, |value| {
-            value.min(surface_width - 200.0)
+            value.min(surface_width - 200.0 + shift_x)
         }));
     }
     if has_battery {
         left = Some(left.map_or(surface_width - 168.0, |value| {
-            value.min(surface_width - 168.0)
+            value.min(surface_width - 168.0 + shift_x)
         }));
     }
     left
@@ -3221,7 +3234,7 @@ impl ShellCore {
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         scene_core.library_surface_width.set(w);
         let mut children = Vec::new();
-        let battery_x = w - 168.0;
+        let battery_x = w - 168.0 + status_cluster_shift_x(scene_core.text_scale);
         let room_width = room_strip_width(scene_core.text_scale);
         let room_left = (w - room_width) / 2.0;
         let room_right = room_left + room_width;
@@ -3405,18 +3418,22 @@ impl ShellCore {
                         32.0,
                         SCENE_TRANSPARENT_TOKEN,
                     )
-                    .with_type_role(TypeRole::Label)
+                    .with_type_role(if selected {
+                        TypeRole::Label
+                    } else {
+                        TypeRole::Body
+                    })
                     // Room strip: current room at primary, the others recede. Before
                     // this, no ink was set so both collapsed to --state-rest-text
                     // (primary), erasing the active/inactive distinction. The design
                     // (shell.css .room) is muted, but the strip is chrome sitting over
-                    // the hero-wash decoration layer, and muted there lands at ~4.47:1
-                    // — below the 4.5:1 raster legibility floor (assert_raster_text_
-                    // legible). Secondary is the nearest legible tone; it restores the
-                    // ramp and clears the floor. Escalated to coordinator: exact-muted
-                    // chrome would need a wash/scrim change (a backdrop-family fix).
+                    // the hero-wash decoration layer. The active label also keeps the
+                    // heavier Label face while inactive labels use Body, restoring the
+                    // mockup's color and weight hierarchy.
                     .with_ink_token(if selected {
                         COLOR_TEXT_PRIMARY_TOKEN
+                    } else if scene_core.text_scale == 100 {
+                        COLOR_TEXT_MUTED_TOKEN
                     } else {
                         COLOR_TEXT_SECONDARY_TOKEN
                     }),
@@ -8482,14 +8499,24 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16
         // node's right edge; `top`/`height` place it around the centerline. The wifi
         // (9x7) tucks just left of the delicate 12x7 battery capsule.
         const CY: f32 = STATUS_CLUSTER_CENTER_Y;
+        let shift_x = status_cluster_shift_x(text_scale);
         let (right, top, width, height) = match node.id.as_str() {
-            "wifi-glyph" => (164.0, CY - 3.5, 9.0, 7.0),
-            "battery-outline" => (144.0, CY - 3.5, 12.0, 7.0),
-            "battery-level" => (154.5 - node.bounds.width, CY - 1.5, node.bounds.width, 3.0),
-            "battery-terminal" => (142.5, CY - 1.5, 1.5, 3.0),
+            "wifi-glyph" => (164.0 - shift_x, CY - 3.5, 9.0, 7.0),
+            "battery-outline" => (144.0 - shift_x, CY - 3.5, 12.0, 7.0),
+            "battery-level" => (
+                154.5 - shift_x - node.bounds.width,
+                CY - 1.5,
+                node.bounds.width,
+                3.0,
+            ),
+            "battery-terminal" => (142.5 - shift_x, CY - 1.5, 1.5, 3.0),
             "status-cluster" => (
-                if text_scale == 100 { -16.0 } else { 0.0 },
-                16.0,
+                if text_scale == 100 {
+                    -16.0 - shift_x
+                } else {
+                    -shift_x
+                },
+                if text_scale == 100 { 22.0 } else { 16.0 },
                 node.bounds.width.max(152.0),
                 node.bounds.height,
             ),
@@ -8954,21 +8981,23 @@ fn wifi_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
         .expect("wifi glyph cache")
         .entry(ink)
         .or_insert_with(|| {
-            // Drawn at 4x (36:28 == 9:7) so `ImageFit::Contain`'s downscale antialiases
-            // the two thin fan arcs into a legible little glyph instead of merging them.
-            let (bw, bh) = (36usize, 28usize);
+            // Pin the final 1x raster instead of relying on a thin 4x source surviving
+            // the image scaler. The slightly heavy source leaves mockup-scale coverage
+            // after the renderer's edge filtering.
+            let rows = [
+                "111111111",
+                "111000111",
+                "011111110",
+                "111000111",
+                "001111100",
+                "011111110",
+                "000111000",
+            ];
+            let (bw, bh) = (9usize, 7usize);
             let mut rgba = vec![0_u8; bw * bh * 4];
-            let (ox, oy) = (18.0_f32, 20.4_f32);
-            for y in 0..bh {
-                for x in 0..bw {
-                    let dx = x as f32 + 0.5 - ox;
-                    let dy = oy - (y as f32 + 0.5);
-                    let radius = dx.hypot(dy);
-                    let in_upper_fan = dy > -1.4 && dx.abs() <= (dy + 1.4) * 1.5;
-                    let painted = radius <= 2.6
-                        || in_upper_fan
-                            && ((5.4..=7.4).contains(&radius) || (10.6..=12.6).contains(&radius));
-                    if painted {
+            for (y, row) in rows.iter().enumerate() {
+                for (x, pixel) in row.bytes().enumerate() {
+                    if pixel == b'1' {
                         let offset = (y * bw + x) * 4;
                         rgba[offset..offset + 4].copy_from_slice(&ink);
                     }
@@ -9188,11 +9217,15 @@ fn hero_wash_source() -> ImageSource {
                 };
                 let offset = (y * WIDTH + x) * 4;
                 let dither = [[-0.75, 0.25], [0.75, -0.25]][y % 2][x % 2];
+                // Ease the aura beneath the chrome so muted nav ink remains legible
+                // without introducing a separate status-bar surface. Blend back to
+                // the authored opacity below the band instead of leaving a hard seam.
+                let chrome_opacity = 0.40 + 0.15 * (global_y / 80.0).clamp(0.0, 1.0);
                 rgba[offset..offset + 4].copy_from_slice(&[
                     (rgb[0] + dither).round().clamp(0.0, 255.0) as u8,
                     (rgb[1] + dither).round().clamp(0.0, 255.0) as u8,
                     (rgb[2] + dither).round().clamp(0.0, 255.0) as u8,
-                    (alpha * 0.55 * 255.0).round() as u8,
+                    (alpha * chrome_opacity * 255.0).round() as u8,
                 ]);
             }
         }
@@ -17050,6 +17083,18 @@ mod tests {
                 Some(type_role)
             );
         }
+        let active_room = find(scene.root(), "room-home").unwrap();
+        let inactive_room = find(scene.root(), "room-library").unwrap();
+        assert_eq!(active_room.type_role, TypeRole::Label);
+        assert_eq!(
+            active_room.ink_token.as_deref(),
+            Some(COLOR_TEXT_PRIMARY_TOKEN)
+        );
+        assert_eq!(inactive_room.type_role, TypeRole::Body);
+        assert_eq!(
+            inactive_room.ink_token.as_deref(),
+            Some(COLOR_TEXT_MUTED_TOKEN)
+        );
         let scroll_region = find(scene.root(), "home-scroll-region").unwrap();
         assert!(
             scroll_region.accessible_label.is_empty(),

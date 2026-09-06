@@ -312,9 +312,12 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
-        "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
-        "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
-        "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
+        // tsp-op5a.404 rebaselines every route for the corrected global chrome: the
+        // three-arc Wi-Fi raster, outlined battery, gutter-aligned/lowered cluster,
+        // and primary-bold versus muted-regular room hierarchy.
+        "842dbd373799712ee544f3f610e1517210ff3a04ad3219e2b86451cbc3e55f7e  ",
+        "aba3198d41ed5b3ebfcbaa932518464d6a4493827a64c5f6fe14b6836e466d0a  ",
+        "5693bad4b25f89b68a86aaf92f337c039f50d84ab849549a8bd74b45bb3d8d26  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -325,23 +328,23 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
-        "ea60462a9386ee36dd78fad03c6a7969aefd8df3dba0e720c5d1543f9b1ffb87  ",
-        "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
+        "aa35fd503c781163c56526fb6b96fe0d772dfb6eb432dcb1e3d09477abfd7e82  ",
+        "c3bfb781ccb69f89851b4711e61cdc5bff05a2c35529e8c8f88e426fe49824a2  ",
+        "dc12245cddde6feefefcdfe710394aabb3a5831008b9fde43972aec2ca5a9fb4  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
-        "014b8340a8b02e3261782f77fd21b98cb29ee1d469beb9b6039628518dd329e5  ",
-        "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
-        "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
-        "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
-        "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
-        "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
+        "284f96d03ce225d908ad7edf969530e4f02a627796a50552cb74a87f66f389f7  ",
+        "5524edf1fc6993c06542af71c578bbca896290c6c58bd8cb8ffa1cdb3af7bdca  ",
+        "7a9e22e2c8d6faa52870a1278ef3599e1c5fa37f14588c316a9a281307060d80  ",
+        "855d115cd10d65c7b83c5293d5dd671003a5d4af1932359188f4ea00deffb87f  ",
+        "f85ff6b7222b50d098e23ad2bbef341401b966b60e57937c76126a9e1d587051  ",
+        "0e7f71f35e17fcff692480cbb452f06c8c69a900633044f64d909cddece49f34  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("aba3198d"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("f489ef19"),
+        lines.lines().nth(3).unwrap().starts_with("aa35fd50"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -419,23 +422,24 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // dashed unavailable outline, and first-run for its outlined PF/A/START teaching
     // chips. These are intentional component-grammar changes, guarded by structural
     // coverage/ink assertions in pf-shell-core.
+    // tsp-op5a.404 rebaselines all six for the same global chrome correction.
     assert!(
-        transcript.contains("cae0516a72da02d1345aa6b53d14c8206db97517d7cfdf30bdd0d3f399093c8f  ")
+        transcript.contains("1a5f893595a3eb3925ea9fec4212e309da180a221bca0f4152bc032dd197a574  ")
     );
     assert!(
-        transcript.contains("c3888eacfa0780c0f1e46cc652bd2cfca3e72fa575a511e010a7921bace68f29  ")
+        transcript.contains("9047f6c2850c33ed1f99664113e89f7625d0a2a94094bdf12e5458b3aa299dcf  ")
     );
     assert!(
-        transcript.contains("95f84565193c463326654b34c64810393db64d85ad172f04dbcfa26dac997136  ")
+        transcript.contains("b486eccd9b684c1cbc6076a8a774301a6b216b49cd595dbd97583e9e2a61b650  ")
     );
     assert!(
-        transcript.contains("f136a0899281b53eae23d6255e6e51509390ffe76bcc42c2c63360ce99188f95  ")
+        transcript.contains("067b81995164738be8fed7adc253acfc70106644b48da407cc8dedaccd5d4d98  ")
     );
     assert!(
-        transcript.contains("91dfd233c71be2abc61424d3254d6ed527604ac4581f4d2d0240ad07805b7f21  ")
+        transcript.contains("53765a0b6088a887263d277598e5a6a2b0ed0db3810bff3ba9156b3bbf1f4621  ")
     );
     assert!(
-        transcript.contains("5ed2bd4a74fd003e585524023fe612416577ec064bccdaeb4e76fad655d9a3c1  ")
+        transcript.contains("1d110f9f2feaf2924a077cf6963a2ff9578b0209e1b6634378737b09ea076b34  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());
@@ -459,8 +463,9 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
+    // tsp-op5a.404 rebaselines it for the corrected global chrome.
     assert!(
-        transcript.contains("8edba36cfeb1c7732087ce6c7d486d5a8411e8c4e63f49fd0c47028eb0f05841  ")
+        transcript.contains("8d72e055210333ace420d4c941811cf1de14e2de9641c47c97c4e86b0e71d3a2  ")
     );
 }
 
@@ -518,9 +523,9 @@ fn ink_bbox(
 fn status_cluster_items_share_one_optical_centerline() {
     let (out, _) = render_offscreen();
     let (pixels, stride, _, _) = decode_route(out.path(), "boot-home.png");
-    let wifi = ink_bbox(&pixels, stride, 1103, 1120, 20, 44, 55).expect("wifi glyph ink");
-    let battery = ink_bbox(&pixels, stride, 1121, 1141, 20, 44, 40).expect("battery ink");
-    let text = ink_bbox(&pixels, stride, 1144, 1215, 20, 44, 110).expect("status text ink");
+    let wifi = ink_bbox(&pixels, stride, 1134, 1151, 24, 46, 55).expect("wifi glyph ink");
+    let battery = ink_bbox(&pixels, stride, 1152, 1172, 24, 46, 40).expect("battery ink");
+    let text = ink_bbox(&pixels, stride, 1175, 1233, 24, 46, 110).expect("status text ink");
     let center_y = |b: (usize, usize, usize, usize, usize)| (b.2 + b.3) as f32 / 2.0;
     let (wy, by, ty) = (center_y(wifi), center_y(battery), center_y(text));
     assert!(
@@ -537,10 +542,19 @@ fn status_cluster_items_share_one_optical_centerline() {
         ww <= 12 && wh <= 9,
         "wifi glyph {ww}x{wh} exceeds the 12x9 cap"
     );
+    assert!(
+        wifi.4 >= 34,
+        "wifi glyph has only {} ink pixels; three arcs plus dot must survive at 1x",
+        wifi.4
+    );
     let (bw, bh) = dims(battery);
     assert!(
         bw <= 18 && bh <= 10,
         "battery capsule {bw}x{bh} exceeds the 18x10 cap (must be a delicate outline, not a block)"
+    );
+    assert_eq!(
+        text.1, 1231,
+        "status cluster rightmost ink must align to the 48px page gutter"
     );
 }
 

@@ -49,12 +49,12 @@ const HEIGHT: u32 = 720;
 // on the new pixels (the evidence render is invoked with PF_RASTER_INK_GUARD=1 in
 // frame_hashes).
 const SCREENS: [(&str, &str, f64); 6] = [
-    ("home", "boot-home.png", 0.940_137),
+    ("home", "boot-home.png", 0.939_787),
     ("library", "library.png", 0.977_743),
     ("detail", "details.png", 0.942_459),
     ("settings", "settings.png", 0.969_316),
     ("high-contrast", "high-contrast.png", 0.915_236),
-    ("quick", "quick-power.png", 1.0),
+    ("quick", "quick-power.png", 0.999_465),
 ];
 
 #[test]

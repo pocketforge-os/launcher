@@ -88,6 +88,42 @@ fn focused_library_search_evidence_applies_a_distinct_focused_state() {
     );
 }
 
+#[test]
+fn every_stateful_evidence_route_differs_from_its_base_route() {
+    let default = tempfile::tempdir().unwrap();
+    render_evidence_set(default.path(), &[]);
+    let settings = tempfile::tempdir().unwrap();
+    render_evidence_set(settings.path(), &["--settings-evidence"]);
+
+    let pairs = [
+        (default.path(), "library-focused-search", "library"),
+        (default.path(), "launch-dimmed", "focus-moved"),
+        (default.path(), "details-unavailable", "details"),
+        (default.path(), "returned", "focus-moved"),
+        (settings.path(), "settings-edit", "settings"),
+        (default.path(), "focus-moved", "boot-home"),
+    ];
+    for (directory, stateful, base) in pairs {
+        assert_ne!(
+            std::fs::read(directory.join(format!("{stateful}.png"))).unwrap(),
+            std::fs::read(directory.join(format!("{base}.png"))).unwrap(),
+            "stateful evidence route {stateful} must not duplicate its base route {base}"
+        );
+    }
+
+    let unavailable =
+        std::fs::read_to_string(default.path().join("details-unavailable.semantic.txt")).unwrap();
+    assert!(
+        unavailable.contains("detail-availability-reason")
+            && unavailable.contains("Network required"),
+        "details-unavailable must expose an unavailable availability reason"
+    );
+    assert!(
+        !unavailable.contains("detail-play"),
+        "details-unavailable must not expose an enabled Play action"
+    );
+}
+
 // Split per evidence route-set so the two subprocess renders schedule as separate
 // tests (was one fn looping both arg-sets, spawning them back-to-back). Routing
 // through `frame_hash_command` keeps the exact command the old inline build produced
@@ -312,6 +348,10 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
+        // tsp-op5a.410 intentionally rebaselines details-unavailable only: its
+        // emitter now selects the mutated Steam Link fixture by identity instead of
+        // accidentally opening a Ready Library item. The frame therefore carries
+        // the network-unavailable reason, muted way-to-play row, and no Play action.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
@@ -334,7 +374,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
         "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
         "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
-        "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
+        "acd25cfab77948fa5f964a720c79fa66f1e3c1a9e933d18e422cedbd901834ab  ",
         "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

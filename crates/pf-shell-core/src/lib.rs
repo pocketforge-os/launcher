@@ -5061,9 +5061,9 @@ impl ShellCore {
                 out.push(container);
             } else {
                 let mut availability_node = node(
-                    "detail-availability-reason",
-                    Role::Text,
-                    &availability,
+                    "detail-availability-state",
+                    Role::Group,
+                    "",
                     detail_column_left,
                     availability_top,
                     detail_column_width,
@@ -5072,6 +5072,19 @@ impl ShellCore {
                 );
                 availability_node.state.unavailable = true;
                 out.push(availability_node);
+                out.push(
+                    node(
+                        "detail-availability-reason",
+                        Role::Text,
+                        &availability,
+                        detail_column_left,
+                        availability_top,
+                        detail_column_width,
+                        availability_height,
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_ink_token(STATE_UNAVAILABLE_TEXT_TOKEN),
+                );
             }
             let description_top = availability_top + availability_height + 4.0;
             let description_height = item
@@ -5185,8 +5198,7 @@ impl ShellCore {
                         STATE_REST_SURFACE_TOKEN,
                     );
                     variant_node.state.focused = focused;
-                    variant_node.state.unavailable =
-                        !matches!(variant.availability, Availability::Ready);
+                    let unavailable_variant = !matches!(variant.availability, Availability::Ready);
                     let selected = Some(variant_index) == active_ready_variant;
                     variant_node.state.selected = selected;
                     // Selected variant: strong border + the renderer's 3px left accent bar
@@ -5253,6 +5265,9 @@ impl ShellCore {
                     }
                     for label in &mut variant_node.children {
                         label.state.focused = focused;
+                        if unavailable_variant {
+                            label.ink_token = Some(STATE_UNAVAILABLE_TEXT_TOKEN.into());
+                        }
                     }
                     if matches!(variant.availability, Availability::Ready) {
                         variant_node.action = Some(NodeAction::Activate);
@@ -5487,7 +5502,7 @@ impl ShellCore {
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
                 } else {
-                    let mut unavailable = node(
+                    let unavailable = node(
                         "detail-unavailable",
                         Role::Text,
                         "No launch action is available",
@@ -5495,9 +5510,9 @@ impl ShellCore {
                         detail_wrap_top + 318.0,
                         detail_column_width,
                         60.0,
-                        STATE_UNAVAILABLE_TEXT_TOKEN,
-                    );
-                    unavailable.state.unavailable = true;
+                        COLOR_SURFACE_CANVAS_TOKEN,
+                    )
+                    .with_ink_token(STATE_UNAVAILABLE_TEXT_TOKEN);
                     out.push(unavailable);
                     let mut pin = node(
                         "detail-pin",
@@ -14351,7 +14366,7 @@ mod tests {
             .root()
             .children
             .iter()
-            .find(|node| node.id.as_str() == "detail-availability-reason")
+            .find(|node| node.id.as_str() == "detail-availability-state")
             .unwrap();
         assert!(
             availability.state.unavailable,

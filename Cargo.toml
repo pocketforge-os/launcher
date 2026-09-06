@@ -36,3 +36,34 @@ pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev
 pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "ba8ccc962b264227490162ef07a9eaf6d334f9b8" }
 pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "ba8ccc962b264227490162ef07a9eaf6d334f9b8" }
 taffy = { version = "=0.7.7", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid"] }
+
+# Offscreen evidence renders are CPU-bound software rasterization. In dev,
+# optimize only the crates that own the raster, font, PNG, and ink-guard loops.
+[profile.dev.package.pf-shell]
+opt-level = 3
+
+[profile.dev.package.pf-shell-core]
+opt-level = 3
+
+[profile.dev.package.pf-render]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+
+[profile.dev.package.cosmic-text]
+opt-level = 3
+
+[profile.dev.package.swash]
+opt-level = 3
+
+# Integration tests compile pf-shell itself as the root target, which package
+# overrides cannot affect, so the raster-heavy test gate needs an optimized root.
+[profile.test]
+opt-level = 3

@@ -30,13 +30,20 @@ trap 'rm -rf "$tmp"' EXIT
 (
   cd "$tmp"
   CARGO_NET_OFFLINE=false cargo vendor --locked --versioned-dirs \
-    --manifest-path "$root/Cargo.toml" "$tmp/vendor" >/dev/null
+    --manifest-path "$root/Cargo.toml" "$tmp/vendor" >"$tmp/vendor-config"
 )
 
-# Cargo must resolve through the committed relative source replacement, never an
-# absolute path printed by cargo vendor for this temporary destination.
-grep -Fq 'replace-with = "vendored-sources"' .cargo/config.toml
-grep -Fq 'directory = "vendor"' .cargo/config.toml
+# Preserve Cargo's complete generated replacement list, including every pinned
+# Git source. Replace only cargo vendor's temporary absolute directory so the
+# committed configuration remains relocatable.
+awk '/^\[source\.crates-io\]/{copy=1} copy' "$tmp/vendor-config" |
+  sed 's|^directory = ".*"$|directory = "vendor"|' >"$tmp/config.toml"
+cat >>"$tmp/config.toml" <<'EOF'
+
+[net]
+offline = true
+EOF
+mv "$tmp/config.toml" .cargo/config.toml
 
 rm -rf vendor
 mv "$tmp/vendor" vendor

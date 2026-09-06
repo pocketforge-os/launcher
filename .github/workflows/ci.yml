@@ -30,6 +30,10 @@ jobs:
         run: |
           scripts/check-vendor.sh
           scripts/test-check-vendor.sh
+      - name: Build offline with a clean Cargo cache
+        run: |
+          clean_cargo_home="$(mktemp -d)"
+          CARGO_HOME="$clean_cargo_home" cargo build --offline --locked --workspace
       - name: Enforce raise-only mockup-diff ratchets
         run: |
           python3 -m unittest scripts/tests/test_check_mockup_ratchet.py

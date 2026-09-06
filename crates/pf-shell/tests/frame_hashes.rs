@@ -364,9 +364,12 @@ fn vertical_slice_frame_hashes_are_stable() {
         // tsp-q0k8t records their union: boot-home, focus-moved, launch-dimmed,
         // returned, and safe-return-crash combine .407's footer with .408's metadata
         // spacing; quick-power changes only for .407's footer.
-        "2cc632f0ae6625263bde438fc7c75adc80c691a940cc9f8e878555e84a152165  ",
-        "83b6895791847eea1b9aa1932906666ca5b8f5ebd5a45e46d97596516557f423  ",
-        "a3236c423b7590de4fc27afc9dc5cda5643bc2edb27f3b156ab5a1868dfea4dd  ",
+        // tsp-3ukmb combines those landed footer/metadata changes with .404's global
+        // status chrome and room hierarchy. The following six Home-backed/Quick frames
+        // therefore repaint for both the landed footer and the intended chrome.
+        "8751edbe7eee9584f76cde59c1edc61ed8afe6563ed8839f29f6d88bcff80181  ",
+        "189619ea5751ecdf4c86122bf60b0dcf29852350d096d2ba638c738bb886a293  ",
+        "ca35d58e8296d3cd97d739a66db98d29cd125ba9f8e90809480bf4b80f6f0d4d  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -377,15 +380,17 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "5407418787967132733408c64e65ef7f24495a0dc7155c7ed9add6894d78c775  ",
-        "51c0a79f1b7194c0667164e6ca8c3c513aea0e65764d8495f7018a89949bb537  ",
-        "24a4814e5f9df18b2a5d4887db781b65ab851a40d54756226955be95bf7c0d2b  ",
+        "73f377c11d9dca092b95d8715587bcbf9a568be283a7ec49110d492e06c283f2  ",
+        "da17960e033128ae9018bec5503f8596892d4184016fcaf12564203fd30fb6b3  ",
+        "63c0c1b892e6354d0b9f64a37e34a718633e4b9199385e1c309ee501315c5fc6  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
         // Library, focused Library, and Search change only for .407's route hints.
-        "d7ae1d1c67e9adade81ba8c1fb8109ea9d86e5fa147441550194b8484797e792  ",
-        "9631d37bceb75d2b1008316ed43d72a79faf4f550e0afc9c17f6b449acb059f9  ",
-        "b73943e33c1a6f062564042ef5ca7b07795f761dfe607f4af52c750cf2205e24  ",
+        // These three combine .407's route hints with .404's shared status chrome;
+        // Library also retains main's first-grid-item focus semantics.
+        "e7e1057e35cc4eba026025d745003df051333b7dfe851a73b622c14766854d01  ",
+        "63c31d0bb28e543b7410222b3b40ffa71df66112cea89fcf1d819bb166bb0c70  ",
+        "6b81b51eff237a08274e33a2dad8b0806586907e3520f9b7c2c1060305c8479c  ",
         // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
         // accent with wide rounded primary geometry, while Pin is a rounded outline
         // button on both ready and unavailable routes. Details and Details Unavailable
@@ -397,15 +402,18 @@ fn vertical_slice_frame_hashes_are_stable() {
         // row now exports the unavailable state structurally while its visual content
         // retains explicit legibility ink. Variant Chooser changes only for .407's
         // hint footer.
-        "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
-        "b0d3bbc743ba0ee41bac2fcd7255f156aecfb4b957e5eb502825fa491eec788e  ",
-        "0af05320a447e85d2a99db4b189cfb75de30dd2f704134195cddea9a75f63a4a  ",
+        // Details combines .405's CTA, .407's hint footer, and .404's global chrome.
+        // Details Unavailable additionally retains .410's emitter-selected unavailable
+        // semantics; Variant Chooser combines its .407 hint with .404 chrome.
+        "b497c54442da3a50cd69eb729f9d176f153d51063c654debd919fe8cd5d58c6d  ",
+        "cc9b721e7e545bff7387f18ce56e063ace8984429aa093be63a0f1182024445c  ",
+        "e6148c2f3a4341060a7ebc51ebe424c55a578f76628de08a64e636141df421b3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("83b68957"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("189619ea"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("54074187"),
+        lines.lines().nth(3).unwrap().starts_with("73f377c1"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -484,24 +492,26 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // chips. These are intentional component-grammar changes, guarded by structural
     // coverage/ink assertions in pf-shell-core.
     // tsp-op5a.407 rebaselines the five Settings-family frames for the shared
-    // right-aligned B Back / A Change badge renderer; first-run remains unchanged.
+    // right-aligned B Back / A Change badge renderer. tsp-3ukmb combines those pixels
+    // with .404's shared status chrome on all five; first-run changes only for .404's
+    // chrome because it suppresses the route footer.
     assert!(
-        transcript.contains("e03d94a4bab56278efe44e45299276897f22788e314cef2c7996ebf0ec984cd4  ")
+        transcript.contains("a479703573325bb1b7546b72245e67198df84f412968ed544d0708a5788373be  ")
     );
     assert!(
-        transcript.contains("35d1c9b6b7b0f65bedd51d68ae1ac938e2788150e855c441401a794c69d29eda  ")
+        transcript.contains("b2035e4ce8ebe27a989c25c9b2c2002442c371ca6455c31517e9c9ae2fc437c5  ")
     );
     assert!(
-        transcript.contains("0b3b4ccb2fd61a10ad0c06d60c26c9ecb895dc325e97dac2d5671398f0a89dd4  ")
+        transcript.contains("8951abb2ed500c61ea6976f03fecfd09d4ffdf6667b384648f64e179b23fbd4e  ")
     );
     assert!(
-        transcript.contains("04a9fa6c2c0bab5930f750aca586916be79c5b360399582f8f42780a3bad3155  ")
+        transcript.contains("3d9ed040605f733d4ef7f732774393c0b4d251bc6d93dd8a2adee426e3e762d5  ")
     );
     assert!(
-        transcript.contains("db746113e510210a74992548bb791d50ef68da24232f961202068062655854fd  ")
+        transcript.contains("0640dda6088630b22e2db9ddc34a77027ae72f3b1deea822bb219229c95bc4cd  ")
     );
     assert!(
-        transcript.contains("5ed2bd4a74fd003e585524023fe612416577ec064bccdaeb4e76fad655d9a3c1  ")
+        transcript.contains("1d110f9f2feaf2924a077cf6963a2ff9578b0209e1b6634378737b09ea076b34  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());
@@ -529,8 +539,9 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     // tsp-op5a.408 rebaselines the degraded-session Home frame for the corrected
     // styled-status-to-metadata spacing.
     // tsp-q0k8t combines that spacing with .407's corrected hint badge geometry.
+    // tsp-3ukmb adds .404's corrected global status chrome to the same degraded Home.
     assert!(
-        transcript.contains("afa66e1103b863cb4c228b238140f5ca614606379f8549aaed3eaf25d2bc0104  ")
+        transcript.contains("44d7890bf64d85d022994d351ff9a763861a89be6637f4e312732ffa434edcac  ")
     );
 }
 
@@ -588,9 +599,9 @@ fn ink_bbox(
 fn status_cluster_items_share_one_optical_centerline() {
     let (out, _) = render_offscreen();
     let (pixels, stride, _, _) = decode_route(out.path(), "boot-home.png");
-    let wifi = ink_bbox(&pixels, stride, 1103, 1120, 20, 44, 55).expect("wifi glyph ink");
-    let battery = ink_bbox(&pixels, stride, 1121, 1141, 20, 44, 40).expect("battery ink");
-    let text = ink_bbox(&pixels, stride, 1144, 1215, 20, 44, 110).expect("status text ink");
+    let wifi = ink_bbox(&pixels, stride, 1134, 1151, 24, 46, 55).expect("wifi glyph ink");
+    let battery = ink_bbox(&pixels, stride, 1152, 1172, 24, 46, 40).expect("battery ink");
+    let text = ink_bbox(&pixels, stride, 1175, 1233, 24, 46, 110).expect("status text ink");
     let center_y = |b: (usize, usize, usize, usize, usize)| (b.2 + b.3) as f32 / 2.0;
     let (wy, by, ty) = (center_y(wifi), center_y(battery), center_y(text));
     assert!(
@@ -607,10 +618,19 @@ fn status_cluster_items_share_one_optical_centerline() {
         ww <= 12 && wh <= 9,
         "wifi glyph {ww}x{wh} exceeds the 12x9 cap"
     );
+    assert!(
+        wifi.4 >= 34,
+        "wifi glyph has only {} ink pixels; three arcs plus dot must survive at 1x",
+        wifi.4
+    );
     let (bw, bh) = dims(battery);
     assert!(
         bw <= 18 && bh <= 10,
         "battery capsule {bw}x{bh} exceeds the 18x10 cap (must be a delicate outline, not a block)"
+    );
+    assert_eq!(
+        text.1, 1231,
+        "status cluster rightmost ink must align to the 48px page gutter"
     );
 }
 

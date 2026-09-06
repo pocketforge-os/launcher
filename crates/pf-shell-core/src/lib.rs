@@ -171,11 +171,26 @@ fn chrome_row_bottom(safe_top: f32, text_scale: u16) -> f32 {
 /// Group disc is the deterministic, theme-token-colored 8px cue the mockups pin,
 /// centered on the phrase's optical midline.
 const STATUS_DOT_DIAMETER: f32 = 8.0;
-/// The one optical centerline every status-bar chrome item (wifi glyph, battery
-/// capsule, and the battery%/clock text) is centered on, so all sit within 1px of
-/// each other. Empirically the caption text's ink midline lands here at 100% scale;
-/// the icons are placed around it rather than each carrying its own hard-coded y.
-const STATUS_CLUSTER_CENTER_Y: f32 = 28.0;
+/// The caption's ink midline is 12px below its box top at 100% and scales with the
+/// text. Keep that ink at the cluster centerline and center the fixed-size icons on
+/// the same derived line. Enlarged caption boxes move up to preserve the chrome row's
+/// vertical budget.
+const STATUS_CAPTION_INK_CENTER_OFFSET_100: f32 = 12.0;
+fn status_caption_top(text_scale: u16) -> f32 {
+    if text_scale == 100 { 22.0 } else { 16.0 }
+}
+fn status_cluster_center_y(text_scale: u16) -> f32 {
+    status_caption_top(text_scale)
+        + measured_text_advance(STATUS_CAPTION_INK_CENTER_OFFSET_100, text_scale)
+}
+const STATUS_CLUSTER_SHIFT_X: f32 = 31.0;
+fn status_cluster_shift_x(text_scale: u16) -> f32 {
+    if text_scale == 100 {
+        STATUS_CLUSTER_SHIFT_X
+    } else {
+        0.0
+    }
+}
 fn status_dot_node(id: &str, center_x: f32, center_y: f32, color_token: &str) -> Node {
     node(
         id,
@@ -236,18 +251,23 @@ fn system_status_group_left(
     has_wifi: bool,
     has_battery: bool,
 ) -> Option<f32> {
+    let shift_x = status_cluster_shift_x(text_scale);
     let mut left = status_width.map(|width| {
-        let right = if text_scale == 100 { -16.0 } else { 0.0 };
+        let right = if text_scale == 100 {
+            -16.0 - shift_x
+        } else {
+            -shift_x
+        };
         surface_width - right - width.max(152.0)
     });
     if has_wifi {
         left = Some(left.map_or(surface_width - 200.0, |value| {
-            value.min(surface_width - 200.0)
+            value.min(surface_width - 200.0 + shift_x)
         }));
     }
     if has_battery {
         left = Some(left.map_or(surface_width - 168.0, |value| {
-            value.min(surface_width - 168.0)
+            value.min(surface_width - 168.0 + shift_x)
         }));
     }
     left
@@ -3237,7 +3257,8 @@ impl ShellCore {
         let (w, h) = (metrics.logical_width, metrics.logical_height);
         scene_core.library_surface_width.set(w);
         let mut children = Vec::new();
-        let battery_x = w - 168.0;
+        let status_center_y = status_cluster_center_y(scene_core.text_scale);
+        let battery_x = w - 168.0 + status_cluster_shift_x(scene_core.text_scale);
         let room_width = room_strip_width(scene_core.text_scale);
         let room_left = (w - room_width) / 2.0;
         let room_right = room_left + room_width;
@@ -3284,7 +3305,7 @@ impl ShellCore {
                     Role::Group,
                     "Wi-Fi connected",
                     battery_x - 17.0,
-                    STATUS_CLUSTER_CENTER_Y - 3.5,
+                    status_center_y - 3.5,
                     9.0,
                     7.0,
                     SCENE_TRANSPARENT_TOKEN,
@@ -3300,7 +3321,7 @@ impl ShellCore {
             // centerline, not the near-solid filled block the four opaque rects drew.
             // The outline is a 1px themed border on a transparent body; the charge is a
             // small inner fill, and a short nub is the terminal.
-            let cy = STATUS_CLUSTER_CENTER_Y;
+            let cy = status_center_y;
             let level_width = (9.0 * f32::from(battery_percent) / 100.0).max(1.5);
             children.extend([
                 node(
@@ -3345,7 +3366,7 @@ impl ShellCore {
                     Role::Text,
                     &status_text,
                     status_left,
-                    16.0,
+                    status_caption_top(scene_core.text_scale),
                     status_width,
                     scaled_text_box_height(32.0, scene_core.text_scale),
                     SCENE_TRANSPARENT_TOKEN,
@@ -3421,18 +3442,22 @@ impl ShellCore {
                         32.0,
                         SCENE_TRANSPARENT_TOKEN,
                     )
-                    .with_type_role(TypeRole::Label)
+                    .with_type_role(if selected {
+                        TypeRole::Label
+                    } else {
+                        TypeRole::Body
+                    })
                     // Room strip: current room at primary, the others recede. Before
                     // this, no ink was set so both collapsed to --state-rest-text
                     // (primary), erasing the active/inactive distinction. The design
                     // (shell.css .room) is muted, but the strip is chrome sitting over
-                    // the hero-wash decoration layer, and muted there lands at ~4.47:1
-                    // — below the 4.5:1 raster legibility floor (assert_raster_text_
-                    // legible). Secondary is the nearest legible tone; it restores the
-                    // ramp and clears the floor. Escalated to coordinator: exact-muted
-                    // chrome would need a wash/scrim change (a backdrop-family fix).
+                    // the hero-wash decoration layer. The active label also keeps the
+                    // heavier Label face while inactive labels use Body, restoring the
+                    // mockup's color and weight hierarchy.
                     .with_ink_token(if selected {
                         COLOR_TEXT_PRIMARY_TOKEN
+                    } else if scene_core.text_scale == 100 {
+                        COLOR_TEXT_MUTED_TOKEN
                     } else {
                         COLOR_TEXT_SECONDARY_TOKEN
                     }),
@@ -8578,20 +8603,30 @@ fn wrap_system_layout(nodes: &mut Vec<Node>, surface_width: f32, text_scale: u16
         return;
     }
     for node in &mut system_nodes {
-        // Every status-bar item is centered on STATUS_CLUSTER_CENTER_Y (28) so the
-        // wifi glyph, battery capsule, and the %/clock text share ONE optical
-        // centerline within 1px. `right` is the gap from the surface right edge to the
-        // node's right edge; `top`/`height` place it around the centerline. The wifi
-        // (9x7) tucks just left of the delicate 12x7 battery capsule.
-        const CY: f32 = STATUS_CLUSTER_CENTER_Y;
+        // Every status-bar item is centered on the scale-aware centerline (34 at
+        // 100%) so the wifi glyph, battery capsule, and the %/clock text share ONE
+        // optical line. `right` is the gap from the surface right edge to the node's
+        // right edge; `top`/`height` place it around that line. The wifi (9x7) tucks
+        // just left of the delicate 12x7 battery capsule.
+        let center_y = status_cluster_center_y(text_scale);
+        let shift_x = status_cluster_shift_x(text_scale);
         let (right, top, width, height) = match node.id.as_str() {
-            "wifi-glyph" => (164.0, CY - 3.5, 9.0, 7.0),
-            "battery-outline" => (144.0, CY - 3.5, 12.0, 7.0),
-            "battery-level" => (154.5 - node.bounds.width, CY - 1.5, node.bounds.width, 3.0),
-            "battery-terminal" => (142.5, CY - 1.5, 1.5, 3.0),
+            "wifi-glyph" => (164.0 - shift_x, center_y - 3.5, 9.0, 7.0),
+            "battery-outline" => (144.0 - shift_x, center_y - 3.5, 12.0, 7.0),
+            "battery-level" => (
+                154.5 - shift_x - node.bounds.width,
+                center_y - 1.5,
+                node.bounds.width,
+                3.0,
+            ),
+            "battery-terminal" => (142.5 - shift_x, center_y - 1.5, 1.5, 3.0),
             "status-cluster" => (
-                if text_scale == 100 { -16.0 } else { 0.0 },
-                16.0,
+                if text_scale == 100 {
+                    -16.0 - shift_x
+                } else {
+                    -shift_x
+                },
+                status_caption_top(text_scale),
                 node.bounds.width.max(152.0),
                 node.bounds.height,
             ),
@@ -9086,21 +9121,23 @@ fn wifi_glyph_png(ink: [u8; 4]) -> Arc<[u8]> {
         .expect("wifi glyph cache")
         .entry(ink)
         .or_insert_with(|| {
-            // Drawn at 4x (36:28 == 9:7) so `ImageFit::Contain`'s downscale antialiases
-            // the two thin fan arcs into a legible little glyph instead of merging them.
-            let (bw, bh) = (36usize, 28usize);
+            // Pin the final 1x raster instead of relying on a thin 4x source surviving
+            // the image scaler. The slightly heavy source leaves mockup-scale coverage
+            // after the renderer's edge filtering.
+            let rows = [
+                "111111111",
+                "111000111",
+                "011111110",
+                "111000111",
+                "001111100",
+                "011111110",
+                "000111000",
+            ];
+            let (bw, bh) = (9usize, 7usize);
             let mut rgba = vec![0_u8; bw * bh * 4];
-            let (ox, oy) = (18.0_f32, 20.4_f32);
-            for y in 0..bh {
-                for x in 0..bw {
-                    let dx = x as f32 + 0.5 - ox;
-                    let dy = oy - (y as f32 + 0.5);
-                    let radius = dx.hypot(dy);
-                    let in_upper_fan = dy > -1.4 && dx.abs() <= (dy + 1.4) * 1.5;
-                    let painted = radius <= 2.6
-                        || in_upper_fan
-                            && ((5.4..=7.4).contains(&radius) || (10.6..=12.6).contains(&radius));
-                    if painted {
+            for (y, row) in rows.iter().enumerate() {
+                for (x, pixel) in row.bytes().enumerate() {
+                    if pixel == b'1' {
                         let offset = (y * bw + x) * 4;
                         rgba[offset..offset + 4].copy_from_slice(&ink);
                     }
@@ -9320,11 +9357,15 @@ fn hero_wash_source() -> ImageSource {
                 };
                 let offset = (y * WIDTH + x) * 4;
                 let dither = [[-0.75, 0.25], [0.75, -0.25]][y % 2][x % 2];
+                // Ease the aura beneath the chrome so muted nav ink remains legible
+                // without introducing a separate status-bar surface. Blend back to
+                // the authored opacity below the band instead of leaving a hard seam.
+                let chrome_opacity = 0.40 + 0.15 * (global_y / 80.0).clamp(0.0, 1.0);
                 rgba[offset..offset + 4].copy_from_slice(&[
                     (rgb[0] + dither).round().clamp(0.0, 255.0) as u8,
                     (rgb[1] + dither).round().clamp(0.0, 255.0) as u8,
                     (rgb[2] + dither).round().clamp(0.0, 255.0) as u8,
-                    (alpha * 0.55 * 255.0).round() as u8,
+                    (alpha * chrome_opacity * 255.0).round() as u8,
                 ]);
             }
         }
@@ -16912,6 +16953,71 @@ mod tests {
         }
     }
 
+    fn assert_status_cluster_centerline_at_scale(text_scale: u16) {
+        let mut core = fixture_core(vec![]);
+        core.text_scale = text_scale;
+        let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
+            interface_present: true,
+            enabled: true,
+            connected_ssid: Some("Moonlit Arcade".into()),
+            signal: Some(78),
+        });
+        core.load_network(&mut connected);
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let centerline = status_cluster_center_y(text_scale);
+        let top = |id: &str| {
+            let node = node_by_id(scene.root(), id).unwrap();
+            let Some(layout) = &node.layout else {
+                return node.bounds.y;
+            };
+            let LayoutValue::Px(top) = layout.inset.top else {
+                panic!("{id} must have an absolute pixel top");
+            };
+            top
+        };
+        let height = |id: &str| node_by_id(scene.root(), id).unwrap().bounds.height;
+
+        for id in [
+            "wifi-glyph",
+            "battery-outline",
+            "battery-level",
+            "battery-terminal",
+        ] {
+            let member_center = top(id) + height(id) / 2.0;
+            assert!(
+                (member_center - centerline).abs() < 0.01,
+                "{id} center {member_center} must equal the {text_scale}% cluster centerline {centerline}"
+            );
+        }
+        let caption_ink_center = top("status-cluster")
+            + measured_text_advance(STATUS_CAPTION_INK_CENTER_OFFSET_100, text_scale);
+        assert!(
+            (caption_ink_center - centerline).abs() < 0.01,
+            "caption ink center {caption_ink_center} must equal the {text_scale}% cluster centerline {centerline}"
+        );
+    }
+
+    #[test]
+    fn status_cluster_shares_scale_aware_centerline_at_150() {
+        assert_status_cluster_centerline_at_scale(150);
+    }
+
+    #[test]
+    fn status_cluster_shares_scale_aware_centerline_at_200() {
+        assert_status_cluster_centerline_at_scale(200);
+    }
+
     #[test]
     fn completeness_guard_detects_clipped_columns() {
         let mut core = fixture_core(vec![]);
@@ -17252,6 +17358,18 @@ mod tests {
                 Some(type_role)
             );
         }
+        let active_room = find(scene.root(), "room-home").unwrap();
+        let inactive_room = find(scene.root(), "room-library").unwrap();
+        assert_eq!(active_room.type_role, TypeRole::Label);
+        assert_eq!(
+            active_room.ink_token.as_deref(),
+            Some(COLOR_TEXT_PRIMARY_TOKEN)
+        );
+        assert_eq!(inactive_room.type_role, TypeRole::Body);
+        assert_eq!(
+            inactive_room.ink_token.as_deref(),
+            Some(COLOR_TEXT_MUTED_TOKEN)
+        );
         let scroll_region = find(scene.root(), "home-scroll-region").unwrap();
         assert!(
             scroll_region.accessible_label.is_empty(),

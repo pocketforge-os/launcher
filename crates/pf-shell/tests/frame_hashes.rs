@@ -307,8 +307,13 @@ fn vertical_slice_frame_hashes_are_stable() {
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
         // Home backdrops now select the launched item rather than stale index 0. The
         // returned frame also retains that launched-item selection after dismissal.
+        // tsp-op5a.431 r8 intentionally rebaselines only safe-return-crash: its crash
+        // receipt belongs to an unbound foreign session, so it no longer inherits the
+        // preceding launch context or paints that app's stale Open-again affordance.
+        // Every other frame remains byte-identical, including returned.png, whose
+        // receipt is bound to the in-flight launch.
         "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
-        "f3445db1b77fc6ba6384983decffa22186a37308b9d512c52381ae41d53aa153  ",
+        "ea60462a9386ee36dd78fad03c6a7969aefd8df3dba0e720c5d1543f9b1ffb87  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -337,6 +342,10 @@ fn vertical_slice_frame_hashes_are_stable() {
     let crash_semantics =
         std::fs::read_to_string(out.path().join("safe-return-crash.semantic.txt")).unwrap();
     assert!(crash_semantics.contains("⚠ CLOSED UNEXPECTEDLY"));
+    assert!(
+        !crash_semantics.contains("Open again"),
+        "an unbound foreign-session crash receipt must not inherit a stale relaunch affordance"
+    );
     for route in [
         "library.png",
         "library-focused-search.png",

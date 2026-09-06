@@ -928,8 +928,8 @@ struct LaunchContext {
     request: LaunchRequest,
     title: String,
     home_origin: Option<HomeLaunchOrigin>,
-    /// The shell tracks one session at a time. `None` means this launch is in flight;
-    /// the first terminal receipt binds it to the session that the summary represents.
+    /// The shell tracks one session at a time. `None` means the launch request has not
+    /// yet been accepted; acceptance binds the authoritative session identifier.
     session_id: Option<String>,
 }
 
@@ -2640,16 +2640,6 @@ impl ShellCore {
             .filter(|launch| launch.session_id.as_deref() == Some(self.crash_receipt_id.as_str()))
     }
 
-    fn bind_launch_to_receipt(&mut self, session_id: &str) {
-        match self.active_launch.as_mut() {
-            Some(launch) if launch.session_id.is_none() => {
-                launch.session_id = Some(session_id.to_owned());
-            }
-            Some(launch) if launch.session_id.as_deref() == Some(session_id) => {}
-            _ => self.active_launch = None,
-        }
-    }
-
     fn preference_effect(&self, index: usize) -> Option<Effect> {
         let row = self.display_preferences.get(index)?;
         Self::preference_effect_for(row)
@@ -2984,7 +2974,10 @@ impl ShellCore {
 
     pub fn launch_result(&mut self, result: &LaunchResult) {
         self.bump_revision();
-        if matches!(result, LaunchResult::Accepted { .. }) {
+        if let LaunchResult::Accepted { session_id } = result {
+            if let Some(launch) = self.active_launch.as_mut() {
+                launch.session_id = Some(session_id.clone());
+            }
             self.presentation = Presentation::Starting;
         } else {
             self.presentation = Presentation::Ready;
@@ -3004,7 +2997,6 @@ impl ShellCore {
                 self.presentation = Presentation::Running
             }
             SessionEvent::Terminal(TerminalReceipt::Returned { session_id }) => {
-                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::Returned;
                 self.crash_receipt_id.clone_from(session_id);
                 self.crash_summary = "Returned safely".into();
@@ -3014,7 +3006,6 @@ impl ShellCore {
                 self.pending_ack = true;
             }
             SessionEvent::Terminal(TerminalReceipt::ForcedClose { session_id }) => {
-                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::ForcedClose;
                 self.crash_receipt_id.clone_from(session_id);
                 self.crash_summary = "Closed unexpectedly".into();
@@ -3026,7 +3017,6 @@ impl ShellCore {
                 session_id,
                 summary,
             }) => {
-                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::Crash;
                 self.crash_summary.clone_from(summary);
                 self.crash_receipt_id.clone_from(session_id);
@@ -11066,6 +11056,9 @@ mod tests {
                 item_id: "app-1".into()
             }))
         );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-7".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-7".into(),
             summary: "exit status 9".into(),
@@ -11080,6 +11073,9 @@ mod tests {
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
 
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-8".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-8".into(),
             summary: "signal 11".into(),
@@ -11099,6 +11095,9 @@ mod tests {
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(_))
         ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-safe".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-safe".into(),
         }));
@@ -11113,6 +11112,9 @@ mod tests {
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(_))
         ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-again".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-again".into(),
         }));
@@ -11134,6 +11136,9 @@ mod tests {
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(_))
         ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-a".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "launch-a".into(),
         }));
@@ -11156,6 +11161,49 @@ mod tests {
     }
 
     #[test]
+    fn foreign_receipt_cannot_claim_an_accepted_launch_context() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-a".into(),
+        });
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "restored-launch-b".into(),
+        }));
+        let foreign_scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(foreign_scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Returned safely"
+        );
+        assert!(node_by_id(foreign_scene.root(), "return-summary-action-1").is_none());
+        assert_eq!(
+            c.active_launch
+                .as_ref()
+                .and_then(|launch| launch.session_id.as_deref()),
+            Some("launch-a")
+        );
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        let matching_scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(matching_scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Hollow Tides"
+        );
+        assert!(node_by_id(matching_scene.root(), "return-summary-action-1").is_some());
+    }
+
+    #[test]
     fn dismissed_launch_a_is_replaced_by_launch_b_context() {
         let mut c = core();
         c.focus = 0;
@@ -11175,6 +11223,9 @@ mod tests {
                 item_id: "app-1".into()
             }))
         );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-b".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "launch-b".into(),
         }));
@@ -11217,6 +11268,9 @@ mod tests {
                 item_id: "app-3".into()
             }))
         );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-home-3".into(),
         }));
@@ -11250,6 +11304,9 @@ mod tests {
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(_))
         ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3-crash".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-home-3-crash".into(),
             summary: "exit status 9".into(),
@@ -11259,6 +11316,9 @@ mod tests {
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(_))
         ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3-relaunch".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-home-3-relaunch".into(),
         }));
@@ -11353,6 +11413,9 @@ mod tests {
             }))
         );
 
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-library".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-library".into(),
         }));
@@ -11398,6 +11461,9 @@ mod tests {
             Some(Effect::Launch(_))
         ));
 
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-library".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-library".into(),
         }));

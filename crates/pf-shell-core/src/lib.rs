@@ -1002,44 +1002,13 @@ pub struct ShellCore {
 }
 
 impl ShellCore {
-    fn preference_is_applied(key: &str) -> bool {
-        matches!(
-            key,
-            "textScale" | "highContrast" | "reduceMotion" | "appearance"
-        )
-    }
-
-    fn preference_label(row: &DisplayPreference) -> String {
-        let value = match &row.effective {
-            PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
-            PreferenceValue::Text(value) => value.clone(),
-            PreferenceValue::Integer(value) => value.to_string(),
-        };
-        if Self::preference_is_applied(row.key) {
-            format!("{} · {value}", row.label)
-        } else {
-            format!("{} · {value} · not applied on this build", row.label)
-        }
-    }
-
-    #[must_use]
-    pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
-        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
-    }
-
-    #[must_use]
-    pub fn boot_with_art<F>(
-        snapshot: &CatalogSnapshot,
-        theme: &Theme,
-        reduced_motion: bool,
-        mut resolve_art: F,
-    ) -> Self
+    fn catalog_items<F>(snapshot: &CatalogSnapshot, mut resolve_art: F) -> Vec<Item>
     where
         F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let favorites = &snapshot.user_projection.favorite_item_ids;
         let pins = &snapshot.user_projection.pinned_variant_ids;
-        let items: Vec<_> = snapshot
+        snapshot
             .items
             .iter()
             .map(|item| {
@@ -1085,7 +1054,45 @@ impl ShellCore {
                     pinned_variant_id: pins.get(&item.id).cloned(),
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    fn preference_is_applied(key: &str) -> bool {
+        matches!(
+            key,
+            "textScale" | "highContrast" | "reduceMotion" | "appearance"
+        )
+    }
+
+    fn preference_label(row: &DisplayPreference) -> String {
+        let value = match &row.effective {
+            PreferenceValue::Bool(value) => if *value { "On" } else { "Off" }.into(),
+            PreferenceValue::Text(value) => value.clone(),
+            PreferenceValue::Integer(value) => value.to_string(),
+        };
+        if Self::preference_is_applied(row.key) {
+            format!("{} · {value}", row.label)
+        } else {
+            format!("{} · {value} · not applied on this build", row.label)
+        }
+    }
+
+    #[must_use]
+    pub fn boot(snapshot: &CatalogSnapshot, theme: &Theme, reduced_motion: bool) -> Self {
+        Self::boot_with_art(snapshot, theme, reduced_motion, |_, _| None)
+    }
+
+    #[must_use]
+    pub fn boot_with_art<F>(
+        snapshot: &CatalogSnapshot,
+        theme: &Theme,
+        reduced_motion: bool,
+        mut resolve_art: F,
+    ) -> Self
+    where
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
+    {
+        let items = Self::catalog_items(snapshot, &mut resolve_art);
         Self {
             revision: 0,
             route: Route::Home,
@@ -1163,6 +1170,58 @@ impl ShellCore {
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
         }
+    }
+
+    pub fn reload_catalog_with_art<F>(&mut self, snapshot: &CatalogSnapshot, resolve_art: F)
+    where
+        F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
+    {
+        let route_focus = self.focus;
+        let focused_id = self
+            .focused_item_index()
+            .map(|index| self.items[index].id.clone());
+        let selected_id = self.selected_item.map(|index| self.items[index].id.clone());
+        self.items = Self::catalog_items(snapshot, resolve_art);
+        self.selected_item = selected_id
+            .as_deref()
+            .and_then(|id| self.items.iter().position(|item| item.id == id));
+        self.set_search_query(self.search_query.clone());
+        self.refresh_library_items();
+        if selected_id.is_some()
+            && self.selected_item.is_none()
+            && matches!(self.route, Route::Details | Route::VariantChooser)
+        {
+            self.go(Route::Home);
+        }
+        if let Some(id) = focused_id {
+            if let Some(index) = self.items.iter().position(|item| item.id == id) {
+                self.focus = match self.route {
+                    Route::Library => self
+                        .library_items
+                        .iter()
+                        .position(|candidate| *candidate == index)
+                        .map_or(0, |position| position + 5),
+                    Route::Search => self
+                        .search_results
+                        .iter()
+                        .position(|candidate| *candidate == index)
+                        .unwrap_or(0),
+                    Route::Home => self
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| matches!(best_availability(item), Availability::Ready))
+                        .take(HOME_SHELF_LIMIT)
+                        .position(|(candidate, _)| candidate == index)
+                        .unwrap_or(0),
+                    Route::Details | Route::VariantChooser | Route::Settings | Route::Quick => {
+                        route_focus
+                    }
+                };
+            }
+        }
+        self.focus = self.focus.min(self.focus_count().saturating_sub(1));
+        self.bump_revision();
     }
 
     pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {
@@ -9367,6 +9426,120 @@ mod tests {
         c.authority_snapshot(false);
         c
     }
+
+    #[test]
+    fn catalog_reload_removing_open_item_returns_to_home_with_valid_scene() {
+        for route in [Route::Details, Route::VariantChooser] {
+            let mut core = core();
+            core.selected_item = Some(1);
+            core.go(route);
+
+            let mut reloaded = snapshot();
+            reloaded.items.remove(1);
+            core.reload_catalog_with_art(&reloaded, |_, _| None);
+
+            assert_eq!(core.route(), Route::Home);
+            assert_eq!(core.selected_item, None);
+            assert_eq!(core.focus(), 0);
+            let scene = core
+                .scene(
+                    SurfaceMetrics {
+                        logical_width: 1280.0,
+                        logical_height: 720.0,
+                        scale: 1.0,
+                        safe_insets: Default::default(),
+                        orientation: pf_scene::Orientation::Landscape,
+                    },
+                    "",
+                )
+                .unwrap();
+            assert!(node_by_id(scene.root(), "home-shelf-label").is_some());
+        }
+    }
+
+    #[test]
+    fn catalog_reload_remaps_open_item_by_id_when_it_remains() {
+        let mut core = core();
+        core.selected_item = Some(1);
+        core.go(Route::Details);
+
+        let mut reloaded = snapshot();
+        reloaded.items.swap(0, 1);
+        core.reload_catalog_with_art(&reloaded, |_, _| None);
+
+        assert_eq!(core.route(), Route::Details);
+        assert_eq!(core.selected_item, Some(0));
+        assert_eq!(core.items[0].id, "i1");
+    }
+
+    #[test]
+    fn catalog_reload_preserves_details_and_variant_control_focus() {
+        let variants = ["native", "stream", "compat"]
+            .into_iter()
+            .map(|id| variant(id, &format!("{id}-app"), Availability::Ready))
+            .collect();
+        let snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![item("focused", "Focused", variants)],
+            user_projection: UserProjection::default(),
+        };
+
+        for (route, focus) in [(Route::Details, 1), (Route::VariantChooser, 2)] {
+            let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+            core.selected_item = Some(0);
+            core.go(route);
+            core.focus = focus;
+
+            core.reload_catalog_with_art(&snapshot, |_, _| None);
+
+            assert_eq!(core.route(), route);
+            assert_eq!(core.focus(), focus);
+        }
+    }
+
+    #[test]
+    fn catalog_reload_restores_home_focus_in_ready_shelf_space() {
+        let snapshot = CatalogSnapshot {
+            revision: 1,
+            observed_at_unix_seconds: 0,
+            provider_results: vec![],
+            items: vec![
+                item(
+                    "unavailable",
+                    "Unavailable",
+                    vec![variant(
+                        "native",
+                        "unavailable-app",
+                        Availability::NeedsSetup {
+                            reason: "not installed".into(),
+                        },
+                    )],
+                ),
+                item(
+                    "focused",
+                    "Focused",
+                    vec![variant("native", "focused-app", Availability::Ready)],
+                ),
+                item(
+                    "next",
+                    "Next",
+                    vec![variant("native", "next-app", Availability::Ready)],
+                ),
+            ],
+            user_projection: UserProjection::default(),
+        };
+        let mut core = ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        core.focus = 0;
+
+        core.reload_catalog_with_art(&snapshot, |_, _| None);
+
+        assert_eq!(core.route(), Route::Home);
+        assert_eq!(core.focus(), 0);
+        assert_eq!(core.focused_item_index(), Some(1));
+    }
+
     fn preferences(applied: bool) -> FakePreferencePort {
         FakePreferencePort::new(
             [

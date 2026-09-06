@@ -5227,8 +5227,15 @@ impl ShellCore {
                         } else {
                             variant_name.clone()
                         };
+                    let unavailable_variant = !matches!(variant.availability, Availability::Ready);
+                    let variant_id = format!("detail-variant-{variant_index}");
+                    let visual_variant_id = if unavailable_variant {
+                        format!("{variant_id}-content")
+                    } else {
+                        variant_id.clone()
+                    };
                     let mut variant_node = node(
-                        &format!("detail-variant-{variant_index}"),
+                        &visual_variant_id,
                         if matches!(variant.availability, Availability::Ready) {
                             Role::Button
                         } else {
@@ -5243,7 +5250,6 @@ impl ShellCore {
                         STATE_REST_SURFACE_TOKEN,
                     );
                     variant_node.state.focused = focused;
-                    let unavailable_variant = !matches!(variant.availability, Availability::Ready);
                     let selected = Some(variant_index) == active_ready_variant;
                     variant_node.state.selected = selected;
                     // Selected variant: strong border + the renderer's 3px left accent bar
@@ -5316,6 +5322,19 @@ impl ShellCore {
                     }
                     if matches!(variant.availability, Availability::Ready) {
                         variant_node.action = Some(NodeAction::Activate);
+                    } else {
+                        let mut variant_state = node(
+                            &variant_id,
+                            Role::Group,
+                            &variant_accessible_label,
+                            variant_node.bounds.x,
+                            variant_node.bounds.y,
+                            variant_node.bounds.width,
+                            variant_node.bounds.height,
+                            STATE_REST_SURFACE_TOKEN,
+                        );
+                        variant_state.state.unavailable = true;
+                        out.push(variant_state);
                     }
                     out.push(variant_node);
                 }
@@ -14880,11 +14899,24 @@ mod tests {
             )
             .unwrap();
         let unavailable = node_by_id(scene.root(), "detail-variant-0").unwrap();
+        let unavailable_content = node_by_id(scene.root(), "detail-variant-0-content").unwrap();
         let launchable = node_by_id(scene.root(), "detail-variant-1").unwrap();
         assert!(!unavailable.state.selected);
         assert!(!unavailable.state.focused);
+        assert!(unavailable.state.unavailable);
+        for label_id in ["detail-variant-0-name", "detail-variant-0-sub"] {
+            assert_eq!(
+                node_by_id(unavailable_content, label_id)
+                    .unwrap()
+                    .ink_token
+                    .as_deref(),
+                Some(STATE_UNAVAILABLE_TEXT_TOKEN),
+                "unavailable variant child {label_id} must retain legible explicit ink"
+            );
+        }
         assert!(launchable.state.selected);
         assert!(launchable.state.focused);
+        assert!(!launchable.state.unavailable);
         assert!(node_by_id(scene.root(), "detail-variant-1-selection-mark").is_some());
 
         core.action(&ShellAction::Move(AxisMove::Down));

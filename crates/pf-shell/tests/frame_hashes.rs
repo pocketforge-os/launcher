@@ -245,7 +245,7 @@ fn rendered_attention_pill_keeps_text_on_one_row_with_horizontal_padding() {
 
 #[test]
 fn vertical_slice_frame_hashes_are_stable() {
-    let (_out, lines) = render_offscreen();
+    let (out, lines) = render_offscreen();
     for expected in [
         // Home intentionally rebaselines for the corrected attention-pill dot geometry.
         // Details routes rebaseline for the quiet-console layout polish, including
@@ -304,10 +304,29 @@ fn vertical_slice_frame_hashes_are_stable() {
         // result heading/count, two-line 40px-thumbnail rows, and match underline.
         // tsp-op5a.422 intentionally rebaselines Search only: match underlines now use
         // the same Label glyph advance as their title text.
+        // tsp-op5a.435 regenerates the merged evidence set. Relative to the
+        // safe-return parent, only search.png changes (97478057 -> 26c50763): it now
+        // includes main's Label-advance underline correction. Relative to main,
+        // returned.png changes (63bcd820 -> f489ef19) because the merged launch receipt
+        // restores the safe-return summary over the selected app, and
+        // safe-return-crash.png is newly present (ea60462a) for the independent
+        // foreign-session crash path. Every other frame is byte-identical to both
+        // parents; the union combines independent Search and terminal-summary pixels.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
-        "63bcd820e33b4b0e440dee6c269fab7ac360ec4af77cc00de293c2486ab38298  ",
+        // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
+        // rebaselines both after moving the inert Home footer below the summary dim.
+        // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
+        // Home backdrops now select the launched item rather than stale index 0. The
+        // returned frame also retains that launched-item selection after dismissal.
+        // tsp-op5a.431 r8 intentionally rebaselines only safe-return-crash: its crash
+        // receipt belongs to an unbound foreign session, so it no longer inherits the
+        // preceding launch context or paints that app's stale Open-again affordance.
+        // Every other frame remains byte-identical, including returned.png, whose
+        // receipt is bound to the in-flight launch.
+        "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
+        "ea60462a9386ee36dd78fad03c6a7969aefd8df3dba0e720c5d1543f9b1ffb87  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -322,8 +341,23 @@ fn vertical_slice_frame_hashes_are_stable() {
     }
     assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("63bcd820"),
-        "Returned must restore focused Home with the just-now acknowledgement"
+        lines.lines().nth(3).unwrap().starts_with("f489ef19"),
+        "Returned must show the safe-return summary card"
+    );
+    assert_ne!(
+        std::fs::read(out.path().join("boot-home.png")).unwrap(),
+        std::fs::read(out.path().join("returned.png")).unwrap(),
+        "Returned evidence must materially differ from plain Home"
+    );
+    let returned_semantics =
+        std::fs::read_to_string(out.path().join("returned.semantic.txt")).unwrap();
+    assert!(returned_semantics.contains("✓ RETURNED SAFELY"));
+    let crash_semantics =
+        std::fs::read_to_string(out.path().join("safe-return-crash.semantic.txt")).unwrap();
+    assert!(crash_semantics.contains("⚠ CLOSED UNEXPECTEDLY"));
+    assert!(
+        !crash_semantics.contains("Open again"),
+        "an unbound foreign-session crash receipt must not inherit a stale relaunch affordance"
     );
     for route in [
         "library.png",

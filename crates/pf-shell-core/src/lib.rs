@@ -917,12 +917,29 @@ struct Item {
     pinned_variant_id: Option<String>,
 }
 
+#[derive(Clone)]
+struct HomeLaunchOrigin {
+    item_id: String,
+    focus: usize,
+}
+
+#[derive(Clone)]
+struct LaunchContext {
+    request: LaunchRequest,
+    title: String,
+    home_origin: Option<HomeLaunchOrigin>,
+    /// The shell tracks one session at a time. `None` means the launch request has not
+    /// yet been accepted; acceptance binds the authoritative session identifier.
+    session_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtTreatment {
     CatalogArt,
     EditionPlate { palette: u8, motif: u8 },
 }
 
+#[derive(Clone)]
 pub struct ShellCore {
     revision: u64,
     route: Route,
@@ -944,8 +961,7 @@ pub struct ShellCore {
     library_filter: LibraryFilter,
     library_items: Vec<usize>,
     library_surface_width: Cell<f32>,
-    launch_focus: usize,
-    active_title: String,
+    active_launch: Option<LaunchContext>,
     crash_summary: String,
     crash_receipt_id: String,
     crash_exit_detail: String,
@@ -1111,8 +1127,7 @@ impl ShellCore {
             library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
             library_surface_width: Cell::new(1280.0),
-            launch_focus: 0,
-            active_title: String::new(),
+            active_launch: None,
             crash_summary: String::new(),
             crash_receipt_id: String::new(),
             crash_exit_detail: String::new(),
@@ -2128,26 +2143,29 @@ impl ShellCore {
                 ShellAction::Custom(_) => None,
             };
         }
-        if matches!(self.presentation, Presentation::Crash) {
+        if matches!(
+            self.presentation,
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash
+        ) {
             return match action {
                 ShellAction::Back => {
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
+                    self.return_home_from_summary();
                     None
                 }
                 ShellAction::Activate if self.focus == 0 => {
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
+                    self.return_home_from_summary();
                     None
                 }
                 ShellAction::Activate => {
-                    self.focus = self.launch_focus;
+                    let target = self.relaunch_target();
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
-                    self.activate()
+                    self.return_home_from_summary();
+                    target.and_then(|(item, variant)| self.launch_variant(item, variant))
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                    self.focus = 1;
+                    self.focus = usize::from(self.relaunch_target().is_some());
                     None
                 }
                 ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
@@ -2691,14 +2709,78 @@ impl ShellCore {
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
         let selected = &self.items[item];
         let request = selected.variants.get(variant)?.launch_target.app_id.clone();
-        self.launch_focus = if self.caller_route == Route::Home {
-            item
-        } else {
-            self.caller_focus
-        };
-        self.active_title.clone_from(&selected.title);
+        let request = LaunchRequest { item_id: request };
+        let home_origin = self
+            .launch_origin_home_focus()
+            .map(|focus| HomeLaunchOrigin {
+                item_id: selected.id.clone(),
+                focus,
+            });
+        self.active_launch = Some(LaunchContext {
+            request: request.clone(),
+            title: selected.title.clone(),
+            home_origin,
+            session_id: None,
+        });
         self.presentation = Presentation::Starting;
-        Some(Effect::Launch(LaunchRequest { item_id: request }))
+        Some(Effect::Launch(request))
+    }
+
+    fn launch_origin_home_focus(&self) -> Option<usize> {
+        match self.route {
+            Route::Home => Some(self.focus),
+            Route::Details | Route::VariantChooser if self.caller_route == Route::Home => {
+                Some(self.caller_focus)
+            }
+            _ => None,
+        }
+    }
+
+    fn preserved_home_focus(&self) -> Option<usize> {
+        let origin = self.bound_launch()?.home_origin.as_ref()?;
+        let current = self
+            .items
+            .iter()
+            .filter(|item| matches!(best_availability(item), Availability::Ready))
+            .take(HOME_SHELF_LIMIT)
+            .position(|item| item.id == origin.item_id)?;
+        Some(if current == origin.focus {
+            origin.focus
+        } else {
+            current
+        })
+    }
+
+    fn return_home_from_summary(&mut self) {
+        if let Some(focus) = self.preserved_home_focus() {
+            self.saved_focus[Self::route_slot(Route::Home)] = focus;
+            if self.route == Route::Home {
+                self.focus = focus;
+            }
+        }
+        self.go(Route::Home);
+        self.active_launch = None;
+    }
+
+    fn bound_launch(&self) -> Option<&LaunchContext> {
+        self.active_launch
+            .as_ref()
+            .filter(|launch| launch.session_id.as_deref() == Some(self.crash_receipt_id.as_str()))
+    }
+
+    fn relaunch_target(&self) -> Option<(usize, usize)> {
+        let request = &self.bound_launch()?.request;
+        self.items.iter().enumerate().find_map(|(item, entry)| {
+            entry
+                .variants
+                .iter()
+                .enumerate()
+                .find_map(|(variant, candidate)| {
+                    (candidate.launch_target.app_id == request.item_id
+                        && matches!(candidate.availability, Availability::Ready))
+                    .then_some((item, variant))
+                })
+        })
     }
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
@@ -2757,7 +2839,11 @@ impl ShellCore {
         }
     }
     fn route_index(&self) -> usize {
-        match self.route {
+        Self::route_slot(self.route)
+    }
+
+    fn route_slot(route: Route) -> usize {
+        match route {
             Route::Home => 0,
             Route::Library => 1,
             Route::Search => 2,
@@ -3034,9 +3120,14 @@ impl ShellCore {
 
     pub fn launch_result(&mut self, result: &LaunchResult) {
         self.bump_revision();
-        match result {
-            LaunchResult::Accepted { .. } => self.presentation = Presentation::Starting,
-            _ => self.presentation = Presentation::Ready,
+        if let LaunchResult::Accepted { session_id } = result {
+            if let Some(launch) = self.active_launch.as_mut() {
+                launch.session_id = Some(session_id.clone());
+            }
+            self.presentation = Presentation::Starting;
+        } else {
+            self.presentation = Presentation::Ready;
+            self.active_launch = None;
         }
     }
     pub fn session_event(&mut self, event: &SessionEvent) {
@@ -3051,15 +3142,21 @@ impl ShellCore {
             SessionEvent::Observed(ObservedSessionState::Running) => {
                 self.presentation = Presentation::Running
             }
-            SessionEvent::Terminal(TerminalReceipt::Returned { .. }) => {
+            SessionEvent::Terminal(TerminalReceipt::Returned { session_id }) => {
                 self.presentation = Presentation::Returned;
-                self.focus = self.launch_focus;
+                self.crash_receipt_id.clone_from(session_id);
+                self.crash_summary = "Returned safely".into();
+                self.crash_exit_detail = "Safe Return completed".into();
+                self.focus = 0;
                 self.just_returned = true;
                 self.pending_ack = true;
             }
-            SessionEvent::Terminal(TerminalReceipt::ForcedClose { .. }) => {
+            SessionEvent::Terminal(TerminalReceipt::ForcedClose { session_id }) => {
                 self.presentation = Presentation::ForcedClose;
-                self.focus = self.launch_focus;
+                self.crash_receipt_id.clone_from(session_id);
+                self.crash_summary = "Closed unexpectedly".into();
+                self.crash_exit_detail = "The session was forced closed".into();
+                self.focus = 0;
                 self.pending_ack = true;
             }
             SessionEvent::Terminal(TerminalReceipt::Crash {
@@ -3105,26 +3202,42 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
+        let backdrop = matches!(
+            self.presentation,
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash
+        )
+        .then(|| {
+            let mut backdrop = self.clone();
+            backdrop.route = Route::Home;
+            backdrop.presentation = Presentation::Ready;
+            backdrop.focus = backdrop
+                .preserved_home_focus()
+                .unwrap_or(backdrop.saved_focus[backdrop.route_index()]);
+            backdrop
+        });
+        // Terminal summaries retain the launch-origin route for their actions, but
+        // every visible backdrop element must come from the same inert Home snapshot.
+        let scene_core = backdrop.as_ref().unwrap_or(self);
         let (w, h) = (metrics.logical_width, metrics.logical_height);
-        self.library_surface_width.set(w);
+        scene_core.library_surface_width.set(w);
         let mut children = Vec::new();
         let battery_x = w - 168.0;
-        let room_width = room_strip_width(self.text_scale);
+        let room_width = room_strip_width(scene_core.text_scale);
         let room_left = (w - room_width) / 2.0;
         let room_right = room_left + room_width;
-        let has_wifi = self
+        let has_wifi = scene_core
             .network_state
             .as_ref()
             .is_ok_and(|state| state.connected_ssid.is_some());
-        let has_battery = self.battery_percent.is_some();
+        let has_battery = scene_core.battery_percent.is_some();
         let mut status_parts = Vec::new();
-        if let Some(percent) = self.battery_percent {
+        if let Some(percent) = scene_core.battery_percent {
             status_parts.push(percent.to_string());
         }
-        if self.authority_unavailable() {
+        if scene_core.authority_unavailable() {
             status_parts.push("!".into());
         }
-        if let Ok(state) = &self.time_state {
+        if let Ok(state) = &scene_core.time_state {
             let seconds = state
                 .wall_clock
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -3136,13 +3249,18 @@ impl ShellCore {
         let status_text = (!status_parts.is_empty()).then(|| status_parts.join("     "));
         let status_width = status_text
             .as_ref()
-            .map(|text| text_node_box_width(caption_text_width(text, self.text_scale)));
+            .map(|text| text_node_box_width(caption_text_width(text, scene_core.text_scale)));
         // Wi-Fi, battery, and status are one right-aligned chrome group. Measure the
         // final, scale-aware extent used by the layout seam and admit every available
         // member together only when the complete group clears the room strip.
-        let status_group_fits =
-            system_status_group_left(w, self.text_scale, status_width, has_wifi, has_battery)
-                .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
+        let status_group_fits = system_status_group_left(
+            w,
+            scene_core.text_scale,
+            status_width,
+            has_wifi,
+            has_battery,
+        )
+        .is_some_and(|left| left >= room_right + ROOM_STRIP_GAP);
         if status_group_fits && has_wifi {
             children.push(
                 node(
@@ -3156,12 +3274,12 @@ impl ShellCore {
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_image(
-                    wifi_glyph_source(self.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
+                    wifi_glyph_source(scene_core.resolved_ink(COLOR_TEXT_SECONDARY_TOKEN)),
                     ImageFit::Contain,
                 ),
             );
         }
-        if let Some(battery_percent) = self.battery_percent.filter(|_| status_group_fits) {
+        if let Some(battery_percent) = scene_core.battery_percent.filter(|_| status_group_fits) {
             // A delicate OUTLINE capsule (mockup ~12x7) centered on the status
             // centerline, not the near-solid filled block the four opaque rects drew.
             // The outline is a 1px themed border on a transparent body; the charge is a
@@ -3213,11 +3331,11 @@ impl ShellCore {
                     status_left,
                     16.0,
                     status_width,
-                    scaled_text_box_height(32.0, self.text_scale),
+                    scaled_text_box_height(32.0, scene_core.text_scale),
                     SCENE_TRANSPARENT_TOKEN,
                 )
                 .with_type_role(TypeRole::Caption);
-                if self.text_scale > 100 {
+                if scene_core.text_scale > 100 {
                     status = status.with_ink_token(COLOR_TEXT_PRIMARY_TOKEN);
                 }
                 children.push(status);
@@ -3233,7 +3351,7 @@ impl ShellCore {
         ] {
             let keycap = id.contains("keycap");
             let selected = matches!(
-                (id, self.route),
+                (id, scene_core.route),
                 ("room-home", Route::Home)
                     | (
                         "room-library",
@@ -3328,9 +3446,9 @@ impl ShellCore {
             SCENE_TRANSPARENT_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        rooms = rooms_layout(rooms, room_nodes, w, self.text_scale);
+        rooms = rooms_layout(rooms, room_nodes, w, scene_core.text_scale);
         children.push(rooms);
-        if let Some(status) = self.session_status() {
+        if let Some(status) = scene_core.session_status() {
             children.push(node(
                 "session-status",
                 Role::Text,
@@ -3361,63 +3479,129 @@ impl ShellCore {
                 );
                 self.first_run_nodes(&mut children, w, h);
             }
-            Presentation::Crash => self.crash_nodes(&mut children, w, h),
-            _ if self.route == Route::Quick => self.quick_nodes(&mut children, w, h),
-            _ => self.route_nodes(&mut children, metrics),
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash => {
+                // A terminal receipt is a shell-owned modal, not an overlay on the
+                // caller's route. Compose a stable Home snapshot behind it, then make
+                // that snapshot inert so neither paint nor semantic focus can escape
+                // the summary controls.
+                let backdrop_start = children.len();
+                scene_core.route_nodes(&mut children, metrics);
+                let backdrop_footer =
+                    scene_core
+                        .focused_item_index()
+                        .map_or_else(String::new, |item| {
+                            let mut prompts = scene_core
+                                .binding_prompt("Search.open", "Search")
+                                .into_iter()
+                                .collect::<Vec<_>>();
+                            if let Some(prompt) = scene_core.binding_prompt("Quick", "Quick") {
+                                prompts.push(prompt);
+                            }
+                            if let Some(prompt) = scene_core.binding_prompt(
+                                "Activate",
+                                if scene_core.ready_variants(item).is_empty() {
+                                    "Details"
+                                } else {
+                                    "Open"
+                                },
+                            ) {
+                                prompts.push(prompt);
+                            }
+                            let global_prompts = footer
+                                .split_once("     ")
+                                .map_or(footer, |(_, global)| global);
+                            if !global_prompts.is_empty() {
+                                prompts.push(global_prompts.to_owned());
+                            }
+                            prompts.join(" · ")
+                        });
+                append_prompt_footer(
+                    &mut children,
+                    Route::Home,
+                    scene_core.text_scale,
+                    w,
+                    h,
+                    &backdrop_footer,
+                );
+                for node in &mut children[backdrop_start..] {
+                    make_backdrop_inert(node);
+                }
+                children.push(
+                    node(
+                        "return-summary-backdrop-dim",
+                        Role::Group,
+                        "",
+                        0.0,
+                        0.0,
+                        w,
+                        h,
+                        SCENE_TRANSPARENT_TOKEN,
+                    )
+                    .with_image(first_run_dim_source(), ImageFit::Cover)
+                    .with_ink_token("--scene-overlay-role"),
+                );
+                self.return_summary_nodes(&mut children, w, h);
+            }
+            _ if scene_core.route == Route::Quick => scene_core.quick_nodes(&mut children, w, h),
+            _ => scene_core.route_nodes(&mut children, metrics),
         }
         let supplied_footer = footer.to_owned();
-        let footer = match self.route {
-            Route::Home => self.focused_item_index().map_or_else(String::new, |item| {
-                let mut prompts = self
-                    .binding_prompt("Search.open", "Search")
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if let Some(prompt) = self.binding_prompt("Quick", "Quick") {
-                    prompts.push(prompt);
-                }
-                if let Some(prompt) = self.binding_prompt(
-                    "Activate",
-                    if self.ready_variants(item).is_empty() {
-                        "Details"
-                    } else {
-                        "Open"
-                    },
-                ) {
-                    prompts.push(prompt);
-                }
-                let global_prompts = supplied_footer
-                    .split_once("     ")
-                    .map_or(supplied_footer.as_str(), |(_, global)| global);
-                if !global_prompts.is_empty() {
-                    prompts.push(global_prompts.to_owned());
-                }
-                prompts.join(" · ")
-            }),
+        let footer = match scene_core.route {
+            Route::Home => scene_core
+                .focused_item_index()
+                .map_or_else(String::new, |item| {
+                    let mut prompts = scene_core
+                        .binding_prompt("Search.open", "Search")
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    if let Some(prompt) = scene_core.binding_prompt("Quick", "Quick") {
+                        prompts.push(prompt);
+                    }
+                    if let Some(prompt) = scene_core.binding_prompt(
+                        "Activate",
+                        if scene_core.ready_variants(item).is_empty() {
+                            "Details"
+                        } else {
+                            "Open"
+                        },
+                    ) {
+                        prompts.push(prompt);
+                    }
+                    let global_prompts = supplied_footer
+                        .split_once("     ")
+                        .map_or(supplied_footer.as_str(), |(_, global)| global);
+                    if !global_prompts.is_empty() {
+                        prompts.push(global_prompts.to_owned());
+                    }
+                    prompts.join(" · ")
+                }),
             Route::Library => {
-                let mut prompts = self
+                let mut prompts = scene_core
                     .binding_prompt("Search.open", "Search")
                     .into_iter()
                     .collect::<Vec<_>>();
-                if let Some(prompt) = self.binding_prompt("Filter.next", "Filter") {
+                if let Some(prompt) = scene_core.binding_prompt("Filter.next", "Filter") {
                     prompts.push(prompt);
                 }
-                if self.focus >= 5
-                    && let Some(prompt) = self.binding_prompt("Activate", "Details")
+                if scene_core.focus >= 5
+                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Details")
                 {
                     prompts.push(prompt);
                 }
                 prompts.join("     ")
             }
             Route::Details => {
-                let ready = self
+                let ready = scene_core
                     .selected_item
-                    .is_some_and(|index| !self.ready_variants(index).is_empty());
+                    .is_some_and(|index| !scene_core.ready_variants(index).is_empty());
                 let mut prompts = Vec::new();
-                if let Some(prompt) = self.binding_prompt("Back", "Back") {
+                if let Some(prompt) = scene_core.binding_prompt("Back", "Back") {
                     prompts.push(prompt);
                 }
-                if let Some(item) = self.selected_item.and_then(|index| self.items.get(index))
-                    && let Some(prompt) = self.binding_prompt(
+                if let Some(item) = scene_core
+                    .selected_item
+                    .and_then(|index| scene_core.items.get(index))
+                    && let Some(prompt) = scene_core.binding_prompt(
                         "Quick",
                         if item.favorite {
                             "Unfavorite"
@@ -3428,9 +3612,10 @@ impl ShellCore {
                 {
                     prompts.push(prompt);
                 }
-                let activate_label = if self.focus == self.detail_pin_focus() {
-                    self.selected_item
-                        .and_then(|index| self.items.get(index))
+                let activate_label = if scene_core.focus == scene_core.detail_pin_focus() {
+                    scene_core
+                        .selected_item
+                        .and_then(|index| scene_core.items.get(index))
                         .map(|item| if item.favorite { "Unpin" } else { "Pin" })
                 } else if ready {
                     Some("Play")
@@ -3438,24 +3623,24 @@ impl ShellCore {
                     None
                 };
                 if let Some(prompt) =
-                    activate_label.and_then(|label| self.binding_prompt("Activate", label))
+                    activate_label.and_then(|label| scene_core.binding_prompt("Activate", label))
                 {
                     prompts.push(prompt);
                 }
                 prompts.join(" · ")
             }
             Route::Settings => {
-                let mut prompts = self
+                let mut prompts = scene_core
                     .binding_prompt("Back", "Back")
                     .into_iter()
                     .collect::<Vec<_>>();
-                if self.settings_in_rows
-                    && self.settings_row_focused
-                    && self
+                if scene_core.settings_in_rows
+                    && scene_core.settings_row_focused
+                    && scene_core
                         .settings_scene_rows()
-                        .get(self.focus)
+                        .get(scene_core.focus)
                         .is_some_and(|row| row.action.is_some())
-                    && let Some(prompt) = self.binding_prompt("Activate", "Change")
+                    && let Some(prompt) = scene_core.binding_prompt("Activate", "Change")
                 {
                     prompts.push(prompt);
                 }
@@ -3463,68 +3648,28 @@ impl ShellCore {
             }
             _ => supplied_footer,
         };
-        if self.presentation != Presentation::FirstRun {
-            children.push(node(
-                "prompt-bar",
-                Role::Group,
-                "",
-                0.0,
-                h - PROMPTS_AREA_HEIGHT,
-                w,
-                PROMPTS_AREA_HEIGHT,
-                SCENE_TRANSPARENT_TOKEN,
-            ));
-        }
-        let prompt_height = scaled_text_box_height(32.0, self.text_scale);
-        let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-        let prompt_label = if matches!(self.route, Route::Search | Route::Details) {
-            ""
-        } else {
-            &footer
-        };
-        let mut prompt_node = node(
-            "prompts",
-            if matches!(
-                self.route,
-                Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
-            ) {
-                Role::Group
-            } else {
-                Role::Text
-            },
-            prompt_label,
-            if self.route == Route::Home {
-                w - 660.0
-            } else {
-                w - 600.0
-            },
-            prompt_top,
-            if self.route == Route::Home {
-                612.0
-            } else {
-                552.0
-            },
-            prompt_height,
-            SCENE_TRANSPARENT_TOKEN,
-        )
-        .with_type_role(TypeRole::Label);
-        if self.route == Route::Home {
-            prompt_node.children = home_prompt_nodes(&footer, w, h, self.text_scale);
-        } else if matches!(
-            self.route,
-            Route::Library | Route::Details | Route::Quick | Route::Search
+        if !matches!(
+            self.presentation,
+            Presentation::FirstRun
+                | Presentation::Returned
+                | Presentation::ForcedClose
+                | Presentation::Crash
         ) {
-            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, self.text_scale);
+            append_prompt_footer(
+                &mut children,
+                scene_core.route,
+                scene_core.text_scale,
+                w,
+                h,
+                &footer,
+            );
         }
-        if self.presentation != Presentation::FirstRun {
-            children.push(prompt_node);
-        }
-        wrap_system_layout(&mut children, w, self.text_scale);
-        let radius_scale = f32::from(self.text_scale) / 100.0;
+        wrap_system_layout(&mut children, w, scene_core.text_scale);
+        let radius_scale = f32::from(scene_core.text_scale) / 100.0;
         for child in &mut children {
-            add_explicit_action_name(child, self.text_scale);
+            add_explicit_action_name(child, scene_core.text_scale);
         }
-        if self.route == Route::Library {
+        if scene_core.route == Route::Library {
             place_library_fade_below_footer(&mut children);
         }
         let focus_id = children
@@ -3542,11 +3687,11 @@ impl ShellCore {
         .with_children(children);
         #[cfg(test)]
         let semantics_before = semantic_snapshot(&root);
-        if self.route == Route::Home {
+        if scene_core.route == Route::Home {
             resolve_layout(
                 &mut root,
                 metrics,
-                f32::from(self.text_scale) / 100.0,
+                f32::from(scene_core.text_scale) / 100.0,
                 &Rasterizer::new(),
                 &mut LayoutCache::default(),
             );
@@ -3559,7 +3704,7 @@ impl ShellCore {
                     resolve_layout(
                         child,
                         metrics,
-                        f32::from(self.text_scale) / 100.0,
+                        f32::from(scene_core.text_scale) / 100.0,
                         &Rasterizer::new(),
                         &mut LayoutCache::default(),
                     );
@@ -7098,71 +7243,133 @@ impl ShellCore {
             ));
         }
     }
-    fn crash_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+    fn return_summary_nodes(&self, out: &mut Vec<Node>, w: f32, _h: f32) {
+        let clean = self.presentation == Presentation::Returned;
+        let badge = if clean {
+            "✓ RETURNED SAFELY"
+        } else {
+            "⚠ CLOSED UNEXPECTEDLY"
+        };
+        let outcome = if clean {
+            "Safe Return"
+        } else {
+            self.crash_summary.as_str()
+        };
+        let title = self
+            .bound_launch()
+            .map_or(self.crash_summary.as_str(), |launch| launch.title.as_str());
         out.push(node(
-            "receipt-panel",
+            "return-summary-panel",
             Role::Group,
             "",
-            152.0,
-            72.0,
-            w - 304.0,
-            552.0,
+            220.0,
+            64.0,
+            w - 440.0,
+            592.0,
             COLOR_SURFACE_RAISED_TOKEN,
         ));
-        out.push(node(
-            "crash-eyebrow",
-            Role::Text,
-            "⚠ Closed unexpectedly",
-            180.0,
-            100.0,
-            w - 360.0,
-            40.0,
-            COLOR_STATUS_ATTENTION_TOKEN,
-        ));
-        out.push(node(
-            "crash-title",
-            Role::Heading,
-            &self.active_title,
-            180.0,
-            150.0,
-            w - 360.0,
-            54.0,
-            STATE_REST_TEXT_TOKEN,
-        ));
-        out.push(node("crash-copy", Role::Text, &format!("{} stopped on its own and the shelf took the screen back. Nothing else was affected, and it's ready to open again.", self.active_title), 180.0, 220.0, w - 360.0, 70.0, COLOR_TEXT_SECONDARY_TOKEN));
-        out.push(node(
-            "crash-facts",
-            Role::Text,
-            &format!("Session · Ended · What happened · {}", self.crash_summary),
-            180.0,
-            310.0,
-            w - 360.0,
-            50.0,
-            COLOR_STATUS_ATTENTION_TOKEN,
-        ));
-        out.push(node(
-            "crash-diagnostic",
-            Role::Text,
-            &format!(
-                "{} · kept on this device · {}",
-                self.crash_receipt_id, self.crash_exit_detail
-            ),
-            180.0,
-            370.0,
-            w - 360.0,
-            40.0,
-            COLOR_TEXT_SECONDARY_TOKEN,
-        ));
-        out.push(node("crash-honesty", Role::Text, "This record stays on the device — there's nowhere it gets sent, so there's no Report button to press.", 180.0, 420.0, w - 360.0, 60.0, COLOR_TEXT_SECONDARY_TOKEN));
-        for (i, label) in ["Back to Home", "Open again"].iter().enumerate() {
+        out.push(
+            node(
+                "return-summary-badge",
+                Role::Text,
+                badge,
+                252.0,
+                92.0,
+                w - 504.0,
+                34.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Eyebrow)
+            .with_ink_token(if clean {
+                COLOR_STATUS_READY_TOKEN
+            } else {
+                COLOR_STATUS_ATTENTION_TOKEN
+            }),
+        );
+        out.push(
+            node(
+                "return-summary-title",
+                Role::Heading,
+                title,
+                252.0,
+                140.0,
+                w - 504.0,
+                52.0,
+                SCENE_TRANSPARENT_TOKEN,
+            )
+            .with_type_role(TypeRole::Title)
+            .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+        );
+        for (index, (label, value)) in [
+            ("Session", self.crash_receipt_id.as_str()),
+            ("Ended", "Just now"),
+            ("How it ended", outcome),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let y = 218.0 + index as f32 * 58.0;
+            out.push(
+                node(
+                    &format!("return-summary-{index}-label"),
+                    Role::Text,
+                    label,
+                    252.0,
+                    y,
+                    190.0,
+                    32.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Caption)
+                .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+            );
+            out.push(
+                node(
+                    &format!("return-summary-{index}-value"),
+                    Role::Text,
+                    value,
+                    448.0,
+                    y,
+                    w - 700.0,
+                    32.0,
+                    SCENE_TRANSPARENT_TOKEN,
+                )
+                .with_type_role(TypeRole::Label)
+                .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+            );
+        }
+        out.push(
+            node(
+                "return-summary-receipt",
+                Role::Text,
+                &format!(
+                    "RECEIPT  ·  {}  ·  kept on this device",
+                    self.crash_exit_detail
+                ),
+                252.0,
+                408.0,
+                w - 504.0,
+                46.0,
+                COLOR_SURFACE_CANVAS_TOKEN,
+            )
+            .with_type_role(TypeRole::Caption)
+            .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
+            .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
+        );
+        let actions = if self.relaunch_target().is_some() {
+            &["Back to Home", "Open again"][..]
+        } else {
+            &["Back to Home"][..]
+        };
+        for (i, label) in actions.iter().enumerate() {
             let mut n = node(
-                &format!("crash-action-{i}"),
+                &format!("return-summary-action-{i}"),
                 Role::Button,
                 label,
-                180.0,
-                480.0 + i as f32 * 62.0,
-                360.0,
-                50.0,
+                252.0 + i as f32 * 286.0,
+                526.0,
+                270.0,
+                64.0,
                 if i == self.focus {
                     STATE_FOCUSED_RING_TOKEN
                 } else {
@@ -9102,7 +9309,7 @@ fn apply_quiet_console_radius(node: &mut Node, scale: f32) {
     } else if id == "detail-cover"
         || id.starts_with("detail-art-")
         || id == "first-run-panel"
-        || id == "receipt-panel"
+        || id == "return-summary-panel"
         || id == "quick-panel-surface"
     {
         Some(RADIUS_L)
@@ -9143,6 +9350,77 @@ fn focused_node_id(node: &Node) -> Option<&Node> {
         .focused
         .then_some(node)
         .or_else(|| node.children.iter().find_map(focused_node_id))
+}
+
+fn append_prompt_footer(
+    children: &mut Vec<Node>,
+    route: Route,
+    text_scale: u16,
+    w: f32,
+    h: f32,
+    footer: &str,
+) {
+    children.push(node(
+        "prompt-bar",
+        Role::Group,
+        "",
+        0.0,
+        h - PROMPTS_AREA_HEIGHT,
+        w,
+        PROMPTS_AREA_HEIGHT,
+        SCENE_TRANSPARENT_TOKEN,
+    ));
+    let prompt_height = scaled_text_box_height(32.0, text_scale);
+    let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
+    let prompt_label = if matches!(route, Route::Search | Route::Details) {
+        ""
+    } else {
+        footer
+    };
+    let mut prompt_node = node(
+        "prompts",
+        if matches!(
+            route,
+            Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
+        ) {
+            Role::Group
+        } else {
+            Role::Text
+        },
+        prompt_label,
+        if route == Route::Home {
+            w - 660.0
+        } else {
+            w - 600.0
+        },
+        prompt_top,
+        if route == Route::Home { 612.0 } else { 552.0 },
+        prompt_height,
+        SCENE_TRANSPARENT_TOKEN,
+    )
+    .with_type_role(TypeRole::Label);
+    if route == Route::Home {
+        prompt_node.children = home_prompt_nodes(footer, w, h, text_scale);
+    } else if matches!(
+        route,
+        Route::Library | Route::Details | Route::Quick | Route::Search
+    ) {
+        prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
+    }
+    children.push(prompt_node);
+}
+
+fn make_backdrop_inert(node: &mut Node) {
+    node.state.focused = false;
+    node.action = None;
+    if node.style_token == STATE_FOCUSED_RING_TOKEN {
+        node.style_token = STATE_REST_SURFACE_TOKEN.into();
+    } else if node.style_token == STATE_FOCUSED_TEXT_TOKEN {
+        node.style_token = STATE_REST_TEXT_TOKEN.into();
+    }
+    for child in &mut node.children {
+        make_backdrop_inert(child);
+    }
 }
 
 #[cfg(test)]
@@ -9425,6 +9703,15 @@ mod tests {
         let mut c = ShellCore::boot(&snapshot(), &pf_theme::flagship(), false);
         c.authority_snapshot(false);
         c
+    }
+    fn test_metrics() -> SurfaceMetrics {
+        SurfaceMetrics {
+            logical_width: 1280.,
+            logical_height: 720.,
+            scale: 1.,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        }
     }
 
     #[test]
@@ -11385,6 +11672,9 @@ mod tests {
                 item_id: "app-1".into()
             }))
         );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-7".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-7".into(),
             summary: "exit status 9".into(),
@@ -11399,6 +11689,9 @@ mod tests {
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
 
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-8".into(),
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-8".into(),
             summary: "signal 11".into(),
@@ -11411,8 +11704,630 @@ mod tests {
         );
     }
     #[test]
-    fn crash_scene_includes_local_receipt_diagnostic() {
+    fn returned_summary_actions_relaunch_or_return_home() {
         let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-safe".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-safe".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-again".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-again".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+
+    #[test]
+    fn unavailable_relaunch_before_receipt_only_returns_home() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-unavailable-before".into(),
+        });
+
+        let mut reloaded = snapshot();
+        reloaded.items[1].variants[0].availability = Availability::NeedsSetup {
+            reason: "install required".into(),
+        };
+        c.reload_catalog_with_art(&reloaded, |_, _| None);
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-unavailable-before".into(),
+        }));
+
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert!(node_by_id(scene.root(), "return-summary-action-0").is_some());
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+    }
+
+    #[test]
+    fn unavailable_relaunch_after_receipt_rejects_stale_open_again_focus() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-unavailable-after".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-unavailable-after".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 1);
+
+        let mut reloaded = snapshot();
+        reloaded.items[1].variants[0].availability = Availability::UnsupportedCapability {
+            capability: "controller".into(),
+        };
+        c.reload_catalog_with_art(&reloaded, |_, _| None);
+
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert!(node_by_id(scene.root(), "return-summary-action-0").is_some());
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.focus = 1;
+        assert_eq!(c.focus(), 1);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+    }
+
+    #[test]
+    fn dismissed_launch_context_cannot_leak_into_a_restored_receipt() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-a".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert!(c.active_launch.is_none());
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "restored-unrelated".into(),
+        }));
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Returned safely"
+        );
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
+    }
+
+    #[test]
+    fn foreign_receipt_cannot_claim_an_accepted_launch_context() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-a".into(),
+        });
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "restored-launch-b".into(),
+        }));
+        let foreign_scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(foreign_scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Returned safely"
+        );
+        assert!(node_by_id(foreign_scene.root(), "return-summary-action-1").is_none());
+        assert_eq!(
+            c.active_launch
+                .as_ref()
+                .and_then(|launch| launch.session_id.as_deref()),
+            Some("launch-a")
+        );
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        let matching_scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(matching_scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Hollow Tides"
+        );
+        assert!(node_by_id(matching_scene.root(), "return-summary-action-1").is_some());
+    }
+
+    #[test]
+    fn dismissed_launch_a_is_replaced_by_launch_b_context() {
+        let mut c = core();
+        c.focus = 0;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        c.action(&ShellAction::Back);
+
+        c.focus = 1;
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "launch-b".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-b".into(),
+        }));
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Hollow Tides"
+        );
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn home_launch_summary_backdrop_and_dismissal_preserve_nonzero_focus() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut c = fixture_core(items);
+        c.focus = 3;
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-3".into()
+            }))
+        );
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-home-3".into(),
+        }));
+
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 500.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(node_by_id(scene.root(), "item-item-3").is_some());
+        assert!(node_by_id(scene.root(), "item-item-0").is_none());
+
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 3));
+        c.go(Route::Library);
+        c.go(Route::Home);
+        assert_eq!(
+            c.focus(),
+            3,
+            "the modal focus must not clobber saved Home focus"
+        );
+
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3-crash".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "receipt-home-3-crash".into(),
+            summary: "exit status 9".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-home-3-relaunch".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-home-3-relaunch".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 3));
+    }
+
+    #[test]
+    fn library_launch_summary_keeps_the_preexisting_home_focus() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut c = fixture_core(items);
+        c.focus = 2;
+        c.go(Route::Library);
+        c.focus = 8;
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(c.route(), Route::Details);
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 2));
+    }
+
+    #[test]
+    fn boot_restored_summary_without_launch_request_omits_open_again() {
+        let mut c = core();
+        assert!(c.active_launch.is_none());
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-restored".into(),
+        }));
+
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let semantics = semantic_snapshot(scene.root());
+        assert!(
+            semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "return-summary-action-0" })
+        );
+        assert!(
+            !semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "return-summary-action-1" })
+        );
+
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+    }
+    #[test]
+    fn returned_summary_open_again_relaunches_library_item_not_home_focus() {
+        let mut c = core();
+        c.go(Route::Library);
+        c.focus = 6;
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(c.route(), Route::Details);
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-library".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 1);
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Starting)
+        );
+    }
+    #[test]
+    fn returned_summary_uses_an_inert_home_backdrop_and_owns_focus() {
+        let mut c = core();
+        c.set_control_bindings(
+            [
+                ("Search.open", "Search", "Y"),
+                ("Quick", "Quick", "X"),
+                ("Activate", "Activate", "A"),
+                ("Back", "Back", "B"),
+                ("Filter.next", "Filter", "R"),
+            ]
+            .into_iter()
+            .map(|(action, label, binding)| ControlBinding {
+                context: "global".into(),
+                action: action.into(),
+                label: label.into(),
+                binding: binding.into(),
+            })
+            .collect(),
+        );
+        c.go(Route::Library);
+        c.focus = 6;
+        c.action(&ShellAction::Activate);
+        assert_eq!(c.route(), Route::Details);
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "receipt-library".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        let semantics = semantic_snapshot(scene.root());
+
+        assert!(
+            semantics
+                .iter()
+                .any(|(id, _, _, _, _)| id == "home-scroll-region")
+        );
+        assert!(
+            !semantics
+                .iter()
+                .any(|(id, _, _, _, _)| { id == "details-panel" || id.starts_with("library-") })
+        );
+        assert!(node_by_id(scene.root(), "room-home-underline").is_some());
+        assert!(node_by_id(scene.root(), "room-library-underline").is_none());
+        let prompt_verbs = semantics
+            .iter()
+            .filter(|(id, _, _, _, _)| id.starts_with("home-prompt-verb-"))
+            .map(|(_, _, label, _, _)| label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prompt_verbs, vec!["Search", "Quick", "Open"]);
+        assert!(!prompt_verbs.contains(&"Back"));
+        assert!(!prompt_verbs.contains(&"Favorite"));
+        assert!(!prompt_verbs.contains(&"Play"));
+        assert_eq!(
+            semantics
+                .iter()
+                .filter(|(_, _, _, _, focused)| *focused)
+                .map(|(id, _, _, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["return-summary-action-0"]
+        );
+        assert_eq!(
+            semantics
+                .iter()
+                .filter(|(_, _, _, action, _)| action.is_some())
+                .map(|(id, _, _, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["return-summary-action-0", "return-summary-action-1"]
+        );
+    }
+
+    #[test]
+    fn terminal_summaries_compose_one_inert_home_footer_below_the_dim() {
+        let receipts = [
+            TerminalReceipt::Returned {
+                session_id: "returned".into(),
+            },
+            TerminalReceipt::ForcedClose {
+                session_id: "forced".into(),
+            },
+            TerminalReceipt::Crash {
+                session_id: "crash".into(),
+                summary: "exit status 9".into(),
+            },
+        ];
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.,
+            logical_height: 720.,
+            scale: 1.,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        fn footer_is_inert(node: &Node) -> bool {
+            !node.state.focused
+                && node.action.is_none()
+                && node.children.iter().all(footer_is_inert)
+        }
+
+        for receipt in receipts {
+            let mut c = core();
+            c.go(Route::Library);
+            c.focus = 6;
+            c.action(&ShellAction::Activate);
+            assert_eq!(c.route(), Route::Details);
+            c.session_event(&SessionEvent::Terminal(receipt));
+
+            let scene = c.scene(metrics, "B Back     G Global").unwrap();
+            let children = &scene.root().children;
+            let footer_indices = children
+                .iter()
+                .enumerate()
+                .filter_map(|(index, node)| (node.id.as_str() == "prompt-bar").then_some(index))
+                .collect::<Vec<_>>();
+            let dim_index = children
+                .iter()
+                .position(|node| node.id.as_str() == "return-summary-backdrop-dim")
+                .unwrap();
+            let prompts_index = children
+                .iter()
+                .position(|node| node.id.as_str() == "prompts")
+                .unwrap();
+
+            assert_eq!(footer_indices.len(), 1);
+            assert!(footer_indices[0] < dim_index);
+            assert!(prompts_index < dim_index);
+            assert!(footer_is_inert(&children[footer_indices[0]]));
+            assert!(footer_is_inert(&children[prompts_index]));
+        }
+    }
+
+    #[test]
+    fn ready_home_footer_remains_topmost() {
+        let c = core();
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "B Back     G Global",
+            )
+            .unwrap();
+        let children = &scene.root().children;
+        let prompt_bar_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompt-bar")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+
+        assert_eq!(prompts_index, children.len() - 1);
+        assert_eq!(prompt_bar_index, prompts_index - 1);
+        assert!(node_by_id(scene.root(), "return-summary-backdrop-dim").is_none());
+    }
+
+    #[test]
+    fn terminal_summary_scenes_are_driven_by_their_receipts() {
+        let mut c = core();
+        c.active_launch = Some(LaunchContext {
+            request: LaunchRequest {
+                item_id: "app-1".into(),
+            },
+            title: "Ridgeline".into(),
+            home_origin: None,
+            session_id: None,
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-safe".into(),
+        }));
+        let returned = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(returned.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-badge"
+                && node.accessible_label == "✓ RETURNED SAFELY"
+        }));
+        assert!(returned.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-0-value" && node.accessible_label == "receipt-safe"
+        }));
+
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-7".into(),
             summary: "exit status 9".into(),
@@ -11429,17 +12344,27 @@ mod tests {
                 "",
             )
             .unwrap();
-        let diagnostic = scene
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-badge"
+                && node.accessible_label == "⚠ CLOSED UNEXPECTEDLY"
+        }));
+        assert!(scene.root().children.iter().any(|node| {
+            node.id.as_str() == "return-summary-2-value" && node.accessible_label == "exit status 9"
+        }));
+        let receipt = scene
             .root()
             .children
             .iter()
-            .find(|node| node.id.as_str() == "crash-diagnostic")
-            .expect("crash diagnostic row");
+            .find(|node| node.id.as_str() == "return-summary-receipt")
+            .expect("local receipt row");
         assert_eq!(
-            diagnostic.accessible_label,
-            "receipt-7 · kept on this device · exit status 9"
+            receipt.accessible_label,
+            "RECEIPT  ·  exit status 9  ·  kept on this device"
         );
-        assert_eq!(diagnostic.style_token, COLOR_TEXT_SECONDARY_TOKEN);
+        assert_eq!(
+            receipt.ink_token.as_deref(),
+            Some(COLOR_TEXT_SECONDARY_TOKEN)
+        );
     }
     #[test]
     fn recovery_entry_is_authority_gated() {
@@ -14103,6 +15028,7 @@ mod tests {
             }))
         );
         many.launch_result(&LaunchResult::RejectedBusy);
+        assert!(many.active_launch.is_none());
         many.go(Route::Home);
         assert_eq!(many.action(&ShellAction::Activate), None);
         assert_eq!((many.route(), many.focus()), (Route::VariantChooser, 0));

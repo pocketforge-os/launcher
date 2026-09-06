@@ -148,6 +148,15 @@ fn text_node_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * TEXT_NODE_INLINE_INSET
 }
 
+fn join_metadata_fields(fields: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    fields
+        .into_iter()
+        .map(|field| field.as_ref().trim().to_owned())
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
     measured_text_advance(base_height, text_scale)
 }
@@ -3796,7 +3805,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Starting · {kind} · {cue}")
+                            join_metadata_fields(["● Starting", kind, cue])
                         }
                         Availability::Ready => {
                             let cue = item
@@ -3807,7 +3816,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Ready · {kind} · {cue}")
+                            join_metadata_fields(["● Ready", kind, cue])
                         }
                         Availability::NeedsSetup { .. } => format!("⊘ Needs setup · {kind}"),
                         Availability::NeedsNetwork { .. } => {
@@ -3820,12 +3829,13 @@ impl ShellCore {
                     }
                 },
             );
-            let hero_status = format!(
-                "{}{}",
-                hero_status,
-                focused
-                    .and_then(|item| item.playtime_fact.as_deref())
-                    .map_or(String::new(), |fact| format!(" · {fact}"))
+            let hero_status = join_metadata_fields(
+                [
+                    Some(hero_status.as_str()),
+                    focused.and_then(|item| item.playtime_fact.as_deref()),
+                ]
+                .into_iter()
+                .flatten(),
             );
             let vertical = home_vertical_layout(self.text_scale);
             let hero_title_height = scaled_text_box_height(72.0, self.text_scale);
@@ -3896,11 +3906,13 @@ impl ShellCore {
             // wider than the conservative label advance, so a tight box wraps it
             // (the single-line raster guard rejects that). SPACE_5 of slack keeps
             // "● Ready" et al. on one line while the meta run still follows closely.
-            let status_lead_width = (text_node_box_width(measured_text_advance(
-                label_text_width(status_lead),
+            let status_lead_advance = text_node_box_width(measured_text_advance(
+                label_text_width(lead_display),
                 self.text_scale,
-            )) + SPACE_5)
-                .min(hero_status_width);
+            ));
+            let status_lead_width = (status_lead_advance
+                + measured_text_advance(SPACE_5, self.text_scale))
+            .min(hero_status_width);
             let mut hero_status_children = Vec::new();
             if ready_dot {
                 hero_status_children.push(status_dot_node(
@@ -3929,9 +3941,9 @@ impl ShellCore {
                     "hero-status-meta",
                     Role::Text,
                     status_meta,
-                    48.0 + status_lead_width,
+                    48.0 + lead_offset + status_lead_advance,
                     vertical.status_y,
-                    (hero_status_width - status_lead_width).max(0.0),
+                    (hero_status_width - lead_offset - status_lead_advance).max(0.0),
                     hero_status_height,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -4988,10 +5000,19 @@ impl ShellCore {
                 )
             };
             let availability = if matches!(detail_availability, Availability::Ready) {
-                [item.last_played_fact.as_deref(), item.size_fact.as_deref()]
+                let last_played = item
+                    .last_played_fact
+                    .as_deref()
+                    .map(|fact| format!("Last played {fact}"));
+                join_metadata_fields(
+                    [
+                        Some(availability.as_str()),
+                        last_played.as_deref(),
+                        item.size_fact.as_deref(),
+                    ]
                     .into_iter()
-                    .flatten()
-                    .fold(availability, |status, fact| format!("{status} · {fact}"))
+                    .flatten(),
+                )
             } else {
                 availability
             };
@@ -5019,10 +5040,8 @@ impl ShellCore {
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 let lead_x = detail_column_left + 16.0;
-                let lead_width = (text_node_box_width(measured_text_advance(
-                    label_text_width(lead),
-                    self.text_scale,
-                )) + SPACE_5)
+                let lead_advance = text_node_box_width(caption_text_width(lead, self.text_scale));
+                let lead_width = (lead_advance + measured_text_advance(SPACE_5, self.text_scale))
                     .min(detail_column_width - 16.0);
                 container.children.push(status_dot_node(
                     "detail-availability-dot",
@@ -5049,9 +5068,9 @@ impl ShellCore {
                         "detail-availability-meta",
                         Role::Text,
                         meta,
-                        lead_x + lead_width,
+                        lead_x + lead_advance,
                         availability_top,
-                        (detail_column_width - lead_width - 16.0).max(0.0),
+                        (detail_column_width - lead_advance - 16.0).max(0.0),
                         availability_height,
                         SCENE_TRANSPARENT_TOKEN,
                     )
@@ -19030,6 +19049,18 @@ mod tests {
             node_by_id(root, "detail-title").unwrap().type_role,
             TypeRole::Title
         );
+        assert_eq!(
+            node_by_id(root, "detail-availability-reason")
+                .unwrap()
+                .accessible_label,
+            "● Ready · Last played Yesterday · 2.4 GB"
+        );
+        assert_eq!(
+            node_by_id(root, "detail-availability-meta")
+                .unwrap()
+                .accessible_label,
+            " · Last played Yesterday · 2.4 GB"
+        );
         let first = node_by_id(root, "detail-variant-0").unwrap();
         let second = node_by_id(root, "detail-variant-1").unwrap();
         assert!(first.bounds.y + first.bounds.height < second.bounds.y);
@@ -19060,6 +19091,18 @@ mod tests {
         assert!(
             prompt_right > 1200.0,
             "prompt keycaps must remain right-aligned"
+        );
+    }
+
+    #[test]
+    fn metadata_fields_join_without_a_leading_or_doubled_separator() {
+        assert_eq!(
+            join_metadata_fields(["Ready", "Game", "Installed"]),
+            "Ready · Game · Installed"
+        );
+        assert_eq!(
+            join_metadata_fields(["Ready", "", "Installed"]),
+            "Ready · Installed"
         );
     }
 

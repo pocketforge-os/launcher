@@ -335,8 +335,11 @@ fn vertical_slice_frame_hashes_are_stable() {
         "014b8340a8b02e3261782f77fd21b98cb29ee1d469beb9b6039628518dd329e5  ",
         "a7759bdd41f02b2035247f4f0632bcdc8b2d5ccc06f4524629b484faa6131368  ",
         "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
-        "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
-        "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
+        // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
+        // accent with wide rounded primary geometry, while Pin is a rounded outline
+        // button on both ready and unavailable routes.
+        "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
+        "4f8cbd2d1bfa86f5c338e0efcdcdc972e02aa11874644d5e8d73eb8d33a8f41c  ",
         "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

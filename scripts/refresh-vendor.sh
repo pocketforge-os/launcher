@@ -24,6 +24,12 @@ done < <(git status --porcelain=v1 -z --untracked-files=all)
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/pocketforge-vendor.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
+# Resolve every workspace feature before vendoring. `cargo vendor` has no
+# `--all-features` flag: it copies every package present in Cargo.lock, so this
+# locked resolution is the guard that the lock includes optional feature deps.
+CARGO_NET_OFFLINE=false cargo metadata --locked --all-features \
+  --format-version 1 >/dev/null
+
 # Run outside the repository so Cargo does not discover .cargo/config.toml's
 # deliberately offline crates-io replacement. Refresh is the sole networked
 # operation; validation and all production builds below remain offline.
@@ -86,7 +92,8 @@ package_count="$(find vendor -mindepth 2 -maxdepth 2 -name .cargo-checksum.json 
   printf 'vendored_packages=%s\n' "$package_count"
 } > vendor/.pocketforge-vendor-lock
 
-cargo metadata --offline --locked --format-version 1 >/dev/null
+cargo metadata --offline --locked --all-features --format-version 1 >/dev/null
 cargo build --offline --locked --workspace
+cargo build --offline --locked --workspace --all-features
 cargo test --offline --locked --workspace --no-fail-fast
 echo "refresh-vendor: refreshed $package_count packages"

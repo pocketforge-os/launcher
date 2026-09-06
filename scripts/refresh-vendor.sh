@@ -29,7 +29,7 @@ trap 'rm -rf "$tmp"' EXIT
 # operation; validation and all production builds below remain offline.
 (
   cd "$tmp"
-  CARGO_NET_OFFLINE=false cargo vendor --locked --versioned-dirs \
+  CARGO_NET_OFFLINE=false cargo vendor --locked \
     --manifest-path "$root/Cargo.toml" "$tmp/vendor" >"$tmp/vendor-config"
 )
 

@@ -917,6 +917,12 @@ struct Item {
     pinned_variant_id: Option<String>,
 }
 
+#[derive(Clone)]
+struct HomeLaunchOrigin {
+    item_id: String,
+    focus: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtTreatment {
     CatalogArt,
@@ -942,6 +948,7 @@ pub struct ShellCore {
     library_items: Vec<usize>,
     library_surface_width: Cell<f32>,
     active_launch_request: Option<LaunchRequest>,
+    launch_home_origin: Option<HomeLaunchOrigin>,
     active_title: String,
     crash_summary: String,
     crash_receipt_id: String,
@@ -1101,6 +1108,7 @@ impl ShellCore {
             library_items: (0..snapshot.items.len()).collect(),
             library_surface_width: Cell::new(1280.0),
             active_launch_request: None,
+            launch_home_origin: None,
             active_title: String::new(),
             crash_summary: String::new(),
             crash_receipt_id: String::new(),
@@ -2073,18 +2081,18 @@ impl ShellCore {
             return match action {
                 ShellAction::Back => {
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
+                    self.return_home_from_summary();
                     None
                 }
                 ShellAction::Activate if self.focus == 0 => {
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
+                    self.return_home_from_summary();
                     None
                 }
                 ShellAction::Activate => {
                     let request = self.active_launch_request.clone()?;
                     self.presentation = Presentation::Ready;
-                    self.go(Route::Home);
+                    self.return_home_from_summary();
                     self.presentation = Presentation::Starting;
                     Some(Effect::Launch(request))
                 }
@@ -2558,10 +2566,51 @@ impl ShellCore {
         let selected = &self.items[item];
         let request = selected.variants.get(variant)?.launch_target.app_id.clone();
         let request = LaunchRequest { item_id: request };
+        self.launch_home_origin = self
+            .launch_origin_home_focus()
+            .map(|focus| HomeLaunchOrigin {
+                item_id: selected.id.clone(),
+                focus,
+            });
         self.active_launch_request = Some(request.clone());
         self.active_title.clone_from(&selected.title);
         self.presentation = Presentation::Starting;
         Some(Effect::Launch(request))
+    }
+
+    fn launch_origin_home_focus(&self) -> Option<usize> {
+        match self.route {
+            Route::Home => Some(self.focus),
+            Route::Details | Route::VariantChooser if self.caller_route == Route::Home => {
+                Some(self.caller_focus)
+            }
+            _ => None,
+        }
+    }
+
+    fn preserved_home_focus(&self) -> Option<usize> {
+        let origin = self.launch_home_origin.as_ref()?;
+        let current = self
+            .items
+            .iter()
+            .filter(|item| matches!(best_availability(item), Availability::Ready))
+            .take(HOME_SHELF_LIMIT)
+            .position(|item| item.id == origin.item_id)?;
+        Some(if current == origin.focus {
+            origin.focus
+        } else {
+            current
+        })
+    }
+
+    fn return_home_from_summary(&mut self) {
+        if let Some(focus) = self.preserved_home_focus() {
+            self.saved_focus[Self::route_slot(Route::Home)] = focus;
+            if self.route == Route::Home {
+                self.focus = focus;
+            }
+        }
+        self.go(Route::Home);
     }
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
@@ -2617,7 +2666,11 @@ impl ShellCore {
         }
     }
     fn route_index(&self) -> usize {
-        match self.route {
+        Self::route_slot(self.route)
+    }
+
+    fn route_slot(route: Route) -> usize {
+        match route {
             Route::Home => 0,
             Route::Library => 1,
             Route::Search => 2,
@@ -2979,7 +3032,9 @@ impl ShellCore {
             let mut backdrop = self.clone();
             backdrop.route = Route::Home;
             backdrop.presentation = Presentation::Ready;
-            backdrop.focus = backdrop.saved_focus[backdrop.route_index()];
+            backdrop.focus = backdrop
+                .preserved_home_focus()
+                .unwrap_or(backdrop.saved_focus[backdrop.route_index()]);
             backdrop
         });
         // Terminal summaries retain the launch-origin route for their actions, but
@@ -11011,6 +11066,112 @@ mod tests {
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
     }
+
+    #[test]
+    fn home_launch_summary_backdrop_and_dismissal_preserve_nonzero_focus() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut c = fixture_core(items);
+        c.focus = 3;
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-3".into()
+            }))
+        );
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-home-3".into(),
+        }));
+
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 500.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "",
+            )
+            .unwrap();
+        assert!(node_by_id(scene.root(), "item-item-3").is_some());
+        assert!(node_by_id(scene.root(), "item-item-0").is_none());
+
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 3));
+        c.go(Route::Library);
+        c.go(Route::Home);
+        assert_eq!(
+            c.focus(),
+            3,
+            "the modal focus must not clobber saved Home focus"
+        );
+
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "receipt-home-3-crash".into(),
+            summary: "exit status 9".into(),
+        }));
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-home-3-relaunch".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 3));
+    }
+
+    #[test]
+    fn library_launch_summary_keeps_the_preexisting_home_focus() {
+        let items = (0..6)
+            .map(|index| {
+                item(
+                    &format!("item-{index}"),
+                    &format!("Item {index}"),
+                    vec![variant(
+                        &format!("variant-{index}"),
+                        &format!("app-{index}"),
+                        Availability::Ready,
+                    )],
+                )
+            })
+            .collect();
+        let mut c = fixture_core(items);
+        c.focus = 2;
+        c.go(Route::Library);
+        c.focus = 8;
+        assert_eq!(c.action(&ShellAction::Activate), None);
+        assert_eq!(c.route(), Route::Details);
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "receipt-library".into(),
+        }));
+
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert_eq!((c.route(), c.focus()), (Route::Home, 2));
+    }
+
     #[test]
     fn boot_restored_summary_without_launch_request_omits_open_again() {
         let mut c = core();

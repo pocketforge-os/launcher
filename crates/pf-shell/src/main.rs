@@ -5775,6 +5775,77 @@ mod durable_tests {
     }
 
     #[test]
+    fn rounded_bordered_group_text_pair_has_no_sequence_paint_state_leakage() {
+        fn card(id: &str, x: f32) -> Node {
+            Node::new(
+                pf_scene::NodeId::new(id).unwrap(),
+                Role::Group,
+                "",
+                pf_scene::Bounds::new(x, 20.0, 100.0, 34.0),
+                "--state-rest-surface",
+            )
+            .with_corner_radius(10.0)
+            .with_border("--color-border-hairline", 1.0)
+            .with_children(vec![Node::new(
+                pf_scene::NodeId::new(format!("{id}-label")).unwrap(),
+                Role::Text,
+                "Ready",
+                pf_scene::Bounds::new(x + 12.0, 25.0, 76.0, 24.0),
+                "--state-rest-surface",
+            )])
+        }
+
+        fn render(children: Vec<Node>) -> RasterFrame {
+            let root_id = pf_scene::NodeId::new("paint-sequence-probe").unwrap();
+            let root = Node::new(
+                root_id.clone(),
+                Role::Group,
+                "",
+                pf_scene::Bounds::new(0.0, 0.0, 280.0, 80.0),
+                "--color-surface-canvas",
+            )
+            .with_children(children);
+            let scene = pf_scene::Scene::new(root, root_id).unwrap();
+            let mut rasterizer = Rasterizer::new();
+            rasterizer.set_theme_base(pf_theme::Base::Dusk);
+            rasterizer
+                .render(
+                    &scene,
+                    SurfaceMetrics {
+                        logical_width: 280.0,
+                        logical_height: 80.0,
+                        scale: 1.0,
+                        safe_insets: Insets::default(),
+                        orientation: Orientation::Landscape,
+                    },
+                )
+                .unwrap()
+        }
+
+        let lone = render(vec![card("first-card", 20.0)]);
+        let sequence = render(vec![card("first-card", 20.0), card("second-card", 140.0)]);
+        assert_eq!((lone.width, lone.height), (sequence.width, sequence.height));
+        for y in 18..56_usize {
+            let lone_start = (y * lone.width as usize + 18) * 4;
+            let lone_end = (y * lone.width as usize + 122) * 4;
+            let first_start = (y * sequence.width as usize + 18) * 4;
+            let first_end = (y * sequence.width as usize + 122) * 4;
+            let second_start = (y * sequence.width as usize + 138) * 4;
+            let second_end = (y * sequence.width as usize + 242) * 4;
+            assert_eq!(
+                &lone.rgba[lone_start..lone_end],
+                &sequence.rgba[first_start..first_end],
+                "a following rounded/text pair must not alter the previous pair at row {y}"
+            );
+            assert_eq!(
+                &lone.rgba[lone_start..lone_end],
+                &sequence.rgba[second_start..second_end],
+                "the second rounded/text pair must paint identically to a lone pair at row {y}"
+            );
+        }
+    }
+
+    #[test]
     fn raster_ink_guard_rejects_a_nearly_occluded_text_sliver() {
         let bounds = pf_scene::Bounds::new(20.0, 20.0, 180.0, 48.0);
         let root_id = pf_scene::NodeId::new("sliver-occlusion-probe").unwrap();

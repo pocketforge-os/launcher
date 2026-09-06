@@ -5368,24 +5368,52 @@ impl ShellCore {
                     .take(chooser_capacity)
                 {
                     let variant = &item.variants[variant_index];
+                    let title = humanize_identifier(&variant.id);
                     let mut row = node(
                         &format!("chooser-{}", variant.id),
                         Role::Button,
-                        &format!("{} · Ready", humanize_identifier(&variant.id)),
+                        &format!("{title} · Ready"),
                         chooser_left,
                         chooser_top
                             + (choice - chooser_start) as f32
                                 * (chooser_row_height + chooser_row_gap),
                         chooser_width,
                         chooser_row_height,
-                        if self.focus == choice {
-                            STATE_FOCUSED_RING_TOKEN
-                        } else {
-                            STATE_REST_SURFACE_TOKEN
-                        },
+                        STATE_REST_SURFACE_TOKEN,
                     );
                     row.state.focused = self.focus == choice;
                     row.action = Some(NodeAction::Activate);
+                    // Keep both painted lines inside the card. Relying on the renderer's
+                    // implicit button label let its content layout escape below the 54px
+                    // surface, visually splitting the fill from its label.
+                    row.children.push(
+                        node(
+                            &format!("chooser-{}-title", variant.id),
+                            Role::Text,
+                            &title,
+                            row.bounds.x + 16.0,
+                            row.bounds.y + 6.0,
+                            row.bounds.width - 32.0,
+                            24.0,
+                            row.style_token.as_str(),
+                        )
+                        .with_type_role(TypeRole::Label)
+                        .with_ink_token(COLOR_TEXT_PRIMARY_TOKEN),
+                    );
+                    row.children.push(
+                        node(
+                            &format!("chooser-{}-status", variant.id),
+                            Role::Text,
+                            "· Ready",
+                            row.bounds.x + 16.0,
+                            row.bounds.y + 29.0,
+                            row.bounds.width - 32.0,
+                            22.0,
+                            row.style_token.as_str(),
+                        )
+                        .with_type_role(TypeRole::Caption)
+                        .with_ink_token(COLOR_TEXT_MUTED_TOKEN),
+                    );
                     out.push(row);
                 }
             } else {
@@ -6020,8 +6048,8 @@ impl ShellCore {
                 let control_width = segment_widths.iter().sum::<f32>();
                 let control_left = content_left + content_width - 24.0 - control_width;
                 let control_top = scene_row.bounds.y + 20.0 * scale;
-                let control_height = scaled_text_box_height(34.0, self.text_scale);
-                fills.push(node(
+                let control_height = 35.0 * scale;
+                let mut control = node(
                     "settings-text-scale-segmented-control",
                     Role::Group,
                     "",
@@ -6030,21 +6058,21 @@ impl ShellCore {
                     control_width,
                     control_height,
                     SCENE_TRANSPARENT_TOKEN,
-                ));
+                )
+                .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
                 for (segment, value) in ["100%", "150%", "200%"].into_iter().enumerate() {
                     let selected = selected_value == value;
                     let x = control_left + segment_widths[..segment].iter().sum::<f32>();
                     let segment_width = segment_widths[segment];
                     let value_width = value_widths[segment];
-                    let segment_radius = RADIUS_S * scale;
                     let mut chip = node(
                         &format!("settings-text-scale-chip-{value}"),
                         Role::Group,
                         "",
-                        x + 2.0,
-                        control_top,
-                        segment_width - 4.0,
-                        control_height,
+                        x + 1.0,
+                        control_top + 1.0,
+                        segment_width - if segment == 2 { 2.0 } else { 1.0 },
+                        control_height - 2.0,
                         // Active segment: warm accent base for the ramped bottom underline;
                         // the inner overlay layer re-covers all but that band (shell.css
                         // .seg .opt[data-state="selected"] surface-overlay + inset 0 -3px 0
@@ -6055,9 +6083,7 @@ impl ShellCore {
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
-                    )
-                    .with_corner_radius(segment_radius)
-                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0);
+                    );
                     if selected {
                         chip.children.push(selected_underline_inner(
                             &format!("settings-text-scale-chip-{value}-underline"),
@@ -6065,18 +6091,19 @@ impl ShellCore {
                             chip.bounds.y,
                             chip.bounds.width,
                             chip.bounds.height,
-                            segment_radius,
-                            1.0,
+                            0.0,
+                            0.0,
                             COLOR_SURFACE_OVERLAY_TOKEN,
                         ));
                     }
-                    fills.push(chip);
                     let mut value_node = node(
                         &format!("settings-text-scale-value-{value}"),
                         Role::Text,
                         value,
                         x + (segment_width - value_width) / 2.0,
-                        scene_row.bounds.y + 24.0 * scale,
+                        control_top
+                            + (control_height - scaled_text_box_height(26.0, self.text_scale))
+                                / 2.0,
                         value_width,
                         scaled_text_box_height(26.0, self.text_scale),
                         // Declares the surface the value paints over — the overlay underlay of
@@ -6098,7 +6125,21 @@ impl ShellCore {
                     });
                     value_node.state.focused = false;
                     text.push(value_node);
+                    control.children.push(chip);
+                    if segment < 2 {
+                        control.children.push(node(
+                            &format!("settings-text-scale-separator-{segment}"),
+                            Role::Group,
+                            "",
+                            x + segment_width,
+                            control_top + 1.0,
+                            1.0,
+                            control_height - 2.0,
+                            COLOR_BORDER_HAIRLINE_TOKEN,
+                        ));
+                    }
                 }
+                fills.push(control);
             } else if is_toggle {
                 let on = lines.last().is_some_and(|line| line.starts_with("ON"));
                 let state = if on { "ON" } else { "OFF" };
@@ -10666,14 +10707,10 @@ mod tests {
                         STATE_REST_SURFACE_TOKEN
                     }
                 );
-                // Every segment keeps a plain hairline border (no ring-colored border on the
-                // active one) and NEVER the renderer's left-bar accent (state.selected). The
-                // active segment carries the bottom-underline inner layer over the overlay fill.
-                assert_eq!(
-                    chip.border_token.as_deref(),
-                    Some(COLOR_BORDER_HAIRLINE_TOKEN)
-                );
-                assert!((chip.border_width - 1.0).abs() < f32::EPSILON);
+                // Segments are flush interior regions. The single parent owns the rounded
+                // hairline border; individual regions never create detached outlines.
+                assert_eq!(chip.border_token, None);
+                assert!((chip.border_width).abs() < f32::EPSILON);
                 assert!(
                     !chip.state.selected,
                     "segment must not use the renderer left bar"
@@ -19064,7 +19101,7 @@ mod tests {
     }
 
     #[test]
-    fn text_scale_values_are_individual_bordered_chips() {
+    fn text_scale_values_are_flush_children_of_one_bordered_container() {
         let mut core = core();
         core.load_preferences(&preferences(true), true).unwrap();
         core.go(Route::Settings);
@@ -19080,14 +19117,32 @@ mod tests {
                 "",
             )
             .unwrap();
+        let control = node_by_id(scene.root(), "settings-text-scale-segmented-control").unwrap();
+        assert!(control.corner_radius > 0.0);
+        assert_eq!(
+            control.border_token.as_deref(),
+            Some(COLOR_BORDER_HAIRLINE_TOKEN)
+        );
+        let mut previous_right = control.bounds.x + 1.0;
         for value in ["100%", "150%", "200%"] {
             let chip =
                 node_by_id(scene.root(), &format!("settings-text-scale-chip-{value}")).unwrap();
-            assert!(chip.corner_radius > 0.0);
-            assert_eq!(
-                chip.border_token.as_deref(),
-                Some(COLOR_BORDER_HAIRLINE_TOKEN)
+            assert!(chip.corner_radius.abs() < f32::EPSILON);
+            assert_eq!(chip.border_token, None);
+            assert!(
+                (chip.bounds.x - previous_right).abs() < f32::EPSILON,
+                "segments must be flush"
             );
+            let label = node_by_id(scene.root(), &format!("settings-text-scale-value-{value}"))
+                .expect("segmented control has a painted label");
+            assert!(label.bounds.x > chip.bounds.x);
+            assert!(label.bounds.y > chip.bounds.y);
+            assert!(label.bounds.x + label.bounds.width < chip.bounds.x + chip.bounds.width);
+            assert!(label.bounds.y + label.bounds.height < chip.bounds.y + chip.bounds.height);
+            previous_right = chip.bounds.x + chip.bounds.width;
+            if value != "200%" {
+                previous_right += 1.0; // the full-height separator occupies the join
+            }
         }
     }
 
@@ -19150,6 +19205,20 @@ mod tests {
                     if node.id.as_str().starts_with("chooser-variant-") {
                         assert_eq!(node.role, Role::Button);
                         assert_eq!(node.action, Some(NodeAction::Activate));
+                        assert_eq!(node.children.len(), 2);
+                        for label in &node.children {
+                            assert_eq!(label.role, Role::Text);
+                            assert!(label.bounds.x > node.bounds.x);
+                            assert!(label.bounds.y > node.bounds.y);
+                            assert!(
+                                label.bounds.x + label.bounds.width
+                                    < node.bounds.x + node.bounds.width
+                            );
+                            assert!(
+                                label.bounds.y + label.bounds.height
+                                    < node.bounds.y + node.bounds.height
+                            );
+                        }
                     }
                 }
                 let focused_id = format!("chooser-variant-{focus}");

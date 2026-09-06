@@ -312,6 +312,9 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
+        // tsp-op5a.409 intentionally rebaselines variant-chooser only: each option now
+        // paints its explicit title/status inside one resting card, with focus supplied
+        // by state.focused instead of using the focus-ring color as the card fill.
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
@@ -335,7 +338,7 @@ fn vertical_slice_frame_hashes_are_stable() {
         "26c50763d376648892a56f29f795fd764de06cb981735d3001ed6586d790643a  ",
         "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
         "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
-        "e795fa8c509cbfe022388a2f9e16b62f70d761df85f86917fc4c8194b1cbf43e  ",
+        "a7c8323ca95ba5867d0b2e6eac9dfb71a24d8b410f042a5299cc20e010f644eb  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
@@ -419,11 +422,14 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // dashed unavailable outline, and first-run for its outlined PF/A/START teaching
     // chips. These are intentional component-grammar changes, guarded by structural
     // coverage/ink assertions in pf-shell-core.
+    // tsp-op5a.409 intentionally rebaselines settings + settings-edit only: the text-size
+    // selector is now one joined bordered container with flush regions, separators, and a
+    // selected underline. Controls/network/system/first-run remain byte-identical.
     assert!(
-        transcript.contains("cae0516a72da02d1345aa6b53d14c8206db97517d7cfdf30bdd0d3f399093c8f  ")
+        transcript.contains("7dcb76a6a1443e4f8cc637dd7c9c1232330750d975a81695f43541bf8bb077b8  ")
     );
     assert!(
-        transcript.contains("c3888eacfa0780c0f1e46cc652bd2cfca3e72fa575a511e010a7921bace68f29  ")
+        transcript.contains("4e35b0c0d8a71bdfa201a6ff10e0bef09f2683d5bb8b7ac431e5125dae1158f4  ")
     );
     assert!(
         transcript.contains("95f84565193c463326654b34c64810393db64d85ad172f04dbcfa26dac997136  ")

@@ -41,17 +41,17 @@ mod design_manual;
 
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
-    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
-    COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN, COLOR_SURFACE_CANVAS_TOKEN,
-    COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN, COLOR_SURFACE_SCRIM_TOKEN,
-    COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN,
-    COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH,
-    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2,
-    SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_FOCUS_RING_TOKEN,
+    COLOR_STATUS_ATTENTION_TOKEN, COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN,
+    COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
+    COLOR_SURFACE_SCRIM_TOKEN, COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN,
+    COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT,
+    KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT,
+    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING,
+    ROOM_STRIP_GAP, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN,
+    STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN,
+    STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN,
+    STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -146,6 +146,15 @@ fn library_prompt_verb_width(text: &str) -> f32 {
 
 fn text_node_box_width(content_advance: f32) -> f32 {
     content_advance + 2.0 * TEXT_NODE_INLINE_INSET
+}
+
+fn join_metadata_fields(fields: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    fields
+        .into_iter()
+        .map(|field| field.as_ref().trim().to_owned())
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn scaled_text_box_height(base_height: f32, text_scale: u16) -> f32 {
@@ -3822,7 +3831,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Starting · {kind} · {cue}")
+                            join_metadata_fields(["● Starting", kind, cue])
                         }
                         Availability::Ready => {
                             let cue = item
@@ -3833,7 +3842,7 @@ impl ShellCore {
                                     "Source availability unknown",
                                     ready_variant_capability_cue,
                                 );
-                            format!("● Ready · {kind} · {cue}")
+                            join_metadata_fields(["● Ready", kind, cue])
                         }
                         Availability::NeedsSetup { .. } => format!("⊘ Needs setup · {kind}"),
                         Availability::NeedsNetwork { .. } => {
@@ -3846,12 +3855,13 @@ impl ShellCore {
                     }
                 },
             );
-            let hero_status = format!(
-                "{}{}",
-                hero_status,
-                focused
-                    .and_then(|item| item.playtime_fact.as_deref())
-                    .map_or(String::new(), |fact| format!(" · {fact}"))
+            let hero_status = join_metadata_fields(
+                [
+                    Some(hero_status.as_str()),
+                    focused.and_then(|item| item.playtime_fact.as_deref()),
+                ]
+                .into_iter()
+                .flatten(),
             );
             let vertical = home_vertical_layout(self.text_scale);
             let hero_title_height = scaled_text_box_height(72.0, self.text_scale);
@@ -3922,11 +3932,13 @@ impl ShellCore {
             // wider than the conservative label advance, so a tight box wraps it
             // (the single-line raster guard rejects that). SPACE_5 of slack keeps
             // "● Ready" et al. on one line while the meta run still follows closely.
-            let status_lead_width = (text_node_box_width(measured_text_advance(
-                label_text_width(status_lead),
+            let status_lead_advance = text_node_box_width(measured_text_advance(
+                label_text_width(lead_display),
                 self.text_scale,
-            )) + SPACE_5)
-                .min(hero_status_width);
+            ));
+            let status_lead_width = (status_lead_advance
+                + measured_text_advance(SPACE_5, self.text_scale))
+            .min(hero_status_width);
             let mut hero_status_children = Vec::new();
             if ready_dot {
                 hero_status_children.push(status_dot_node(
@@ -3955,9 +3967,9 @@ impl ShellCore {
                     "hero-status-meta",
                     Role::Text,
                     status_meta,
-                    48.0 + status_lead_width,
+                    48.0 + lead_offset + status_lead_advance,
                     vertical.status_y,
-                    (hero_status_width - status_lead_width).max(0.0),
+                    (hero_status_width - lead_offset - status_lead_advance).max(0.0),
                     hero_status_height,
                     SCENE_TRANSPARENT_TOKEN,
                 )
@@ -5014,10 +5026,19 @@ impl ShellCore {
                 )
             };
             let availability = if matches!(detail_availability, Availability::Ready) {
-                [item.last_played_fact.as_deref(), item.size_fact.as_deref()]
+                let last_played = item
+                    .last_played_fact
+                    .as_deref()
+                    .map(|fact| format!("Last played {fact}"));
+                join_metadata_fields(
+                    [
+                        Some(availability.as_str()),
+                        last_played.as_deref(),
+                        item.size_fact.as_deref(),
+                    ]
                     .into_iter()
-                    .flatten()
-                    .fold(availability, |status, fact| format!("{status} · {fact}"))
+                    .flatten(),
+                )
             } else {
                 availability
             };
@@ -5045,10 +5066,8 @@ impl ShellCore {
                     COLOR_SURFACE_CANVAS_TOKEN,
                 );
                 let lead_x = detail_column_left + 16.0;
-                let lead_width = (text_node_box_width(measured_text_advance(
-                    label_text_width(lead),
-                    self.text_scale,
-                )) + SPACE_5)
+                let lead_advance = text_node_box_width(caption_text_width(lead, self.text_scale));
+                let lead_width = (lead_advance + measured_text_advance(SPACE_5, self.text_scale))
                     .min(detail_column_width - 16.0);
                 container.children.push(status_dot_node(
                     "detail-availability-dot",
@@ -5075,9 +5094,9 @@ impl ShellCore {
                         "detail-availability-meta",
                         Role::Text,
                         meta,
-                        lead_x + lead_width,
+                        lead_x + lead_advance,
                         availability_top,
-                        (detail_column_width - lead_width - 16.0).max(0.0),
+                        (detail_column_width - lead_advance - 16.0).max(0.0),
                         availability_height,
                         SCENE_TRANSPARENT_TOKEN,
                     )
@@ -5433,9 +5452,12 @@ impl ShellCore {
                     } else {
                         "Choose how to play"
                     };
+                    // shell.css `.btn` uses the wider primary-action rhythm from the
+                    // detail mockup. Keep the reserve explicit here because the scene
+                    // graph is absolute-positioned rather than CSS-laid out.
                     let open_width =
                         (measured_text_advance(label_text_width(open_label), self.text_scale)
-                            + 48.0)
+                            + 72.0)
                             .min(detail_column_width);
                     let mut open = node(
                         "detail-open",
@@ -5445,21 +5467,33 @@ impl ShellCore {
                         buttons_top,
                         open_width,
                         54.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
-                    );
+                        COLOR_FOCUS_RING_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_FOCUS_RING_TOKEN, 1.0)
+                    // The parent owns the accessible name; visible ink is composed by
+                    // the child so it is not painted twice at Body weight underneath.
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
                     let mut open_label_node = node(
                         "detail-open-label",
                         Role::Text,
-                        &open.accessible_label,
-                        open.bounds.x + 16.0,
+                        if open_label == "▶ Play" {
+                            // The scene text run has no inline-flex gap primitive;
+                            // three shaped spaces reproduce the mockup's 12px glyph gap.
+                            "▶   Play"
+                        } else {
+                            open_label
+                        },
+                        open.bounds.x + 12.0,
                         open.bounds.y + 13.0,
-                        open.bounds.width - 32.0,
+                        open.bounds.width - 24.0,
                         28.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
+                        COLOR_FOCUS_RING_TOKEN,
                     )
                     .with_type_role(TypeRole::Label)
+                    .with_text_align(TextAlign::Center)
                     .with_ink_token(COLOR_TEXT_INVERSE_TOKEN);
                     open_label_node.state.focused = open.state.focused;
                     open.children.push(open_label_node);
@@ -5494,7 +5528,10 @@ impl ShellCore {
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
-                    );
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5502,13 +5539,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             pin_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
@@ -5537,8 +5575,11 @@ impl ShellCore {
                         detail_wrap_top + 388.0,
                         detail_column_width,
                         54.0,
-                        STATE_FOCUSED_RING_TOKEN,
-                    );
+                        STATE_REST_SURFACE_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5546,13 +5587,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             &pin.accessible_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     detail_wrap_top + 442.0
@@ -14719,6 +14761,74 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // Scene geometry is assigned directly from these constants.
+    fn detail_actions_keep_primary_and_outline_button_treatment() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("native", "ready", Availability::Ready)],
+            ),
+            item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant(
+                    "stream",
+                    "offline",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                )],
+            ),
+        ]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let ready = core.scene(metrics, "").unwrap();
+        let play = find(ready.root(), "detail-open").unwrap();
+        assert_eq!(play.style_token, COLOR_FOCUS_RING_TOKEN);
+        assert_eq!(play.border_token.as_deref(), Some(COLOR_FOCUS_RING_TOKEN));
+        assert_eq!(play.border_width, 1.0);
+        assert_eq!(play.corner_radius, RADIUS_M);
+        assert!(
+            play.bounds.width >= 120.0,
+            "Play must retain wide CTA padding"
+        );
+        assert_eq!(
+            find(play, "detail-open-label").unwrap().type_role,
+            TypeRole::Label,
+            "Play must use the semibold button-label role rather than regular Body"
+        );
+
+        core.selected_item = Some(1);
+        let unavailable = core.scene(metrics, "").unwrap();
+        for pin in [
+            find(ready.root(), "detail-pin").unwrap(),
+            find(unavailable.root(), "detail-pin").unwrap(),
+        ] {
+            assert_eq!(pin.corner_radius, RADIUS_M);
+            assert_eq!(
+                pin.border_token.as_deref(),
+                Some(COLOR_BORDER_HAIRLINE_TOKEN)
+            );
+            assert_eq!(pin.border_width, 1.0);
+            assert_eq!(pin.style_token, STATE_REST_SURFACE_TOKEN);
+        }
+    }
+
+    #[test]
     fn details_selection_focus_and_play_follow_the_launchable_variant() {
         let mut core = fixture_core(vec![item(
             "game",
@@ -16247,7 +16357,10 @@ mod tests {
             )
             .unwrap();
         let prompts = node_by_id(scene.root(), "prompts").unwrap();
-        assert!(!prompts.accessible_label.contains('·'));
+        assert_eq!(
+            prompts.accessible_label,
+            "SELECT Search · Y Filter · A Details"
+        );
         assert!(
             !prompts
                 .children
@@ -17028,7 +17141,7 @@ mod tests {
             node_by_id(scene.root(), "prompts")
                 .unwrap()
                 .accessible_label,
-            "SELECT Search     Y Filter     A Details"
+            "SELECT Search · Y Filter · A Details"
         );
 
         core.action(&ShellAction::Custom("Filter.next".into()));
@@ -19179,6 +19292,18 @@ mod tests {
             node_by_id(root, "detail-title").unwrap().type_role,
             TypeRole::Title
         );
+        assert_eq!(
+            node_by_id(root, "detail-availability-reason")
+                .unwrap()
+                .accessible_label,
+            "● Ready · Last played Yesterday · 2.4 GB"
+        );
+        assert_eq!(
+            node_by_id(root, "detail-availability-meta")
+                .unwrap()
+                .accessible_label,
+            " · Last played Yesterday · 2.4 GB"
+        );
         let first = node_by_id(root, "detail-variant-0").unwrap();
         let second = node_by_id(root, "detail-variant-1").unwrap();
         assert!(first.bounds.y + first.bounds.height < second.bounds.y);
@@ -19209,6 +19334,18 @@ mod tests {
         assert!(
             prompt_right > 1200.0,
             "prompt keycaps must remain right-aligned"
+        );
+    }
+
+    #[test]
+    fn metadata_fields_join_without_a_leading_or_doubled_separator() {
+        assert_eq!(
+            join_metadata_fields(["Ready", "Game", "Installed"]),
+            "Ready · Game · Installed"
+        );
+        assert_eq!(
+            join_metadata_fields(["Ready", "", "Installed"]),
+            "Ready · Installed"
         );
     }
 

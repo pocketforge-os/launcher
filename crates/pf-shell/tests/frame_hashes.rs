@@ -314,9 +314,14 @@ fn vertical_slice_frame_hashes_are_stable() {
         // parents; the union combines independent Search and terminal-summary pixels.
         // tsp-op5a.407 rebaselines the footer pixels on every route after unifying
         // badge chrome, restoring the per-route verbs, and correcting chip spacing.
-        "0ae9a31362904087be902f5af1d4e16f346edf388d61f961d9a5bb97d2e73315  ",
-        "dc1f893591856cc9468a117a40be210071890175b3f5d496b6bf7178ea3db6aa  ",
-        "838241ba380301c1e82f89845031988cb9729a4a3c616fd38422b6426ad367b6  ",
+        // tsp-op5a.408 rebaselines the five Home-backed frames after removing the
+        // hidden bullet-width reserve between the styled status lead and metadata.
+        // tsp-q0k8t records their union: boot-home, focus-moved, launch-dimmed,
+        // returned, and safe-return-crash combine .407's footer with .408's metadata
+        // spacing; quick-power changes only for .407's footer.
+        "2cc632f0ae6625263bde438fc7c75adc80c691a940cc9f8e878555e84a152165  ",
+        "83b6895791847eea1b9aa1932906666ca5b8f5ebd5a45e46d97596516557f423  ",
+        "a3236c423b7590de4fc27afc9dc5cda5643bc2edb27f3b156ab5a1868dfea4dd  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -327,23 +332,29 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "c85079b4a80f85d70356b25d08b6371ef8c164d2b5637171ccc7f2c09fc7dad3  ",
-        "e5b113296fc81517325716d60fd10cb06c8731c5e07c08e3182ab22017c12117  ",
+        "5407418787967132733408c64e65ef7f24495a0dc7155c7ed9add6894d78c775  ",
+        "51c0a79f1b7194c0667164e6ca8c3c513aea0e65764d8495f7018a89949bb537  ",
         "24a4814e5f9df18b2a5d4887db781b65ab851a40d54756226955be95bf7c0d2b  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
+        // Library, focused Library, and Search change only for .407's route hints.
         "d7ae1d1c67e9adade81ba8c1fb8109ea9d86e5fa147441550194b8484797e792  ",
         "9631d37bceb75d2b1008316ed43d72a79faf4f550e0afc9c17f6b449acb059f9  ",
         "b73943e33c1a6f062564042ef5ca7b07795f761dfe607f4af52c750cf2205e24  ",
-        "ee44ff799ec375c1bfd4b5c16d1c3fa136124c8ac288b7b0dc3fb8b5216a5efd  ",
-        "4b2f650d8d67552f80590acf5c7471f132a839bb2740c2bd0cf87852644333f6  ",
+        // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
+        // accent with wide rounded primary geometry, while Pin is a rounded outline
+        // button on both ready and unavailable routes. Details and Details Unavailable
+        // change for that .405 CTA repaint (their regenerated union pixels equal
+        // main); Variant Chooser changes only for .407's hint footer.
+        "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
+        "4f8cbd2d1bfa86f5c338e0efcdcdc972e02aa11874644d5e8d73eb8d33a8f41c  ",
         "0af05320a447e85d2a99db4b189cfb75de30dd2f704134195cddea9a75f63a4a  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("dc1f8935"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("83b68957"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("c85079b4"),
+        lines.lines().nth(3).unwrap().starts_with("54074187"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -464,8 +475,11 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
     // tsp-op5a.407 rebaselines it for corrected keycap padding and PF chip geometry.
+    // tsp-op5a.408 rebaselines the degraded-session Home frame for the corrected
+    // styled-status-to-metadata spacing.
+    // tsp-q0k8t combines that spacing with .407's corrected hint badge geometry.
     assert!(
-        transcript.contains("236e4cf93b4cd3d4a358e325c44d058c2775141029f6a0b9d886e55cd7d51315  ")
+        transcript.contains("afa66e1103b863cb4c228b238140f5ca614606379f8549aaed3eaf25d2bc0104  ")
     );
 }
 

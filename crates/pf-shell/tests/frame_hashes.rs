@@ -302,11 +302,10 @@ fn vertical_slice_frame_hashes_are_stable() {
         "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
         "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
         "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
-        // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.416
-        // rebaselines both after making their Home backdrop inert, leaving the summary
-        // as the only focused treatment.
-        "995fe8da2064728ad76d71c5fc5347faecd7e1d06de7a0f5c0a3949244bf7eac  ",
-        "cbe90805fea5c5b337c188335d3d527f7b60e01218be8105dac29f7b5c5a2487  ",
+        // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
+        // rebaselines both after moving the inert Home footer below the summary dim.
+        "12716eb15efd92fb060dc8e66334d612e9e07c436f0dc761c3913816b151a1e9  ",
+        "b4524b15936e140e6ff13501302f9fa20ecc6662e9f96efae37aa3012f71a4b3  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -321,7 +320,7 @@ fn vertical_slice_frame_hashes_are_stable() {
     }
     assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("995fe8da"),
+        lines.lines().nth(3).unwrap().starts_with("12716eb1"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(

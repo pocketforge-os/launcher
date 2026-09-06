@@ -88,6 +88,51 @@ fn focused_library_search_evidence_applies_a_distinct_focused_state() {
     );
 }
 
+#[test]
+fn every_stateful_evidence_route_differs_from_its_base_route() {
+    let default = tempfile::tempdir().unwrap();
+    render_evidence_set(default.path(), &[]);
+    let settings = tempfile::tempdir().unwrap();
+    render_evidence_set(settings.path(), &["--settings-evidence"]);
+
+    let pairs = [
+        (default.path(), "library-focused-search", "library"),
+        (default.path(), "launch-dimmed", "focus-moved"),
+        (default.path(), "details-unavailable", "details"),
+        (default.path(), "returned", "focus-moved"),
+        (settings.path(), "settings-edit", "settings"),
+        (default.path(), "focus-moved", "boot-home"),
+    ];
+    for (directory, stateful, base) in pairs {
+        assert_ne!(
+            std::fs::read(directory.join(format!("{stateful}.png"))).unwrap(),
+            std::fs::read(directory.join(format!("{base}.png"))).unwrap(),
+            "stateful evidence route {stateful} must not duplicate its base route {base}"
+        );
+    }
+
+    let unavailable =
+        std::fs::read_to_string(default.path().join("details-unavailable.semantic.txt")).unwrap();
+    assert!(
+        unavailable.contains("detail-availability-reason")
+            && unavailable.contains("Network required"),
+        "details-unavailable must expose an unavailable availability reason"
+    );
+    let detail_open = unavailable
+        .lines()
+        .find(|line| line.trim_start().starts_with("detail-open "));
+    assert!(
+        detail_open.is_none(),
+        "details-unavailable must not expose the detail-open Play control"
+    );
+    assert!(
+        !unavailable.lines().any(|line| {
+            line.contains("label=\"▶ Play\"") && line.contains("action=Some(Activate)")
+        }),
+        "details-unavailable must not expose an activatable Play control"
+    );
+}
+
 // Split per evidence route-set so the two subprocess renders schedule as separate
 // tests (was one fn looping both arg-sets, spawning them back-to-back). Routing
 // through `frame_hash_command` keeps the exact command the old inline build produced
@@ -344,10 +389,16 @@ fn vertical_slice_frame_hashes_are_stable() {
         // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
         // accent with wide rounded primary geometry, while Pin is a rounded outline
         // button on both ready and unavailable routes. Details and Details Unavailable
-        // change for that .405 CTA repaint (their regenerated union pixels equal
-        // main); Variant Chooser changes only for .407's hint footer.
+        // change for that .405 CTA repaint. tsp-op5a.410 additionally changes only
+        // Details Unavailable: the emitter selects the mutated Steam Link fixture by
+        // identity, so the frame combines main's outlined Pin CTA and .407 hint footer
+        // with the intended network-unavailable reason, muted way-to-play row, and no
+        // Play action. tsp-01crq rebaselines that frame again because its way-to-play
+        // row now exports the unavailable state structurally while its visual content
+        // retains explicit legibility ink. Variant Chooser changes only for .407's
+        // hint footer.
         "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
-        "4f8cbd2d1bfa86f5c338e0efcdcdc972e02aa11874644d5e8d73eb8d33a8f41c  ",
+        "b0d3bbc743ba0ee41bac2fcd7255f156aecfb4b957e5eb502825fa491eec788e  ",
         "0af05320a447e85d2a99db4b189cfb75de30dd2f704134195cddea9a75f63a4a  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

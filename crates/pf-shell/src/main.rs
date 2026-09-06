@@ -7,15 +7,15 @@ use pf_framehost::{FbdevHost, OffscreenHost};
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
-    ActionEvent, ActionPoll, AppliedNetworkEnabled, AppliedTransferState, AppliedValue,
-    ChangeAuthority, Deadline, EffectivePreference, FakeNetworkPort, FakePowerPort,
-    FakePreferencePort, FakeTimePort, FakeTransferPort, FrameHost, IdlePolicy, LaunchResult,
-    MonotonicTime, NetworkError, NetworkPort, NetworkState, NtpState, ObservedSessionState,
-    PowerAction, PowerCapability, PowerError, PowerPort, PowerRequestResult, PreferenceChange,
-    PreferenceChangeResult, PreferenceError, PreferenceKey, PreferencePoll, PreferencePort,
-    PreferenceValue, SessionError, SessionEvent, SessionPoll, SessionPort, ShellAction, Support,
-    TerminalReceipt, TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort,
-    TransferService, TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
+    AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Deadline,
+    EffectivePreference, FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort,
+    FakeTransferPort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime, NetworkError,
+    NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
+    PowerError, PowerPort, PowerRequestResult, PreferenceChange, PreferenceChangeResult,
+    PreferenceError, PreferenceKey, PreferencePoll, PreferencePort, PreferenceValue, SessionError,
+    SessionEvent, SessionPoll, SessionPort, ShellAction, Support, TerminalReceipt,
+    TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort, TransferService,
+    TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -1215,10 +1215,25 @@ fn env_dimension(name: &str, default: u32) -> Result<u32, String> {
 }
 
 trait InteractiveInput<H> {
-    fn next_action(&mut self, host: &mut H, deadline: Deadline) -> Result<ActionPoll, String>;
+    fn next_action(
+        &mut self,
+        host: &mut H,
+        deadline: Deadline,
+        latency_trace: Option<&LatencyTrace>,
+    ) -> Result<DecodedActionPoll, String>;
     fn capture_next_button(&mut self);
     fn apply_effective_map(&mut self, map: &EffectiveMap);
     fn has_pending(&self) -> bool;
+}
+
+#[derive(Debug, PartialEq)]
+enum DecodedActionPoll {
+    Event {
+        action: ShellAction,
+        ingress_us: Option<u64>,
+    },
+    DeadlineReached,
+    Closed,
 }
 
 trait EvdevHost {
@@ -1233,7 +1248,7 @@ impl EvdevHost for FbdevHost {}
 struct EvdevInteractiveInput<'a> {
     source: &'a mut EvdevActionSource,
     repeat: KeyRepeatScheduler,
-    pending: VecDeque<ShellAction>,
+    pending: VecDeque<(ShellAction, Option<u64>)>,
     started: Instant,
 }
 
@@ -1249,14 +1264,20 @@ impl<'a> EvdevInteractiveInput<'a> {
 }
 
 impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
-    fn next_action(&mut self, host: &mut H, deadline: Deadline) -> Result<ActionPoll, String> {
+    fn next_action(
+        &mut self,
+        host: &mut H,
+        deadline: Deadline,
+        latency_trace: Option<&LatencyTrace>,
+    ) -> Result<DecodedActionPoll, String> {
         host.service();
         if host.closed() {
-            return Ok(ActionPoll::Closed);
+            return Ok(DecodedActionPoll::Closed);
         }
         let now = self.started.elapsed();
         match self.source.next_input_event(deadline) {
             Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
+                let ingress_us = latency_trace.map(LatencyTrace::now_us);
                 self.repeat.transition(
                     u32::from(code),
                     true,
@@ -1264,7 +1285,8 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
                     now,
                     EVDEV_REPEAT_DELAY,
                 );
-                self.pending.extend(action);
+                self.pending
+                    .extend(action.map(|action| (action, ingress_us)));
             }
             Ok(Some(EvdevInputEvent::Released { code })) => {
                 self.repeat
@@ -1281,13 +1303,16 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
                 return Err(format!("input: {error:?}"));
             }
         }
-        self.pending
-            .extend(self.repeat.due(now, EVDEV_REPEAT_INTERVAL));
-        self.pending
-            .pop_front()
-            .map_or(Ok(ActionPoll::DeadlineReached), |action| {
-                Ok(ActionPoll::Event(ActionEvent::Action(action)))
-            })
+        self.pending.extend(
+            self.repeat
+                .due(now, EVDEV_REPEAT_INTERVAL)
+                .into_iter()
+                .map(|action| (action, latency_trace.map(LatencyTrace::now_us))),
+        );
+        self.pending.pop_front().map_or(
+            Ok(DecodedActionPoll::DeadlineReached),
+            |(action, ingress_us)| Ok(DecodedActionPoll::Event { action, ingress_us }),
+        )
     }
 
     fn capture_next_button(&mut self) {
@@ -1310,7 +1335,7 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
 struct WaylandInteractiveInput {
     map: EffectiveMap,
     repeat: KeyRepeatScheduler,
-    pending: VecDeque<ShellAction>,
+    pending: VecDeque<(ShellAction, Option<u64>)>,
     started: Instant,
 }
 
@@ -1423,11 +1448,16 @@ impl WaylandInteractiveInput {
 
 #[cfg(feature = "wayland")]
 impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
-    fn next_action(&mut self, host: &mut H, _deadline: Deadline) -> Result<ActionPoll, String> {
+    fn next_action(
+        &mut self,
+        host: &mut H,
+        _deadline: Deadline,
+        latency_trace: Option<&LatencyTrace>,
+    ) -> Result<DecodedActionPoll, String> {
         if host.is_closed() {
             self.repeat.clear();
             self.pending.clear();
-            return Ok(ActionPoll::Closed);
+            return Ok(DecodedActionPoll::Closed);
         }
         let repeat_info = host.repeat_info().unwrap_or(RepeatInfo {
             rate: 25,
@@ -1457,15 +1487,22 @@ impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
                 repeat_delay,
             );
             if event.state == KeyState::Pressed {
-                self.pending.extend(action);
+                let ingress_us = latency_trace.map(LatencyTrace::now_us);
+                self.pending
+                    .extend(action.map(|action| (action, ingress_us)));
             }
         }
-        self.pending.extend(self.repeat.due(now, repeat_interval));
-        if let Some(action) = self.pending.pop_front() {
-            Ok(ActionPoll::Event(ActionEvent::Action(action)))
+        self.pending.extend(
+            self.repeat
+                .due(now, repeat_interval)
+                .into_iter()
+                .map(|action| (action, latency_trace.map(LatencyTrace::now_us))),
+        );
+        if let Some((action, ingress_us)) = self.pending.pop_front() {
+            Ok(DecodedActionPoll::Event { action, ingress_us })
         } else {
             thread::sleep(Duration::from_millis(5));
-            Ok(ActionPoll::DeadlineReached)
+            Ok(DecodedActionPoll::DeadlineReached)
         }
     }
 
@@ -1547,13 +1584,13 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             input_source,
             actions.has_pending(),
         )?;
-        let poll = actions.next_action(host, deadline)?;
+        let poll = actions.next_action(host, deadline, latency_trace.as_ref())?;
         if Instant::now() >= next_device_status_refresh {
             core.load_device_status(device_status);
             next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
         }
-        let ActionPoll::Event(ActionEvent::Action(action)) = poll else {
-            if matches!(poll, ActionPoll::Closed) {
+        let DecodedActionPoll::Event { action, ingress_us } = poll else {
+            if matches!(poll, DecodedActionPoll::Closed) {
                 return Ok(());
             }
             if before != redraw_state(core) && present_interactive(host, core, &activate)? {
@@ -1562,7 +1599,6 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
             continue;
         };
-        let ingress_us = latency_trace.as_ref().map(LatencyTrace::now_us);
         let trace_scene_before = latency_trace
             .as_ref()
             .map(|_| format!("{:?}", core.scene(host.metrics(), &activate)));
@@ -7257,9 +7293,9 @@ mod durable_tests {
 
         assert_eq!(
             input
-                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
                 .unwrap(),
-            ActionPoll::Closed
+            DecodedActionPoll::Closed
         );
 
         let snapshot: CatalogSnapshot =
@@ -7301,9 +7337,9 @@ mod durable_tests {
         let mut input = EvdevInteractiveInput::new(&mut source);
         assert_eq!(
             input
-                .next_action(&mut ClosedHost, Deadline(MonotonicTime::ZERO))
+                .next_action(&mut ClosedHost, Deadline(MonotonicTime::ZERO), None)
                 .unwrap(),
-            ActionPoll::Closed
+            DecodedActionPoll::Closed
         );
     }
 
@@ -7323,11 +7359,12 @@ mod durable_tests {
 
         assert!(matches!(
             input
-                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
                 .unwrap(),
-            ActionPoll::Event(ActionEvent::Action(ShellAction::Move(
-                pf_scene::AxisMove::Up
-            )))
+            DecodedActionPoll::Event {
+                action: ShellAction::Move(pf_scene::AxisMove::Up),
+                ingress_us: None
+            }
         ));
 
         // Keyboard leave/seat loss/reconnect releases have the same KeyEvent shape as
@@ -7339,9 +7376,9 @@ mod durable_tests {
             .expect("one second before now should be representable");
         assert_eq!(
             input
-                .next_action(&mut host, Deadline(MonotonicTime::ZERO))
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
                 .unwrap(),
-            ActionPoll::DeadlineReached
+            DecodedActionPoll::DeadlineReached
         );
         assert!(
             input
@@ -8618,7 +8655,8 @@ exec="./launch"
     }
 
     struct ScriptedInteractiveInput {
-        polls: VecDeque<ActionPoll>,
+        polls: VecDeque<DecodedActionPoll>,
+        stamp_and_delay: Option<Duration>,
     }
 
     impl InteractiveInput<OffscreenHost> for ScriptedInteractiveInput {
@@ -8626,8 +8664,22 @@ exec="./launch"
             &mut self,
             _host: &mut OffscreenHost,
             _deadline: Deadline,
-        ) -> Result<ActionPoll, String> {
-            Ok(self.polls.pop_front().unwrap_or(ActionPoll::Closed))
+            latency_trace: Option<&LatencyTrace>,
+        ) -> Result<DecodedActionPoll, String> {
+            let mut poll = self.polls.pop_front().unwrap_or(DecodedActionPoll::Closed);
+            if let DecodedActionPoll::Event {
+                ingress_us: None, ..
+            } = &mut poll
+            {
+                if let (Some(delay), Some(trace)) = (self.stamp_and_delay.take(), latency_trace) {
+                    let DecodedActionPoll::Event { ingress_us, .. } = &mut poll else {
+                        unreachable!();
+                    };
+                    *ingress_us = Some(trace.now_us());
+                    thread::sleep(delay);
+                }
+            }
+            Ok(poll)
         }
         fn capture_next_button(&mut self) {}
         fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
@@ -8793,7 +8845,7 @@ exec="./launch"
     }
 
     #[test]
-    fn interactive_actions_write_presented_and_filtered_latency_records() {
+    fn interactive_actions_propagate_decode_timestamps_and_include_return_delay() {
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("latency.jsonl");
         let snapshot: CatalogSnapshot =
@@ -8818,14 +8870,21 @@ exec="./launch"
         });
         let mut input = ScriptedInteractiveInput {
             polls: VecDeque::from([
-                ActionPoll::Event(ActionEvent::Action(ShellAction::Move(
-                    pf_scene::AxisMove::Down,
-                ))),
-                ActionPoll::Event(ActionEvent::Action(ShellAction::Custom(
-                    "not-an-action".into(),
-                ))),
-                ActionPoll::Closed,
+                DecodedActionPoll::Event {
+                    action: ShellAction::Move(pf_scene::AxisMove::Down),
+                    ingress_us: Some(42),
+                },
+                DecodedActionPoll::Event {
+                    action: ShellAction::Move(pf_scene::AxisMove::Up),
+                    ingress_us: None,
+                },
+                DecodedActionPoll::Event {
+                    action: ShellAction::Custom("not-an-action".into()),
+                    ingress_us: Some(84),
+                },
+                DecodedActionPoll::Closed,
             ]),
+            stamp_and_delay: Some(Duration::from_millis(20)),
         };
         let mut preferences = fixture_preferences();
         let mut power = FakePowerPort::new(Vec::new(), IdlePolicy::default());
@@ -8864,8 +8923,11 @@ exec="./launch"
             .collect::<Vec<_>>();
         assert_eq!(rows[1]["seq"], 1);
         assert_eq!(rows[2]["seq"], 2);
+        assert_eq!(rows[3]["seq"], 3);
+        assert_eq!(rows[1]["t_ingress_us"], 42);
         assert_eq!(rows[1]["presented"], true);
         assert!(rows[1]["latency_us"].as_u64().unwrap() > 0);
+        assert!(rows[2]["latency_us"].as_u64().unwrap() >= 20_000);
         let filtered = rows
             .iter()
             .skip(1)

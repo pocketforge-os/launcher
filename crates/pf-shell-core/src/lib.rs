@@ -3253,6 +3253,43 @@ impl ShellCore {
                 // the summary controls.
                 let backdrop_start = children.len();
                 scene_core.route_nodes(&mut children, metrics);
+                let backdrop_footer =
+                    scene_core
+                        .focused_item_index()
+                        .map_or_else(String::new, |item| {
+                            let mut prompts = scene_core
+                                .binding_prompt("Search.open", "Search")
+                                .into_iter()
+                                .collect::<Vec<_>>();
+                            if let Some(prompt) = scene_core.binding_prompt("Quick", "Quick") {
+                                prompts.push(prompt);
+                            }
+                            if let Some(prompt) = scene_core.binding_prompt(
+                                "Activate",
+                                if scene_core.ready_variants(item).is_empty() {
+                                    "Details"
+                                } else {
+                                    "Open"
+                                },
+                            ) {
+                                prompts.push(prompt);
+                            }
+                            let global_prompts = footer
+                                .split_once("     ")
+                                .map_or(footer, |(_, global)| global);
+                            if !global_prompts.is_empty() {
+                                prompts.push(global_prompts.to_owned());
+                            }
+                            prompts.join(" · ")
+                        });
+                append_prompt_footer(
+                    &mut children,
+                    Route::Home,
+                    scene_core.text_scale,
+                    w,
+                    h,
+                    &backdrop_footer,
+                );
                 for node in &mut children[backdrop_start..] {
                     make_backdrop_inert(node);
                 }
@@ -3378,61 +3415,21 @@ impl ShellCore {
             }
             _ => supplied_footer,
         };
-        if self.presentation != Presentation::FirstRun {
-            children.push(node(
-                "prompt-bar",
-                Role::Group,
-                "",
-                0.0,
-                h - PROMPTS_AREA_HEIGHT,
-                w,
-                PROMPTS_AREA_HEIGHT,
-                SCENE_TRANSPARENT_TOKEN,
-            ));
-        }
-        let prompt_height = scaled_text_box_height(32.0, scene_core.text_scale);
-        let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
-        let prompt_label = if matches!(scene_core.route, Route::Search | Route::Details) {
-            ""
-        } else {
-            &footer
-        };
-        let mut prompt_node = node(
-            "prompts",
-            if matches!(
-                scene_core.route,
-                Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
-            ) {
-                Role::Group
-            } else {
-                Role::Text
-            },
-            prompt_label,
-            if scene_core.route == Route::Home {
-                w - 660.0
-            } else {
-                w - 600.0
-            },
-            prompt_top,
-            if scene_core.route == Route::Home {
-                612.0
-            } else {
-                552.0
-            },
-            prompt_height,
-            SCENE_TRANSPARENT_TOKEN,
-        )
-        .with_type_role(TypeRole::Label);
-        if scene_core.route == Route::Home {
-            prompt_node.children = home_prompt_nodes(&footer, w, h, scene_core.text_scale);
-        } else if matches!(
-            scene_core.route,
-            Route::Library | Route::Details | Route::Quick | Route::Search
+        if !matches!(
+            self.presentation,
+            Presentation::FirstRun
+                | Presentation::Returned
+                | Presentation::ForcedClose
+                | Presentation::Crash
         ) {
-            prompt_node.children = right_aligned_prompt_nodes(&footer, w, h, scene_core.text_scale);
-        }
-        if self.presentation != Presentation::FirstRun {
-            children.push(prompt_node);
+            append_prompt_footer(
+                &mut children,
+                scene_core.route,
+                scene_core.text_scale,
+                w,
+                h,
+                &footer,
+            );
         }
         wrap_system_layout(&mut children, w, scene_core.text_scale);
         let radius_scale = f32::from(scene_core.text_scale) / 100.0;
@@ -8786,6 +8783,64 @@ fn focused_node_id(node: &Node) -> Option<&Node> {
         .or_else(|| node.children.iter().find_map(focused_node_id))
 }
 
+fn append_prompt_footer(
+    children: &mut Vec<Node>,
+    route: Route,
+    text_scale: u16,
+    w: f32,
+    h: f32,
+    footer: &str,
+) {
+    children.push(node(
+        "prompt-bar",
+        Role::Group,
+        "",
+        0.0,
+        h - PROMPTS_AREA_HEIGHT,
+        w,
+        PROMPTS_AREA_HEIGHT,
+        SCENE_TRANSPARENT_TOKEN,
+    ));
+    let prompt_height = scaled_text_box_height(32.0, text_scale);
+    let prompt_top = h - PROMPTS_AREA_HEIGHT.max(prompt_height);
+    let prompt_label = if matches!(route, Route::Search | Route::Details) {
+        ""
+    } else {
+        footer
+    };
+    let mut prompt_node = node(
+        "prompts",
+        if matches!(
+            route,
+            Route::Home | Route::Library | Route::Details | Route::Quick | Route::Search
+        ) {
+            Role::Group
+        } else {
+            Role::Text
+        },
+        prompt_label,
+        if route == Route::Home {
+            w - 660.0
+        } else {
+            w - 600.0
+        },
+        prompt_top,
+        if route == Route::Home { 612.0 } else { 552.0 },
+        prompt_height,
+        SCENE_TRANSPARENT_TOKEN,
+    )
+    .with_type_role(TypeRole::Label);
+    if route == Route::Home {
+        prompt_node.children = home_prompt_nodes(footer, w, h, text_scale);
+    } else if matches!(
+        route,
+        Route::Library | Route::Details | Route::Quick | Route::Search
+    ) {
+        prompt_node.children = right_aligned_prompt_nodes(footer, w, h, text_scale);
+    }
+    children.push(prompt_node);
+}
+
 fn make_backdrop_inert(node: &mut Node) {
     node.state.focused = false;
     node.action = None;
@@ -11110,6 +11165,97 @@ mod tests {
             vec!["return-summary-action-0", "return-summary-action-1"]
         );
     }
+
+    #[test]
+    fn terminal_summaries_compose_one_inert_home_footer_below_the_dim() {
+        let receipts = [
+            TerminalReceipt::Returned {
+                session_id: "returned".into(),
+            },
+            TerminalReceipt::ForcedClose {
+                session_id: "forced".into(),
+            },
+            TerminalReceipt::Crash {
+                session_id: "crash".into(),
+                summary: "exit status 9".into(),
+            },
+        ];
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.,
+            logical_height: 720.,
+            scale: 1.,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+
+        fn footer_is_inert(node: &Node) -> bool {
+            !node.state.focused
+                && node.action.is_none()
+                && node.children.iter().all(footer_is_inert)
+        }
+
+        for receipt in receipts {
+            let mut c = core();
+            c.go(Route::Library);
+            c.focus = 6;
+            c.action(&ShellAction::Activate);
+            assert_eq!(c.route(), Route::Details);
+            c.session_event(&SessionEvent::Terminal(receipt));
+
+            let scene = c.scene(metrics, "B Back     G Global").unwrap();
+            let children = &scene.root().children;
+            let footer_indices = children
+                .iter()
+                .enumerate()
+                .filter_map(|(index, node)| (node.id.as_str() == "prompt-bar").then_some(index))
+                .collect::<Vec<_>>();
+            let dim_index = children
+                .iter()
+                .position(|node| node.id.as_str() == "return-summary-backdrop-dim")
+                .unwrap();
+            let prompts_index = children
+                .iter()
+                .position(|node| node.id.as_str() == "prompts")
+                .unwrap();
+
+            assert_eq!(footer_indices.len(), 1);
+            assert!(footer_indices[0] < dim_index);
+            assert!(prompts_index < dim_index);
+            assert!(footer_is_inert(&children[footer_indices[0]]));
+            assert!(footer_is_inert(&children[prompts_index]));
+        }
+    }
+
+    #[test]
+    fn ready_home_footer_remains_topmost() {
+        let c = core();
+        let scene = c
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.,
+                    logical_height: 720.,
+                    scale: 1.,
+                    safe_insets: Default::default(),
+                    orientation: pf_scene::Orientation::Landscape,
+                },
+                "B Back     G Global",
+            )
+            .unwrap();
+        let children = &scene.root().children;
+        let prompt_bar_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompt-bar")
+            .unwrap();
+        let prompts_index = children
+            .iter()
+            .position(|node| node.id.as_str() == "prompts")
+            .unwrap();
+
+        assert_eq!(prompts_index, children.len() - 1);
+        assert_eq!(prompt_bar_index, prompts_index - 1);
+        assert!(node_by_id(scene.root(), "return-summary-backdrop-dim").is_none());
+    }
+
     #[test]
     fn terminal_summary_scenes_are_driven_by_their_receipts() {
         let mut c = core();

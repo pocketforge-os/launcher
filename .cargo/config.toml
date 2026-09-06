@@ -1,0 +1,10 @@
+# Cargo builds in this repository resolve registry dependencies exclusively from
+# the committed vendor tree. Refresh it intentionally with scripts/refresh-vendor.sh.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[net]
+offline = true

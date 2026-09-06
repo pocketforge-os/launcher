@@ -26,6 +26,10 @@ jobs:
           fetch-depth: 0
       - name: Add Rust components
         run: rustup component add rustfmt clippy
+      - name: Verify committed Cargo vendor tree
+        run: |
+          scripts/check-vendor.sh
+          scripts/test-check-vendor.sh
       - name: Enforce raise-only mockup-diff ratchets
         run: |
           python3 -m unittest scripts/tests/test_check_mockup_ratchet.py

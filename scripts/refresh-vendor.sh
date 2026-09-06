@@ -47,6 +47,36 @@ mv "$tmp/config.toml" .cargo/config.toml
 
 rm -rf vendor
 mv "$tmp/vendor" vendor
+
+# pf-render's pinned Git source references assets outside its Cargo package.
+# Bring those exact-revision files inside the vendored package so directory
+# source replacement remains self-contained in a fresh checkout.
+runtime_rev="$(sed -n 's/^rev = "\([0-9a-f]\{40\}\)"$/\1/p' .cargo/config.toml)"
+test -n "$runtime_rev" || { echo "refresh-vendor: runtime revision is missing" >&2; exit 1; }
+git clone --quiet --filter=blob:none --no-checkout \
+  https://github.com/pocketforge-os/runtime.git "$tmp/runtime"
+git -C "$tmp/runtime" checkout --quiet "$runtime_rev" -- \
+  spikes/render-text/fonts spikes/consent-ui/baseline/s01-initial.png
+mkdir -p vendor/pf-render/upstream-assets
+cp -R "$tmp/runtime/spikes/." vendor/pf-render/upstream-assets/
+sed -i 's|\.\./\.\./\.\./spikes/|../upstream-assets/|g' vendor/pf-render/src/lib.rs
+python3 - vendor/pf-render <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+package = pathlib.Path(sys.argv[1])
+checksum_path = package / ".cargo-checksum.json"
+checksum = json.loads(checksum_path.read_text())
+checksum["files"] = {
+    str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in sorted(package.rglob("*"))
+    if path.is_file() and path != checksum_path
+}
+checksum_path.write_text(json.dumps(checksum, separators=(",", ":")))
+PY
+
 lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
 cargo_version="$(cargo -V | tr -s ' ')"
 package_count="$(find vendor -mindepth 2 -maxdepth 2 -name .cargo-checksum.json | wc -l | tr -d ' ')"

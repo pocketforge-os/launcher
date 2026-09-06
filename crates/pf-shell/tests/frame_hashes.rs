@@ -312,9 +312,11 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
-        "ff485292548353dde311ca62d2c52a8cbd7c8c56ca973987424305fb70345fea  ",
-        "046f3f78c505d699210a9486e745c592eb50caec3b5acaaf4a81c7cb7a78ff2f  ",
-        "7c8a61c2ec46686369fbb3b659439faaa28cfc270d0794ac6d97f8389a78a1a9  ",
+        // tsp-op5a.408 rebaselines the five Home-backed frames after removing the
+        // hidden bullet-width reserve between the styled status lead and metadata.
+        "f30e890dc9766e42075a5962382656b090a49c1ce3c0b5a740dfdda73e632d17  ",
+        "7cb06a6ae3eedf16a82b7d9297def75ced1bb3a840a0d6500812bef808732a13  ",
+        "39678b12ba977535f9b7dbf518a9bb8b6375893b2928b29ec6d5c4140c0feace  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -325,8 +327,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "f489ef19c5b65ceeb89a59e0d0090e5947f651973137744d5da1fcc408681dc2  ",
-        "ea60462a9386ee36dd78fad03c6a7969aefd8df3dba0e720c5d1543f9b1ffb87  ",
+        "c2581d537e7d5adea67715050636d88680ede54df579fcc8a997e2302b6d3207  ",
+        "f74e410291a49c880289048aca9cff72e5a21cc2549f875f3f7901575abd804f  ",
         "3c545fced30389c4c70b0e57bf388f622cb7f4c32f7405085c36d9a9ff4f5217  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -339,9 +341,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("046f3f78"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("7cb06a6a"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("f489ef19"),
+        lines.lines().nth(3).unwrap().starts_with("c2581d53"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -457,10 +459,10 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
         String::from_utf8_lossy(&run.stderr)
     );
     let transcript = String::from_utf8(run.stdout).unwrap();
-    // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
-    // for the nav strip / shelf label / hero meta tonal fix.
+    // tsp-op5a.408 rebaselines the degraded-session Home frame for the corrected
+    // styled-status-to-metadata spacing.
     assert!(
-        transcript.contains("8edba36cfeb1c7732087ce6c7d486d5a8411e8c4e63f49fd0c47028eb0f05841  ")
+        transcript.contains("a65b0d21363037659b3189849d6f83a8bd8a73de38c18fbce8557cb7e4c1a1ec  ")
     );
 }
 

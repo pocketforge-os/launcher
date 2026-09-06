@@ -923,6 +923,16 @@ struct HomeLaunchOrigin {
     focus: usize,
 }
 
+#[derive(Clone)]
+struct LaunchContext {
+    request: LaunchRequest,
+    title: String,
+    home_origin: Option<HomeLaunchOrigin>,
+    /// The shell tracks one session at a time. `None` means this launch is in flight;
+    /// the first terminal receipt binds it to the session that the summary represents.
+    session_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtTreatment {
     CatalogArt,
@@ -947,9 +957,7 @@ pub struct ShellCore {
     library_filter: LibraryFilter,
     library_items: Vec<usize>,
     library_surface_width: Cell<f32>,
-    active_launch_request: Option<LaunchRequest>,
-    launch_home_origin: Option<HomeLaunchOrigin>,
-    active_title: String,
+    active_launch: Option<LaunchContext>,
     crash_summary: String,
     crash_receipt_id: String,
     crash_exit_detail: String,
@@ -1107,9 +1115,7 @@ impl ShellCore {
             library_filter: LibraryFilter::Recent,
             library_items: (0..snapshot.items.len()).collect(),
             library_surface_width: Cell::new(1280.0),
-            active_launch_request: None,
-            launch_home_origin: None,
-            active_title: String::new(),
+            active_launch: None,
             crash_summary: String::new(),
             crash_receipt_id: String::new(),
             crash_exit_detail: String::new(),
@@ -2090,14 +2096,24 @@ impl ShellCore {
                     None
                 }
                 ShellAction::Activate => {
-                    let request = self.active_launch_request.clone()?;
+                    let request = self.bound_launch()?.request.clone();
+                    let (item, variant) =
+                        self.items.iter().enumerate().find_map(|(item, entry)| {
+                            entry
+                                .variants
+                                .iter()
+                                .enumerate()
+                                .find_map(|(variant, candidate)| {
+                                    (candidate.launch_target.app_id == request.item_id)
+                                        .then_some((item, variant))
+                                })
+                        })?;
                     self.presentation = Presentation::Ready;
                     self.return_home_from_summary();
-                    self.presentation = Presentation::Starting;
-                    Some(Effect::Launch(request))
+                    self.launch_variant(item, variant)
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                    self.focus = usize::from(self.active_launch_request.is_some());
+                    self.focus = usize::from(self.bound_launch().is_some());
                     None
                 }
                 ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
@@ -2566,14 +2582,18 @@ impl ShellCore {
         let selected = &self.items[item];
         let request = selected.variants.get(variant)?.launch_target.app_id.clone();
         let request = LaunchRequest { item_id: request };
-        self.launch_home_origin = self
+        let home_origin = self
             .launch_origin_home_focus()
             .map(|focus| HomeLaunchOrigin {
                 item_id: selected.id.clone(),
                 focus,
             });
-        self.active_launch_request = Some(request.clone());
-        self.active_title.clone_from(&selected.title);
+        self.active_launch = Some(LaunchContext {
+            request: request.clone(),
+            title: selected.title.clone(),
+            home_origin,
+            session_id: None,
+        });
         self.presentation = Presentation::Starting;
         Some(Effect::Launch(request))
     }
@@ -2589,7 +2609,7 @@ impl ShellCore {
     }
 
     fn preserved_home_focus(&self) -> Option<usize> {
-        let origin = self.launch_home_origin.as_ref()?;
+        let origin = self.bound_launch()?.home_origin.as_ref()?;
         let current = self
             .items
             .iter()
@@ -2611,6 +2631,23 @@ impl ShellCore {
             }
         }
         self.go(Route::Home);
+        self.active_launch = None;
+    }
+
+    fn bound_launch(&self) -> Option<&LaunchContext> {
+        self.active_launch
+            .as_ref()
+            .filter(|launch| launch.session_id.as_deref() == Some(self.crash_receipt_id.as_str()))
+    }
+
+    fn bind_launch_to_receipt(&mut self, session_id: &str) {
+        match self.active_launch.as_mut() {
+            Some(launch) if launch.session_id.is_none() => {
+                launch.session_id = Some(session_id.to_owned());
+            }
+            Some(launch) if launch.session_id.as_deref() == Some(session_id) => {}
+            _ => self.active_launch = None,
+        }
     }
 
     fn preference_effect(&self, index: usize) -> Option<Effect> {
@@ -2947,9 +2984,11 @@ impl ShellCore {
 
     pub fn launch_result(&mut self, result: &LaunchResult) {
         self.bump_revision();
-        match result {
-            LaunchResult::Accepted { .. } => self.presentation = Presentation::Starting,
-            _ => self.presentation = Presentation::Ready,
+        if matches!(result, LaunchResult::Accepted { .. }) {
+            self.presentation = Presentation::Starting;
+        } else {
+            self.presentation = Presentation::Ready;
+            self.active_launch = None;
         }
     }
     pub fn session_event(&mut self, event: &SessionEvent) {
@@ -2965,6 +3004,7 @@ impl ShellCore {
                 self.presentation = Presentation::Running
             }
             SessionEvent::Terminal(TerminalReceipt::Returned { session_id }) => {
+                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::Returned;
                 self.crash_receipt_id.clone_from(session_id);
                 self.crash_summary = "Returned safely".into();
@@ -2974,6 +3014,7 @@ impl ShellCore {
                 self.pending_ack = true;
             }
             SessionEvent::Terminal(TerminalReceipt::ForcedClose { session_id }) => {
+                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::ForcedClose;
                 self.crash_receipt_id.clone_from(session_id);
                 self.crash_summary = "Closed unexpectedly".into();
@@ -2985,6 +3026,7 @@ impl ShellCore {
                 session_id,
                 summary,
             }) => {
+                self.bind_launch_to_receipt(session_id);
                 self.presentation = Presentation::Crash;
                 self.crash_summary.clone_from(summary);
                 self.crash_receipt_id.clone_from(session_id);
@@ -6841,6 +6883,9 @@ impl ShellCore {
         } else {
             self.crash_summary.as_str()
         };
+        let title = self
+            .bound_launch()
+            .map_or(self.crash_summary.as_str(), |launch| launch.title.as_str());
         out.push(node(
             "return-summary-panel",
             Role::Group,
@@ -6873,7 +6918,7 @@ impl ShellCore {
             node(
                 "return-summary-title",
                 Role::Heading,
-                &self.active_title,
+                title,
                 252.0,
                 140.0,
                 w - 504.0,
@@ -6939,7 +6984,7 @@ impl ShellCore {
             .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
             .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
         );
-        let actions = if self.active_launch_request.is_some() {
+        let actions = if self.bound_launch().is_some() {
             &["Back to Home", "Open again"][..]
         } else {
             &["Back to Home"][..]
@@ -9190,6 +9235,15 @@ mod tests {
         c.authority_snapshot(false);
         c
     }
+    fn test_metrics() -> SurfaceMetrics {
+        SurfaceMetrics {
+            logical_width: 1280.,
+            logical_height: 720.,
+            scale: 1.,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        }
+    }
     fn preferences(applied: bool) -> FakePreferencePort {
         FakePreferencePort::new(
             [
@@ -11054,6 +11108,11 @@ mod tests {
             (Route::Home, &Presentation::Ready)
         );
 
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-again".into(),
         }));
@@ -11065,6 +11124,74 @@ mod tests {
             }))
         );
         assert_eq!(c.presentation(), &Presentation::Starting);
+    }
+
+    #[test]
+    fn dismissed_launch_context_cannot_leak_into_a_restored_receipt() {
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        assert_eq!(c.action(&ShellAction::Back), None);
+        assert!(c.active_launch.is_none());
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "restored-unrelated".into(),
+        }));
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Returned safely"
+        );
+        assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
+    }
+
+    #[test]
+    fn dismissed_launch_a_is_replaced_by_launch_b_context() {
+        let mut c = core();
+        c.focus = 0;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-a".into(),
+        }));
+        c.action(&ShellAction::Back);
+
+        c.focus = 1;
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "launch-b".into(),
+        }));
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "return-summary-title")
+                .unwrap()
+                .accessible_label,
+            "Hollow Tides"
+        );
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            }))
+        );
     }
 
     #[test]
@@ -11175,7 +11302,7 @@ mod tests {
     #[test]
     fn boot_restored_summary_without_launch_request_omits_open_again() {
         let mut c = core();
-        assert_eq!(c.active_launch_request, None);
+        assert!(c.active_launch.is_none());
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-restored".into(),
         }));
@@ -11420,7 +11547,14 @@ mod tests {
     #[test]
     fn terminal_summary_scenes_are_driven_by_their_receipts() {
         let mut c = core();
-        c.active_title = "Ridgeline".into();
+        c.active_launch = Some(LaunchContext {
+            request: LaunchRequest {
+                item_id: "app-1".into(),
+            },
+            title: "Ridgeline".into(),
+            home_origin: None,
+            session_id: None,
+        });
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-safe".into(),
         }));
@@ -13930,6 +14064,7 @@ mod tests {
             }))
         );
         many.launch_result(&LaunchResult::RejectedBusy);
+        assert!(many.active_launch.is_none());
         many.go(Route::Home);
         assert_eq!(many.action(&ShellAction::Activate), None);
         assert_eq!((many.route(), many.focus()), (Route::VariantChooser, 0));

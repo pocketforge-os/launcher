@@ -118,9 +118,18 @@ fn every_stateful_evidence_route_differs_from_its_base_route() {
             && unavailable.contains("Network required"),
         "details-unavailable must expose an unavailable availability reason"
     );
+    let detail_open = unavailable
+        .lines()
+        .find(|line| line.trim_start().starts_with("detail-open "));
     assert!(
-        !unavailable.contains("detail-play"),
-        "details-unavailable must not expose an enabled Play action"
+        detail_open.is_none(),
+        "details-unavailable must not expose the detail-open Play control"
+    );
+    assert!(
+        !unavailable.lines().any(|line| {
+            line.contains("label=\"▶ Play\"") && line.contains("action=Some(Activate)")
+        }),
+        "details-unavailable must not expose an activatable Play control"
     );
 }
 
@@ -384,9 +393,12 @@ fn vertical_slice_frame_hashes_are_stable() {
         // Details Unavailable: the emitter selects the mutated Steam Link fixture by
         // identity, so the frame combines main's outlined Pin CTA and .407 hint footer
         // with the intended network-unavailable reason, muted way-to-play row, and no
-        // Play action. Variant Chooser changes only for .407's hint footer.
+        // Play action. tsp-01crq rebaselines that frame again because its way-to-play
+        // row now exports the unavailable state structurally while its visual content
+        // retains explicit legibility ink. Variant Chooser changes only for .407's
+        // hint footer.
         "0ddc5e54df197c75ddebe2a986902e02ce92d1c775dc158a0fb5cc1c8337cbb5  ",
-        "2b35018615d0978e34d79c551a01cbc8fdf8dbcc49b920334a732cbacd65e48b  ",
+        "b0d3bbc743ba0ee41bac2fcd7255f156aecfb4b957e5eb502825fa491eec788e  ",
         "0af05320a447e85d2a99db4b189cfb75de30dd2f704134195cddea9a75f63a4a  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");

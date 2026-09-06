@@ -41,17 +41,17 @@ mod design_manual;
 
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
-    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_STATUS_ATTENTION_TOKEN,
-    COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN, COLOR_SURFACE_CANVAS_TOKEN,
-    COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN, COLOR_SURFACE_SCRIM_TOKEN,
-    COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN, COLOR_TEXT_PRIMARY_TOKEN,
-    COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT, KEYCAP_MIN_WIDTH,
-    LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT, PROMPTS_AREA_HEIGHT,
-    RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING, ROOM_STRIP_GAP, SPACE_2,
-    SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN, STATE_FOCUSED_RING_TOKEN,
-    STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN, STATE_REST_TEXT_TOKEN,
-    STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN, STATE_UNAVAILABLE_VEIL_TOKEN,
-    STATUS_BAR_HEIGHT,
+    COLOR_BORDER_HAIRLINE_TOKEN, COLOR_BORDER_STRONG_TOKEN, COLOR_FOCUS_RING_TOKEN,
+    COLOR_STATUS_ATTENTION_TOKEN, COLOR_STATUS_READY_TOKEN, COLOR_STATUS_STOPPED_TOKEN,
+    COLOR_SURFACE_CANVAS_TOKEN, COLOR_SURFACE_OVERLAY_TOKEN, COLOR_SURFACE_RAISED_TOKEN,
+    COLOR_SURFACE_SCRIM_TOKEN, COLOR_TEXT_INVERSE_TOKEN, COLOR_TEXT_MUTED_TOKEN,
+    COLOR_TEXT_PRIMARY_TOKEN, COLOR_TEXT_SECONDARY_TOKEN, KEYCAP_BORDER_WIDTH, KEYCAP_HEIGHT,
+    KEYCAP_MIN_WIDTH, LIB_CARD_ART_HEIGHT, LIB_GRID_TOP, LIB_HEAD_TOP, LIB_TOOLBAR_HEIGHT,
+    PROMPTS_AREA_HEIGHT, RADIUS_L, RADIUS_M, RADIUS_PILL, RADIUS_S, ROOM_HORIZONTAL_PADDING,
+    ROOM_STRIP_GAP, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_7, STATE_DISABLED_BORDER_TOKEN,
+    STATE_FOCUSED_RING_TOKEN, STATE_FOCUSED_TEXT_TOKEN, STATE_REST_SURFACE_TOKEN,
+    STATE_REST_TEXT_TOKEN, STATE_SELECTED_ACCENT_TOKEN, STATE_UNAVAILABLE_TEXT_TOKEN,
+    STATE_UNAVAILABLE_VEIL_TOKEN, STATUS_BAR_HEIGHT,
 };
 use design_manual::{
     CAPTION_GLYPH_ADVANCE, CHIP_COUNT_GAP, LABEL_GLYPH_ADVANCE, SCENE_TRANSPARENT_TOKEN,
@@ -5407,9 +5407,12 @@ impl ShellCore {
                     } else {
                         "Choose how to play"
                     };
+                    // shell.css `.btn` uses the wider primary-action rhythm from the
+                    // detail mockup. Keep the reserve explicit here because the scene
+                    // graph is absolute-positioned rather than CSS-laid out.
                     let open_width =
                         (measured_text_advance(label_text_width(open_label), self.text_scale)
-                            + 48.0)
+                            + 72.0)
                             .min(detail_column_width);
                     let mut open = node(
                         "detail-open",
@@ -5419,21 +5422,33 @@ impl ShellCore {
                         buttons_top,
                         open_width,
                         54.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
-                    );
+                        COLOR_FOCUS_RING_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_FOCUS_RING_TOKEN, 1.0)
+                    // The parent owns the accessible name; visible ink is composed by
+                    // the child so it is not painted twice at Body weight underneath.
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     open.state.focused = self.focus == play_focus;
                     open.action = Some(NodeAction::Activate);
                     let mut open_label_node = node(
                         "detail-open-label",
                         Role::Text,
-                        &open.accessible_label,
-                        open.bounds.x + 16.0,
+                        if open_label == "▶ Play" {
+                            // The scene text run has no inline-flex gap primitive;
+                            // three shaped spaces reproduce the mockup's 12px glyph gap.
+                            "▶   Play"
+                        } else {
+                            open_label
+                        },
+                        open.bounds.x + 12.0,
                         open.bounds.y + 13.0,
-                        open.bounds.width - 32.0,
+                        open.bounds.width - 24.0,
                         28.0,
-                        STATE_SELECTED_ACCENT_TOKEN,
+                        COLOR_FOCUS_RING_TOKEN,
                     )
                     .with_type_role(TypeRole::Label)
+                    .with_text_align(TextAlign::Center)
                     .with_ink_token(COLOR_TEXT_INVERSE_TOKEN);
                     open_label_node.state.focused = open.state.focused;
                     open.children.push(open_label_node);
@@ -5468,7 +5483,10 @@ impl ShellCore {
                         } else {
                             STATE_REST_SURFACE_TOKEN
                         },
-                    );
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5476,13 +5494,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             pin_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
@@ -5511,8 +5530,11 @@ impl ShellCore {
                         detail_wrap_top + 388.0,
                         detail_column_width,
                         54.0,
-                        STATE_FOCUSED_RING_TOKEN,
-                    );
+                        STATE_REST_SURFACE_TOKEN,
+                    )
+                    .with_corner_radius(RADIUS_M)
+                    .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
+                    .with_ink_token(SCENE_TRANSPARENT_TOKEN);
                     pin.state.focused = true;
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
@@ -5520,13 +5542,14 @@ impl ShellCore {
                             "detail-pin-label",
                             Role::Text,
                             &pin.accessible_label,
-                            pin.bounds.x + 16.0,
+                            pin.bounds.x + 24.0,
                             pin.bounds.y + 13.0,
-                            pin.bounds.width - 32.0,
+                            pin.bounds.width - 48.0,
                             28.0,
                             STATE_REST_SURFACE_TOKEN,
                         )
-                        .with_type_role(TypeRole::Label),
+                        .with_type_role(TypeRole::Label)
+                        .with_text_align(TextAlign::Center),
                     );
                     out.push(pin);
                     detail_wrap_top + 442.0
@@ -14674,6 +14697,74 @@ mod tests {
                 item_id: "game-native".into(),
             }))
         );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // Scene geometry is assigned directly from these constants.
+    fn detail_actions_keep_primary_and_outline_button_treatment() {
+        fn find<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
+            (node.id.as_str() == id)
+                .then_some(node)
+                .or_else(|| node.children.iter().find_map(|child| find(child, id)))
+        }
+
+        let mut core = fixture_core(vec![
+            item(
+                "ready",
+                "Ready Game",
+                vec![variant("native", "ready", Availability::Ready)],
+            ),
+            item(
+                "unavailable",
+                "Unavailable Game",
+                vec![variant(
+                    "stream",
+                    "offline",
+                    Availability::NeedsNetwork {
+                        reason: "offline".into(),
+                    },
+                )],
+            ),
+        ]);
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        core.selected_item = Some(0);
+        core.go(Route::Details);
+        let ready = core.scene(metrics, "").unwrap();
+        let play = find(ready.root(), "detail-open").unwrap();
+        assert_eq!(play.style_token, COLOR_FOCUS_RING_TOKEN);
+        assert_eq!(play.border_token.as_deref(), Some(COLOR_FOCUS_RING_TOKEN));
+        assert_eq!(play.border_width, 1.0);
+        assert_eq!(play.corner_radius, RADIUS_M);
+        assert!(
+            play.bounds.width >= 120.0,
+            "Play must retain wide CTA padding"
+        );
+        assert_eq!(
+            find(play, "detail-open-label").unwrap().type_role,
+            TypeRole::Label,
+            "Play must use the semibold button-label role rather than regular Body"
+        );
+
+        core.selected_item = Some(1);
+        let unavailable = core.scene(metrics, "").unwrap();
+        for pin in [
+            find(ready.root(), "detail-pin").unwrap(),
+            find(unavailable.root(), "detail-pin").unwrap(),
+        ] {
+            assert_eq!(pin.corner_radius, RADIUS_M);
+            assert_eq!(
+                pin.border_token.as_deref(),
+                Some(COLOR_BORDER_HAIRLINE_TOKEN)
+            );
+            assert_eq!(pin.border_width, 1.0);
+            assert_eq!(pin.style_token, STATE_REST_SURFACE_TOKEN);
+        }
     }
 
     #[test]

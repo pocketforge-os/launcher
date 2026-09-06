@@ -2089,7 +2089,7 @@ impl ShellCore {
                     Some(Effect::Launch(request))
                 }
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
-                    self.focus = 1;
+                    self.focus = usize::from(self.active_launch_request.is_some());
                     None
                 }
                 ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
@@ -10988,11 +10988,12 @@ mod tests {
                 .any(|(id, _, _, _, _)| { id == "return-summary-action-1" })
         );
 
-        c.focus = 1;
+        c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 0);
         assert_eq!(c.action(&ShellAction::Activate), None);
         assert_eq!(
             (c.route(), c.presentation()),
-            (Route::Home, &Presentation::Returned)
+            (Route::Home, &Presentation::Ready)
         );
     }
     #[test]
@@ -11013,6 +11014,7 @@ mod tests {
             session_id: "receipt-library".into(),
         }));
         c.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(c.focus(), 1);
         assert_eq!(
             c.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {

@@ -88,6 +88,51 @@ fn focused_library_search_evidence_applies_a_distinct_focused_state() {
     );
 }
 
+#[test]
+fn every_stateful_evidence_route_differs_from_its_base_route() {
+    let default = tempfile::tempdir().unwrap();
+    render_evidence_set(default.path(), &[]);
+    let settings = tempfile::tempdir().unwrap();
+    render_evidence_set(settings.path(), &["--settings-evidence"]);
+
+    let pairs = [
+        (default.path(), "library-focused-search", "library"),
+        (default.path(), "launch-dimmed", "focus-moved"),
+        (default.path(), "details-unavailable", "details"),
+        (default.path(), "returned", "focus-moved"),
+        (settings.path(), "settings-edit", "settings"),
+        (default.path(), "focus-moved", "boot-home"),
+    ];
+    for (directory, stateful, base) in pairs {
+        assert_ne!(
+            std::fs::read(directory.join(format!("{stateful}.png"))).unwrap(),
+            std::fs::read(directory.join(format!("{base}.png"))).unwrap(),
+            "stateful evidence route {stateful} must not duplicate its base route {base}"
+        );
+    }
+
+    let unavailable =
+        std::fs::read_to_string(default.path().join("details-unavailable.semantic.txt")).unwrap();
+    assert!(
+        unavailable.contains("detail-availability-reason")
+            && unavailable.contains("Network required"),
+        "details-unavailable must expose an unavailable availability reason"
+    );
+    let detail_open = unavailable
+        .lines()
+        .find(|line| line.trim_start().starts_with("detail-open "));
+    assert!(
+        detail_open.is_none(),
+        "details-unavailable must not expose the detail-open Play control"
+    );
+    assert!(
+        !unavailable.lines().any(|line| {
+            line.contains("label=\"▶ Play\"") && line.contains("action=Some(Activate)")
+        }),
+        "details-unavailable must not expose an activatable Play control"
+    );
+}
+
 // Split per evidence route-set so the two subprocess renders schedule as separate
 // tests (was one fn looping both arg-sets, spawning them back-to-back). Routing
 // through `frame_hash_command` keeps the exact command the old inline build produced
@@ -312,12 +357,19 @@ fn vertical_slice_frame_hashes_are_stable() {
         // safe-return-crash.png is newly present (ea60462a) for the independent
         // foreign-session crash path. Every other frame is byte-identical to both
         // parents; the union combines independent Search and terminal-summary pixels.
-        // tsp-op5a.404 rebaselines every route for the corrected global chrome: the
-        // three-arc Wi-Fi raster, outlined battery, gutter-aligned/lowered cluster,
-        // and primary-bold versus muted-regular room hierarchy.
-        "842dbd373799712ee544f3f610e1517210ff3a04ad3219e2b86451cbc3e55f7e  ",
-        "aba3198d41ed5b3ebfcbaa932518464d6a4493827a64c5f6fe14b6836e466d0a  ",
-        "5693bad4b25f89b68a86aaf92f337c039f50d84ab849549a8bd74b45bb3d8d26  ",
+        // tsp-op5a.407 rebaselines the footer pixels on every route after unifying
+        // badge chrome, restoring the per-route verbs, and correcting chip spacing.
+        // tsp-op5a.408 rebaselines the five Home-backed frames after removing the
+        // hidden bullet-width reserve between the styled status lead and metadata.
+        // tsp-q0k8t records their union: boot-home, focus-moved, launch-dimmed,
+        // returned, and safe-return-crash combine .407's footer with .408's metadata
+        // spacing; quick-power changes only for .407's footer.
+        // tsp-3ukmb combines those landed footer/metadata changes with .404's global
+        // status chrome and room hierarchy. The following six Home-backed/Quick frames
+        // therefore repaint for both the landed footer and the intended chrome.
+        "8751edbe7eee9584f76cde59c1edc61ed8afe6563ed8839f29f6d88bcff80181  ",
+        "189619ea5751ecdf4c86122bf60b0dcf29852350d096d2ba638c738bb886a293  ",
+        "ca35d58e8296d3cd97d739a66db98d29cd125ba9f8e90809480bf4b80f6f0d4d  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -328,23 +380,40 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "aa35fd503c781163c56526fb6b96fe0d772dfb6eb432dcb1e3d09477abfd7e82  ",
-        "c3bfb781ccb69f89851b4711e61cdc5bff05a2c35529e8c8f88e426fe49824a2  ",
-        "dc12245cddde6feefefcdfe710394aabb3a5831008b9fde43972aec2ca5a9fb4  ",
+        "73f377c11d9dca092b95d8715587bcbf9a568be283a7ec49110d492e06c283f2  ",
+        "da17960e033128ae9018bec5503f8596892d4184016fcaf12564203fd30fb6b3  ",
+        "63c0c1b892e6354d0b9f64a37e34a718633e4b9199385e1c309ee501315c5fc6  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
-        "284f96d03ce225d908ad7edf969530e4f02a627796a50552cb74a87f66f389f7  ",
-        "5524edf1fc6993c06542af71c578bbca896290c6c58bd8cb8ffa1cdb3af7bdca  ",
-        "7a9e22e2c8d6faa52870a1278ef3599e1c5fa37f14588c316a9a281307060d80  ",
-        "855d115cd10d65c7b83c5293d5dd671003a5d4af1932359188f4ea00deffb87f  ",
-        "f85ff6b7222b50d098e23ad2bbef341401b966b60e57937c76126a9e1d587051  ",
-        "0e7f71f35e17fcff692480cbb452f06c8c69a900633044f64d909cddece49f34  ",
+        // Library, focused Library, and Search change only for .407's route hints.
+        // These three combine .407's route hints with .404's shared status chrome;
+        // Library also retains main's first-grid-item focus semantics.
+        "e7e1057e35cc4eba026025d745003df051333b7dfe851a73b622c14766854d01  ",
+        "63c31d0bb28e543b7410222b3b40ffa71df66112cea89fcf1d819bb166bb0c70  ",
+        "6b81b51eff237a08274e33a2dad8b0806586907e3520f9b7c2c1060305c8479c  ",
+        // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
+        // accent with wide rounded primary geometry, while Pin is a rounded outline
+        // button on both ready and unavailable routes. Details and Details Unavailable
+        // change for that .405 CTA repaint. tsp-op5a.410 additionally changes only
+        // Details Unavailable: the emitter selects the mutated Steam Link fixture by
+        // identity, so the frame combines main's outlined Pin CTA and .407 hint footer
+        // with the intended network-unavailable reason, muted way-to-play row, and no
+        // Play action. tsp-01crq rebaselines that frame again because its way-to-play
+        // row now exports the unavailable state structurally while its visual content
+        // retains explicit legibility ink. Variant Chooser changes only for .407's
+        // hint footer.
+        // Details combines .405's CTA, .407's hint footer, and .404's global chrome.
+        // Details Unavailable additionally retains .410's emitter-selected unavailable
+        // semantics; Variant Chooser combines its .407 hint with .404 chrome.
+        "b497c54442da3a50cd69eb729f9d176f153d51063c654debd919fe8cd5d58c6d  ",
+        "cc9b721e7e545bff7387f18ce56e063ace8984429aa093be63a0f1182024445c  ",
+        "e6148c2f3a4341060a7ebc51ebe424c55a578f76628de08a64e636141df421b3  ",
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("aba3198d"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("189619ea"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("aa35fd50"),
+        lines.lines().nth(3).unwrap().starts_with("73f377c1"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -422,21 +491,24 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // dashed unavailable outline, and first-run for its outlined PF/A/START teaching
     // chips. These are intentional component-grammar changes, guarded by structural
     // coverage/ink assertions in pf-shell-core.
-    // tsp-op5a.404 rebaselines all six for the same global chrome correction.
+    // tsp-op5a.407 rebaselines the five Settings-family frames for the shared
+    // right-aligned B Back / A Change badge renderer. tsp-3ukmb combines those pixels
+    // with .404's shared status chrome on all five; first-run changes only for .404's
+    // chrome because it suppresses the route footer.
     assert!(
-        transcript.contains("1a5f893595a3eb3925ea9fec4212e309da180a221bca0f4152bc032dd197a574  ")
+        transcript.contains("a479703573325bb1b7546b72245e67198df84f412968ed544d0708a5788373be  ")
     );
     assert!(
-        transcript.contains("9047f6c2850c33ed1f99664113e89f7625d0a2a94094bdf12e5458b3aa299dcf  ")
+        transcript.contains("b2035e4ce8ebe27a989c25c9b2c2002442c371ca6455c31517e9c9ae2fc437c5  ")
     );
     assert!(
-        transcript.contains("b486eccd9b684c1cbc6076a8a774301a6b216b49cd595dbd97583e9e2a61b650  ")
+        transcript.contains("8951abb2ed500c61ea6976f03fecfd09d4ffdf6667b384648f64e179b23fbd4e  ")
     );
     assert!(
-        transcript.contains("067b81995164738be8fed7adc253acfc70106644b48da407cc8dedaccd5d4d98  ")
+        transcript.contains("3d9ed040605f733d4ef7f732774393c0b4d251bc6d93dd8a2adee426e3e762d5  ")
     );
     assert!(
-        transcript.contains("53765a0b6088a887263d277598e5a6a2b0ed0db3810bff3ba9156b3bbf1f4621  ")
+        transcript.contains("0640dda6088630b22e2db9ddc34a77027ae72f3b1deea822bb219229c95bc4cd  ")
     );
     assert!(
         transcript.contains("1d110f9f2feaf2924a077cf6963a2ff9578b0209e1b6634378737b09ea076b34  ")
@@ -463,9 +535,13 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     let transcript = String::from_utf8(run.stdout).unwrap();
     // tsp-op5a.393 (Family A tonal wiring) rebaselines the degraded-session Home frame
     // for the nav strip / shelf label / hero meta tonal fix.
-    // tsp-op5a.404 rebaselines it for the corrected global chrome.
+    // tsp-op5a.407 rebaselines it for corrected keycap padding and PF chip geometry.
+    // tsp-op5a.408 rebaselines the degraded-session Home frame for the corrected
+    // styled-status-to-metadata spacing.
+    // tsp-q0k8t combines that spacing with .407's corrected hint badge geometry.
+    // tsp-3ukmb adds .404's corrected global status chrome to the same degraded Home.
     assert!(
-        transcript.contains("8d72e055210333ace420d4c941811cf1de14e2de9641c47c97c4e86b0e71d3a2  ")
+        transcript.contains("44d7890bf64d85d022994d351ff9a763861a89be6637f4e312732ffa434edcac  ")
     );
 }
 

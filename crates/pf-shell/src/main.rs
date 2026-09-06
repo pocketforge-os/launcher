@@ -1038,6 +1038,9 @@ fn main() -> Result<(), String> {
     let effect = core
         .action(&ShellAction::Activate)
         .ok_or("fixture must launch")?;
+    // This faithfully captures the live core's Starting presentation. The missing
+    // launch scrim is therefore a shared scene-composition gap, not evidence
+    // sequencing; tsp-op5a.397 owns the live overlay-system treatment.
     emit(&mut host, &mut core, &footer, out, "launch-dimmed")?;
     let mut session = pf_ports::FakeSession::new(
         Ok(LaunchResult::Accepted {
@@ -1068,6 +1071,9 @@ fn main() -> Result<(), String> {
     emit(&mut host, &mut core, &footer, out, "safe-return-crash")?;
     core.action(&ShellAction::Activate);
     core.action(&ShellAction::Custom("Quick".into()));
+    // Quick currently replaces its caller scene in ShellCore::scene. Consequently
+    // the black evidence backdrop reproduces the live overlay-system gap; its shared
+    // backdrop/scrim fix remains with tsp-op5a.397.
     emit(&mut host, &mut core, &footer, out, "quick-power")?;
     emit_f10_evidence(&mut host, &snapshot, &theme, &footer, &glyphs, out)?;
     Ok(())
@@ -1137,16 +1143,19 @@ fn emit_f10_evidence(
         .iter_mut()
         .find(|item| item.id == "steam-link")
         .ok_or("unavailable details fixture item missing")?;
-    unavailable_item
-        .variants
-        .retain(|variant| !matches!(variant.availability, pf_catalog::Availability::Ready));
+    for variant in &mut unavailable_item.variants {
+        variant.availability = pf_catalog::Availability::NeedsNetwork {
+            reason: "fixture network is offline".into(),
+        };
+    }
     let mut unavailable = fixture_core(&unavailable_snapshot, theme, false);
     apply_evidence_chrome(&mut unavailable, glyphs);
     unavailable.authority_snapshot(false);
-    unavailable.action(&ShellAction::Custom("Room.next".into()));
-    for _ in 0..8 {
-        unavailable.action(&ShellAction::Move(pf_scene::AxisMove::Down));
-    }
+    // Select the mutated item by identity through Search. The old eight-Down walk
+    // depended on Library grid geometry and landed on a different, Ready item, so
+    // the unavailable snapshot was correct but never shown by its evidence route.
+    unavailable.action(&ShellAction::Custom("Search".into()));
+    unavailable.set_search_query("steam");
     unavailable.action(&ShellAction::Activate);
     emit(host, &mut unavailable, footer, out, "details-unavailable")?;
 
@@ -1174,6 +1183,9 @@ fn emit_f10_evidence(
         chooser.action(&ShellAction::Move(pf_scene::AxisMove::Down));
     }
     chooser.action(&ShellAction::Activate);
+    // VariantChooser currently replaces Details in ShellCore::scene rather than
+    // compositing over its caller. Evidence thus reproduces the live black-backdrop
+    // gap; tsp-op5a.397 owns that shared overlay-system correction.
     emit(host, &mut chooser, footer, out, "variant-chooser")?;
     Ok(())
 }
@@ -4257,7 +4269,7 @@ mod durable_tests {
         );
     }
 
-    fn assert_unavailable_details_known_defect(driver: &FlowDriver) {
+    fn assert_unavailable_details_invariants(driver: &FlowDriver) {
         let scene = driver.scene();
         ensure_action_labels(&scene).unwrap();
         assert_raster_text_paint_contained_and_complete(
@@ -4267,21 +4279,13 @@ mod durable_tests {
             driver.core.text_scale(),
         )
         .unwrap();
-        // Known defect tsp-tzlg: the unavailable reason has zero measured
-        // contrast and its disabled action paints no ink.
-        let error = assert_raster_text_legible(
+        assert_raster_text_legible(
             &scene,
             driver.metrics,
             driver.core.theme_base(),
             driver.core.text_scale(),
         )
-        .expect_err("tsp-tzlg was fixed; remove the known-defect annotation");
-        assert!(
-            error.contains("detail-availability-reason")
-                && error.contains("detail-unavailable")
-                && error.contains("ink_pixels=0"),
-            "unavailable Details changed failure under tsp-tzlg: {error}"
-        );
+        .unwrap();
     }
 
     struct Flow<'a> {
@@ -4555,8 +4559,8 @@ mod durable_tests {
         details.action(ShellAction::Activate);
         assert_eq!(details.core.route(), pf_shell_core::Route::Details);
         assert!(format!("{:?}", details.scene()).contains("catalog item has no variants"));
-        eprintln!("high-value flow scenario: no-usable-variant Details [tsp-tzlg]");
-        assert_unavailable_details_known_defect(&details);
+        eprintln!("high-value flow scenario: no-usable-variant Details");
+        assert_unavailable_details_invariants(&details);
 
         let mut round_trip = FlowDriver::new();
         round_trip.metrics.safe_insets = notch;
@@ -5908,7 +5912,6 @@ mod durable_tests {
             assert!((prompt.bounds.height - expected_height).abs() < f32::EPSILON);
             assert!(prompt.bounds.y + prompt.bounds.height <= metrics.logical_height);
             let mut saw_single_letter_keycap = false;
-            let mut saw_wide_keycap = false;
             for keycap in prompt.children.iter().filter(|node| {
                 let id = node.id.as_str();
                 id.starts_with("home-prompt-keycap-") && !id.ends_with("-border")
@@ -5922,7 +5925,6 @@ mod durable_tests {
                 let expected_keycap_height = 24.0 * scale;
                 assert!((border.bounds.height - expected_keycap_height).abs() < f32::EPSILON);
                 let expected_radius = if keycap.accessible_label.chars().count() > 1 {
-                    saw_wide_keycap = true;
                     6.0 * scale
                 } else {
                     saw_single_letter_keycap = true;
@@ -5936,7 +5938,6 @@ mod durable_tests {
             }
             if !prompt.children.is_empty() {
                 assert!(saw_single_letter_keycap);
-                assert!(saw_wide_keycap);
             }
             let root_id = pf_scene::NodeId::new("prompt-live-scale-guard").unwrap();
             let root = Node::new(

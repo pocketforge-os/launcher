@@ -2616,18 +2616,36 @@ struct DurablePreferences {
     pending: VecDeque<EffectivePreference>,
 }
 
+const APPEARANCE_LABELS: [(&str, &str); 2] = [("light", "Day"), ("dark", "Dusk")];
+
 fn appearance_for_shell(value: &str) -> &str {
-    match value {
-        "light" => "Day",
-        "dark" => "Dusk",
-        legacy => legacy,
-    }
+    APPEARANCE_LABELS
+        .iter()
+        .find_map(|(stored, shell)| (*stored == value).then_some(*shell))
+        .unwrap_or(value)
+}
+
+fn appearance_for_storage(value: &str) -> &str {
+    APPEARANCE_LABELS
+        .iter()
+        .find_map(|(stored, shell)| (*shell == value).then_some(*stored))
+        .unwrap_or(value)
 }
 
 fn translate_appearance_for_shell(value: &mut PreferenceValue) {
     if let PreferenceValue::Text(text) = value {
         *text = appearance_for_shell(text).to_owned();
     }
+}
+
+fn apply_shell_preference_semantics(mut observed: EffectivePreference) -> EffectivePreference {
+    observed.effective = observed.stored.clone();
+    if observed.key.0 == "appearance" {
+        translate_appearance_for_shell(&mut observed.stored);
+        translate_appearance_for_shell(&mut observed.effective);
+    }
+    observed.applied = true;
+    observed
 }
 
 impl DurablePreferences {
@@ -2641,12 +2659,9 @@ impl DurablePreferences {
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
             && let Some(appearance) = state.get_mut("appearance")
         {
-            let canonical = match appearance.as_str() {
-                Some("Day") => Some("light"),
-                Some("Dusk") => Some("dark"),
-                _ => None,
-            };
-            if let Some(canonical) = canonical {
+            let canonical = appearance.as_str().map(appearance_for_storage);
+            if canonical != appearance.as_str() {
+                let canonical = canonical.expect("string appearance when translation differs");
                 *appearance = serde_json::Value::String(canonical.into());
                 let temporary =
                     state_file.with_extension(format!("json.migrate.tmp.{}", std::process::id()));
@@ -2729,45 +2744,23 @@ impl DurablePreferences {
 
 impl PreferencePort for DurablePreferences {
     fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
-        if key.0 == "appearance" {
-            let value = self
-                .launcher_state()?
-                .get("appearance")
-                .and_then(serde_json::Value::as_str)
-                .map_or("Dusk", appearance_for_shell)
-                .to_owned();
-            return Ok(Some(EffectivePreference {
-                key: key.clone(),
-                effective: PreferenceValue::Text(value.clone()),
-                stored: PreferenceValue::Text(value),
-                applied: true,
-            }));
-        }
         if matches!(key.0.as_str(), "firstRunComplete" | "safeReturnBinding") {
             return Ok(None);
         }
-        self.inner.read(key).map(|value| {
-            value.map(|mut observed| {
-                observed.effective = observed.stored.clone();
-                observed.applied = true;
-                observed
-            })
-        })
+        self.inner
+            .read(key)
+            .map(|value| value.map(apply_shell_preference_semantics))
     }
 
     fn next_change(&mut self, deadline: Deadline) -> Result<PreferencePoll, PreferenceError> {
         if let Some(change) = self.pending.pop_front() {
-            return Ok(PreferencePoll::Changed(change));
+            return Ok(PreferencePoll::Changed(apply_shell_preference_semantics(
+                change,
+            )));
         }
         self.inner.next_change(deadline).map(|poll| match poll {
-            PreferencePoll::Changed(mut change) => {
-                change.effective = change.stored.clone();
-                if change.key.0 == "appearance" {
-                    translate_appearance_for_shell(&mut change.stored);
-                    translate_appearance_for_shell(&mut change.effective);
-                }
-                change.applied = true;
-                PreferencePoll::Changed(change)
+            PreferencePoll::Changed(change) => {
+                PreferencePoll::Changed(apply_shell_preference_semantics(change))
             }
             other => other,
         })
@@ -2779,38 +2772,27 @@ impl PreferencePort for DurablePreferences {
     ) -> Result<PreferenceChangeResult, PreferenceError> {
         if matches!(
             change.key.0.as_str(),
-            "firstRunComplete" | "safeReturnBinding" | "appearance"
+            "firstRunComplete" | "safeReturnBinding"
         ) {
             if change.authority != ChangeAuthority("user".into()) {
                 return Ok(PreferenceChangeResult::Unauthorized);
             }
             let mut state = self.launcher_state()?;
-            let effective = change.value.clone();
             let key = change.key;
             let value = match change.value {
                 PreferenceValue::Bool(value) => serde_json::Value::Bool(value),
-                PreferenceValue::Text(value) if key.0 == "appearance" => serde_json::Value::String(
-                    match value.as_str() {
-                        "Day" => "light",
-                        "Dusk" => "dark",
-                        other => other,
-                    }
-                    .to_owned(),
-                ),
                 PreferenceValue::Text(value) => serde_json::Value::String(value),
                 PreferenceValue::Integer(value) => serde_json::Value::Number(value.into()),
             };
             state.insert(key.0.clone(), value);
             self.write_launcher_state(&state)?;
-            if key.0 == "appearance" {
-                self.pending.push_back(EffectivePreference {
-                    key,
-                    effective: effective.clone(),
-                    stored: effective,
-                    applied: true,
-                });
-            }
             return Ok(PreferenceChangeResult::Accepted);
+        }
+        let mut change = change;
+        if change.key.0 == "appearance"
+            && let PreferenceValue::Text(value) = &mut change.value
+        {
+            *value = appearance_for_storage(value).to_owned();
         }
         let key = change.key.clone();
         let result = self.inner.submit_change(change)?;
@@ -8716,6 +8698,49 @@ exec="./launch"
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
         core.preference_changed(&change);
         assert_eq!(core.theme_base(), pf_theme::Base::Day);
+    }
+
+    #[test]
+    fn appearance_reads_and_writes_use_the_inner_preference_backend() {
+        let backend_dir = tempfile::tempdir().unwrap();
+        let launcher_dir = tempfile::tempdir().unwrap();
+        let backend = pf_prefs::PrefsStore::at(backend_dir.path());
+        backend
+            .apply("appearance", pf_prefs::PrefValue::Enum("light"))
+            .unwrap();
+        let launcher_state = launcher_dir.path().join("prefs.json");
+        std::fs::write(&launcher_state, r#"{"firstRunComplete":true}"#).unwrap();
+        let mut preferences = DurablePreferences {
+            inner: PrefsPreferencePort::for_user(backend.clone()).unwrap(),
+            state_file: launcher_state.clone(),
+            pending: VecDeque::new(),
+        };
+
+        let observed = preferences
+            .read(&PreferenceKey("appearance".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.stored, PreferenceValue::Text("Day".into()));
+        assert_eq!(observed.effective, PreferenceValue::Text("Day".into()));
+
+        assert_eq!(
+            preferences
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("appearance".into()),
+                    value: PreferenceValue::Text("Day".into()),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap(),
+            PreferenceChangeResult::Accepted
+        );
+        assert_eq!(
+            backend.load().unwrap().value("appearance").unwrap(),
+            pf_prefs::PrefValue::Enum("light")
+        );
+        let launcher_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(launcher_state).unwrap()).unwrap();
+        assert_eq!(launcher_json.get("appearance"), None);
+        assert_eq!(launcher_json["firstRunComplete"], true);
     }
 
     #[test]

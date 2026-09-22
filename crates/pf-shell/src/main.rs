@@ -54,6 +54,7 @@ const RUNTIME_ABI: &str = "1";
 // A future input-repeat preference may own these handheld defaults.
 const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
+const INTERACTIVE_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const LOW_BATTERY_PERCENT: u8 = 20;
 static CATALOG_RELOAD_REQUESTED: LazyLock<Arc<AtomicBool>> =
@@ -263,6 +264,10 @@ impl KeyRepeatScheduler {
 
     fn clear(&mut self) {
         self.held.clear();
+    }
+
+    fn is_active(&self) -> bool {
+        !self.held.is_empty()
     }
 }
 
@@ -1243,7 +1248,7 @@ trait InteractiveInput<H> {
     fn next_action(
         &mut self,
         host: &mut H,
-        deadline: Deadline,
+        _deadline: Deadline,
         latency_trace: Option<&LatencyTrace>,
     ) -> Result<DecodedActionPoll, String>;
     fn capture_next_button(&mut self);
@@ -1292,7 +1297,7 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
     fn next_action(
         &mut self,
         host: &mut H,
-        deadline: Deadline,
+        _deadline: Deadline,
         latency_trace: Option<&LatencyTrace>,
     ) -> Result<DecodedActionPoll, String> {
         host.service();
@@ -1300,7 +1305,12 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
             return Ok(DecodedActionPoll::Closed);
         }
         let now = self.started.elapsed();
-        match self.source.next_input_event(deadline) {
+        let timeout = if self.repeat.is_active() {
+            EVDEV_REPEAT_INTERVAL
+        } else {
+            INTERACTIVE_IDLE_POLL_INTERVAL
+        };
+        match self.source.next_input_event_timeout(timeout) {
             Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
                 let ingress_us = latency_trace.map(LatencyTrace::now_us);
                 self.repeat.transition(
@@ -1618,10 +1628,14 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             if matches!(poll, DecodedActionPoll::Closed) {
                 return Ok(());
             }
-            if before != redraw_state(core) && present_interactive(host, core, &activate)? {
-                frames.increment();
-                presented_revision = core.revision();
-            }
+            present_if_changed(
+                host,
+                core,
+                &activate,
+                &before,
+                &mut frames,
+                &mut presented_revision,
+            )?;
             continue;
         };
         let trace_scene_before = latency_trace
@@ -2446,6 +2460,28 @@ fn redraw_state(
         core.session_status().map(str::to_owned),
         core.revision(),
     )
+}
+
+fn present_if_changed(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    activate: &str,
+    before: &(
+        pf_shell_core::Presentation,
+        usize,
+        bool,
+        Option<String>,
+        u64,
+    ),
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+) -> Result<bool, String> {
+    if *before == redraw_state(core) || !present_interactive(host, core, activate)? {
+        return Ok(false);
+    }
+    frames.increment();
+    *presented_revision = core.revision();
+    Ok(true)
 }
 
 fn wait_for_session_authority(
@@ -8683,6 +8719,38 @@ exec="./launch"
     struct ScriptedInteractiveInput {
         polls: VecDeque<DecodedActionPoll>,
         stamp_and_delay: Option<Duration>,
+    }
+
+    #[test]
+    fn idle_state_does_not_present_another_frame() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = OffscreenHost::new(SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        });
+        let before = redraw_state(&core);
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+
+        assert!(
+            !present_if_changed(
+                &mut host,
+                &mut core,
+                "A Open",
+                &before,
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(frames.get(), 0);
+        assert_eq!(presented_revision, 0);
     }
 
     impl InteractiveInput<OffscreenHost> for ScriptedInteractiveInput {

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 rust-version = "1.85"
-name = "pf-wire"
+name = "pf-text-raster"
 version = "0.0.1"
 authors = ["PocketForge <noreply@pocketforge.os>"]
 build = false
@@ -21,17 +21,27 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "PocketForge capability-broker wire protocol (PFW1): length-prefixed, protobuf-wire-compatible framing + messages. Zero deps; reimplementable from wire/WIRE-PROTOCOL.md."
+description = "Framework-neutral deterministic text measurement and rasterization"
 readme = false
 license = "MIT"
 repository = "https://github.com/pocketforge-os/runtime"
 
+[features]
+default = []
+default-fonts = []
+
 [lib]
-name = "pf_wire"
+name = "pf_text_raster"
 path = "src/lib.rs"
 
-[[test]]
-name = "frozen_contract"
-path = "tests/frozen_contract.rs"
-
 [dependencies]
+tiny-skia = "0.12"
+
+[dependencies.cosmic-text-tracking]
+version = "0.15"
+features = [
+    "std",
+    "swash",
+]
+default-features = false
+package = "cosmic-text"

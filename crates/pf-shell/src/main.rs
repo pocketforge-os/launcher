@@ -2620,6 +2620,32 @@ impl DurablePreferences {
     fn open(state_dir: &Path) -> Result<Self, String> {
         let store = PrefsStore::at(state_dir);
         let state_file = store.path().to_owned();
+        // Runtime schema v2 owns `appearance` as the stable light/dark enum. Migrate the
+        // launcher's former presentation labels before pf-prefs validates the document.
+        if let Ok(text) = fs::read_to_string(&state_file)
+            && let Ok(mut state) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            && let Some(appearance) = state.get_mut("appearance")
+        {
+            let canonical = match appearance.as_str() {
+                Some("Day") => Some("light"),
+                Some("Dusk") => Some("dark"),
+                _ => None,
+            };
+            if let Some(canonical) = canonical {
+                *appearance = serde_json::Value::String(canonical.into());
+                let temporary =
+                    state_file.with_extension(format!("json.migrate.tmp.{}", std::process::id()));
+                fs::write(
+                    &temporary,
+                    serde_json::to_vec_pretty(&state)
+                        .map_err(|e| format!("preferences migration: {e}"))?,
+                )
+                .map_err(|e| format!("preferences migration: {e}"))?;
+                fs::rename(temporary, &state_file)
+                    .map_err(|e| format!("preferences migration: {e}"))?;
+            }
+        }
         let inner =
             PrefsPreferencePort::for_user(store).map_err(|e| format!("preferences: {e:?}"))?;
         Ok(Self {
@@ -2694,7 +2720,11 @@ impl PreferencePort for DurablePreferences {
                 .launcher_state()?
                 .get("appearance")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("Dusk")
+                .map_or("Dusk", |value| match value {
+                    "light" => "Day",
+                    "dark" => "Dusk",
+                    legacy => legacy,
+                })
                 .to_owned();
             return Ok(Some(EffectivePreference {
                 key: key.clone(),
@@ -2742,12 +2772,20 @@ impl PreferencePort for DurablePreferences {
             }
             let mut state = self.launcher_state()?;
             let effective = change.value.clone();
+            let key = change.key;
             let value = match change.value {
                 PreferenceValue::Bool(value) => serde_json::Value::Bool(value),
+                PreferenceValue::Text(value) if key.0 == "appearance" => serde_json::Value::String(
+                    match value.as_str() {
+                        "Day" => "light",
+                        "Dusk" => "dark",
+                        other => other,
+                    }
+                    .to_owned(),
+                ),
                 PreferenceValue::Text(value) => serde_json::Value::String(value),
                 PreferenceValue::Integer(value) => serde_json::Value::Number(value.into()),
             };
-            let key = change.key;
             state.insert(key.0.clone(), value);
             self.write_launcher_state(&state)?;
             if key.0 == "appearance" {
@@ -3822,9 +3860,10 @@ fn assert_raster_text_legible(
 fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
     notes
         .iter()
-        .map(|note| match note {
+        .filter_map(|note| match note {
             RenderNote::ImageDecodeFailed { source_id }
-            | RenderNote::ImageTooLarge { source_id, .. } => source_id.as_str(),
+            | RenderNote::ImageTooLarge { source_id, .. } => Some(source_id.as_str()),
+            RenderNote::DecorationRingTargetMissing { .. } => None,
         })
         .collect()
 }

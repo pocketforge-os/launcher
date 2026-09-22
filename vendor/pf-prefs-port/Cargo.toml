@@ -11,7 +11,7 @@
 
 [package]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 name = "pf-prefs-port"
 version = "0.0.1"
 authors = ["PocketForge <noreply@pocketforge.os>"]

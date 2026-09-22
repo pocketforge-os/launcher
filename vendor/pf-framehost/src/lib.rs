@@ -72,7 +72,7 @@ pub struct FbInfo {
     pub yoffset: u32,
 }
 
-/// Clockwise scene-to-framebuffer rotation.
+/// Clockwise rotation applied while copying the logical scene to the framebuffer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PresentRotation {
     #[default]
@@ -93,7 +93,7 @@ impl PresentRotation {
         }
     }
 
-    fn degrees(self) -> u16 {
+    pub fn degrees(self) -> u16 {
         match self {
             Self::Rotate0 => 0,
             Self::Rotate90 => 90,
@@ -107,8 +107,9 @@ impl PresentRotation {
     }
 }
 
+/// Input which selected the fbdev presentation rotation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RotationSource {
+pub enum RotationSource {
     Flag,
     DrmPanelOrientation,
     Fbcon,
@@ -116,7 +117,7 @@ enum RotationSource {
 }
 
 impl RotationSource {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Flag => "flag",
             Self::DrmPanelOrientation => "drm-panel-orientation",
@@ -149,6 +150,7 @@ pub struct FbdevHost {
     last_frame: Option<RasterFrame>,
     pending_damage: [Option<DamageRect>; 2],
     rotation: PresentRotation,
+    rotation_source: RotationSource,
 }
 
 impl FbdevHost {
@@ -176,13 +178,13 @@ impl FbdevHost {
             info.height,
         );
         eprintln!(
-            "pf-shell: fbdev {}x{} present={} source={}",
+            "fbdev {}x{} present={} source={}",
             info.width,
             info.height,
             rotation.degrees(),
             source.label()
         );
-        Self::from_parts_with_rotation(file, info, Box::new(IoctlPan), rotation)
+        Self::from_parts_with_rotation(file, info, Box::new(IoctlPan), rotation, source)
     }
 
     pub fn from_file(file: File, info: FbInfo) -> Result<Self, PresentFailure> {
@@ -190,7 +192,13 @@ impl FbdevHost {
     }
 
     fn from_parts(file: File, info: FbInfo, pan: Box<dyn Pan>) -> Result<Self, PresentFailure> {
-        Self::from_parts_with_rotation(file, info, pan, PresentRotation::Rotate0)
+        Self::from_parts_with_rotation(
+            file,
+            info,
+            pan,
+            PresentRotation::Rotate0,
+            RotationSource::Flag,
+        )
     }
 
     fn from_parts_with_rotation(
@@ -198,6 +206,7 @@ impl FbdevHost {
         info: FbInfo,
         pan: Box<dyn Pan>,
         rotation: PresentRotation,
+        rotation_source: RotationSource,
     ) -> Result<Self, PresentFailure> {
         if info.width == 0
             || info.height == 0
@@ -237,6 +246,7 @@ impl FbdevHost {
             last_frame: None,
             pending_damage: [None, None],
             rotation,
+            rotation_source,
         })
     }
 
@@ -246,6 +256,10 @@ impl FbdevHost {
 
     pub fn set_text_scale(&mut self, factor: f32) -> Result<(), RenderError> {
         self.renderer.set_text_scale(factor)
+    }
+
+    pub fn presentation_rotation(&self) -> (PresentRotation, RotationSource) {
+        (self.rotation, self.rotation_source)
     }
 
     fn write_frame(&mut self, frame: &RasterFrame) -> io::Result<()> {
@@ -265,9 +279,8 @@ impl FbdevHost {
         };
         let page_bytes = self.info.stride as u64 * self.info.height as u64;
         let bpp = bytes_per_pixel(self.info.format);
-        // Rotation changes both axes, so a logical damage rectangle is not a
-        // contiguous framebuffer row range. A changed frame is therefore copied
-        // in full; on the target XRGB8888 720x1280 fb this is 3.7 MB/present.
+        // Rotated logical damage is not a contiguous framebuffer row range, so
+        // copy the complete changed frame. On the target this is 3.7 MB/present.
         let _ = damage;
         let mut row = vec![0; self.info.width as usize * bpp];
         for y in 0..self.info.height as usize {
@@ -336,9 +349,9 @@ fn resolve_rotation(
 fn panel_orientation_rotation(name: &str) -> Option<PresentRotation> {
     match name {
         "Normal" => Some(PresentRotation::Rotate0),
-        "Left Side Up" => Some(PresentRotation::Rotate90),
-        "Bottom Up" => Some(PresentRotation::Rotate180),
-        "Right Side Up" => Some(PresentRotation::Rotate270),
+        "Left Side Up" => Some(PresentRotation::Rotate270),
+        "Upside Down" => Some(PresentRotation::Rotate180),
+        "Right Side Up" => Some(PresentRotation::Rotate90),
         _ => None,
     }
 }
@@ -411,9 +424,9 @@ struct DrmPropertyEnum {
     name: [libc::c_char; 32],
 }
 
-const DRM_IOCTL_MODE_GETRESOURCES: libc::Ioctl = 0xc040_64a0;
-const DRM_IOCTL_MODE_GETCONNECTOR: libc::Ioctl = 0xc050_64a7;
-const DRM_IOCTL_MODE_GETPROPERTY: libc::Ioctl = 0xc040_64aa;
+const DRM_IOCTL_MODE_GETRESOURCES: libc::Ioctl = 0xc040_64a0_u32 as libc::Ioctl;
+const DRM_IOCTL_MODE_GETCONNECTOR: libc::Ioctl = 0xc050_64a7_u32 as libc::Ioctl;
+const DRM_IOCTL_MODE_GETPROPERTY: libc::Ioctl = 0xc040_64aa_u32 as libc::Ioctl;
 
 fn drm_panel_orientation(fbdev: &Path) -> io::Result<Option<PresentRotation>> {
     let fb_name = fbdev
@@ -444,6 +457,7 @@ fn drm_panel_orientation_fd(fd: RawFd) -> io::Result<Option<PresentRotation>> {
     if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut resources) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    connectors.truncate(resources.count_connectors as usize);
     for connector_id in connectors {
         if let Some(rotation) = drm_connector_orientation(fd, connector_id)? {
             return Ok(Some(rotation));
@@ -470,6 +484,9 @@ fn drm_connector_orientation(fd: RawFd, connector_id: u32) -> io::Result<Option<
     if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &mut connector) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    let count = connector.count_props as usize;
+    property_ids.truncate(count);
+    property_values.truncate(count);
     for (&property_id, &value) in property_ids.iter().zip(&property_values) {
         if let Some(rotation) = drm_property_orientation(fd, property_id, value)? {
             return Ok(Some(rotation));
@@ -502,6 +519,7 @@ fn drm_property_orientation(
     if unsafe { libc::ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, &mut property) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    enums.truncate(property.count_enum_blobs as usize);
     Ok(enums
         .iter()
         .find(|entry| entry.value == current_value)
@@ -977,8 +995,18 @@ mod tests {
             info,
             Box::new(FakePan { calls, fail: false }),
             PresentRotation::Rotate90,
+            RotationSource::DrmPanelOrientation,
         )
         .unwrap();
+        assert_eq!(host.metrics().logical_width, 1280.0);
+        assert_eq!(host.metrics().logical_height, 720.0);
+        assert_eq!(
+            host.presentation_rotation(),
+            (
+                PresentRotation::Rotate90,
+                RotationSource::DrmPanelOrientation
+            )
+        );
         let frame = pixel_frame(1280, 720);
         host.write_frame(&frame).unwrap();
         let mut bytes = vec![0; info.stride as usize * info.height as usize];
@@ -1015,6 +1043,7 @@ mod tests {
             info,
             Box::new(FakePan { calls, fail: false }),
             PresentRotation::Rotate0,
+            RotationSource::Flag,
         )
         .unwrap();
         let frame = pixel_frame(1280, 720);
@@ -1049,7 +1078,7 @@ mod tests {
                 Some(PresentRotation::Rotate270),
                 Some(PresentRotation::Rotate90),
                 720,
-                1280
+                1280,
             ),
             (
                 PresentRotation::Rotate270,
@@ -1071,30 +1100,50 @@ mod tests {
     }
 
     #[test]
-    fn panel_orientation_and_fbcon_fixtures_map_to_rotations() {
-        assert_eq!(
-            panel_orientation_rotation("Normal"),
-            Some(PresentRotation::Rotate0)
-        );
-        assert_eq!(
-            panel_orientation_rotation("Left Side Up"),
-            Some(PresentRotation::Rotate90)
-        );
-        assert_eq!(
-            panel_orientation_rotation("Bottom Up"),
-            Some(PresentRotation::Rotate180)
-        );
-        assert_eq!(
-            panel_orientation_rotation("Right Side Up"),
-            Some(PresentRotation::Rotate270)
-        );
+    fn orientation_fixtures_map_to_rotations() {
+        for (name, expected, buffer_position, buffer_size) in [
+            ("Normal", PresentRotation::Rotate0, (0, 0), (1280, 720)),
+            (
+                "Upside Down",
+                PresentRotation::Rotate180,
+                (1279, 719),
+                (1280, 720),
+            ),
+            (
+                "Left Side Up",
+                PresentRotation::Rotate270,
+                (0, 1279),
+                (720, 1280),
+            ),
+            (
+                "Right Side Up",
+                PresentRotation::Rotate90,
+                (719, 0),
+                (720, 1280),
+            ),
+        ] {
+            assert_eq!(panel_orientation_rotation(name), Some(expected), "{name}");
+            let (x, y) = buffer_position;
+            let (buffer_width, buffer_height) = buffer_size;
+            assert!(x < buffer_width && y < buffer_height, "{name}");
+            assert_eq!(
+                source_coordinates(expected, x, y, 1280, 720),
+                (0, 0),
+                "scene origin placement for {name}"
+            );
+        }
+        assert_eq!(panel_orientation_rotation("Bottom Up"), None);
 
-        let mut fixture = tempfile::NamedTempFile::new().unwrap();
-        fixture.write_all(b"3\n").unwrap();
-        assert_eq!(
-            read_fbcon_rotation(fixture.path()).unwrap(),
-            Some(PresentRotation::Rotate270)
-        );
+        for (value, expected) in [
+            ("0\n", PresentRotation::Rotate0),
+            ("1\n", PresentRotation::Rotate90),
+            ("2\n", PresentRotation::Rotate180),
+            ("3\n", PresentRotation::Rotate270),
+        ] {
+            let mut fixture = tempfile::NamedTempFile::new().unwrap();
+            fixture.write_all(value.as_bytes()).unwrap();
+            assert_eq!(read_fbcon_rotation(fixture.path()).unwrap(), Some(expected));
+        }
     }
 
     #[test]

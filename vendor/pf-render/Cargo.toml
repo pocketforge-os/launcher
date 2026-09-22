@@ -35,7 +35,20 @@ png = "0.17"
 serde_json = "1"
 tiny-skia = "0.12"
 
-[dependencies.cosmic-text-tracking]
+[dependencies.pf-scene]
+version = "0.0.1"
+path = "../pf-scene"
+
+[dependencies.pf-text-raster]
+version = "0.0.1"
+path = "../pf-text-raster"
+features = ["default-fonts"]
+
+[dependencies.pf-theme]
+version = "0.0.1"
+path = "../pf-theme"
+
+[dev-dependencies.cosmic-text-tracking]
 version = "0.15"
 features = [
     "std",
@@ -43,14 +56,6 @@ features = [
 ]
 default-features = false
 package = "cosmic-text"
-
-[dependencies.pf-scene]
-version = "0.0.1"
-path = "../pf-scene"
-
-[dependencies.pf-theme]
-version = "0.0.1"
-path = "../pf-theme"
 
 [build-dependencies]
 serde_json = "1"

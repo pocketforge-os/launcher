@@ -2,7 +2,7 @@ use pf_catalog::{
     CatalogItem, CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
     VariantPinCommitResult,
 };
-use pf_framehost::{FbdevHost, OffscreenHost};
+use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
@@ -149,7 +149,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -872,7 +872,9 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
         let input = value(&args, "--input").unwrap_or("/dev/input/event0");
-        let mut host = FbdevHost::open(framebuffer).map_err(|e| e.to_string())?;
+        let rotation = value(&args, "--rotate").and_then(PresentRotation::from_degrees);
+        let mut host =
+            FbdevHost::open_with_rotation(framebuffer, rotation).map_err(|e| e.to_string())?;
         let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
             .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
@@ -3996,7 +3998,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 12] = [
+    const VALUE_FLAGS: [&str; 13] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -4005,6 +4007,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--device",
         "--input",
         "--out",
+        "--rotate",
         "--session-socket",
         "--state-dir",
         "--surface",
@@ -4026,6 +4029,14 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         && !matches!(scale, "100" | "150" | "200")
     {
         return Err("usage error: --text-scale must be 100, 150, or 200".into());
+    }
+    if let Some(rotation) = value(args, "--rotate")
+        && PresentRotation::from_degrees(rotation).is_none()
+    {
+        return Err("usage error: --rotate must be 0, 90, 180, or 270".into());
+    }
+    if value(args, "--rotate").is_some() && !args.iter().any(|arg| arg == "--fbdev") {
+        return Err("usage error: --rotate requires --fbdev".into());
     }
     #[cfg(not(feature = "wayland"))]
     if args.iter().any(|arg| arg == "--wayland") {

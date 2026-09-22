@@ -21,7 +21,10 @@ use std::{
     os::fd::OwnedFd,
     os::unix::fs::FileTypeExt,
     path::Path,
+    time::Duration,
 };
+
+const DEFAULT_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Minimal Linux evdev source. It reads complete native `input_event` records without unsafe code
 /// and maps press events through the descriptor's effective semantic map.
@@ -168,6 +171,21 @@ impl EvdevActionSource {
         &mut self,
         _deadline: Deadline,
     ) -> Result<Option<EvdevInputEvent>, ActionSourceError> {
+        self.next_input_event_timeout(DEFAULT_IDLE_POLL_INTERVAL)
+    }
+
+    /// Polls one physical key transition, waiting no longer than `timeout`.
+    ///
+    /// # Errors
+    /// Returns [`ActionSourceError::Unavailable`] when polling fails or the device is lost,
+    /// and [`ActionSourceError::CorruptSequence`] for an incomplete event record.
+    ///
+    /// # Panics
+    /// Panics only if the internally allocated native `input_event` record has an invalid size.
+    pub fn next_input_event_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<EvdevInputEvent>, ActionSourceError> {
         if !self.announced {
             self.announced = true;
             return Ok(Some(EvdevInputEvent::ActiveSourceChanged));
@@ -176,16 +194,10 @@ impl EvdevActionSource {
             &self.file,
             rustix::event::PollFlags::IN,
         )];
-        // Keep the framebuffer loop responsive to session-authority receipts even
-        // while the player is not touching an input device.
-        let ready = rustix::event::poll(
-            &mut descriptors,
-            Some(&rustix::event::Timespec {
-                tv_sec: 0,
-                tv_nsec: 16_000_000,
-            }),
-        )
-        .map_err(|_| ActionSourceError::Unavailable)?;
+        let timeout = rustix::event::Timespec::try_from(timeout)
+            .map_err(|_| ActionSourceError::Unavailable)?;
+        let ready = rustix::event::poll(&mut descriptors, Some(&timeout))
+            .map_err(|_| ActionSourceError::Unavailable)?;
         if ready == 0 {
             return Ok(None);
         }
@@ -705,8 +717,58 @@ mod tests {
     use super::*;
     use pf_ports::MonotonicTime;
     use std::io::Write;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
+
+    fn thread_cpu_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+        let fields = stat.rsplit_once(") ").unwrap().1.split_whitespace();
+        let fields = fields.collect::<Vec<_>>();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+    }
+
+    #[test]
+    fn idle_poll_consumes_less_than_five_percent_cpu() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let file = File::from(OwnedFd::from(reader));
+        let mut source = EvdevActionSource {
+            file,
+            _grab: None,
+            by_code: BTreeMap::new(),
+            control_by_code: BTreeMap::new(),
+            capture_next: false,
+            source: InputSourceId("idle-test".into()),
+            announced: true,
+        };
+        let wall_start = std::time::Instant::now();
+        let cpu_start = thread_cpu_ticks();
+
+        for _ in 0..4 {
+            assert_eq!(
+                source
+                    .next_input_event_timeout(DEFAULT_IDLE_POLL_INTERVAL)
+                    .unwrap(),
+                None
+            );
+        }
+
+        let elapsed = wall_start.elapsed();
+        let cpu_ticks = thread_cpu_ticks() - cpu_start;
+        assert!(elapsed >= Duration::from_millis(900), "elapsed={elapsed:?}");
+        let tick_hz = rustix::param::clock_ticks_per_second();
+        let max_cpu_ticks = u64::try_from(elapsed.as_micros())
+            .unwrap()
+            .saturating_mul(tick_hz)
+            .saturating_mul(5)
+            / 100
+            / 1_000_000;
+        assert!(
+            cpu_ticks <= max_cpu_ticks,
+            "idle consumed {cpu_ticks} CPU ticks over {elapsed:?} (5% limit: {max_cpu_ticks})"
+        );
+    }
 
     fn remap_with_bindings(activate: &str, back: &str) -> GamepadRemap {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();

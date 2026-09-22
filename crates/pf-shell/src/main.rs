@@ -2616,6 +2616,20 @@ struct DurablePreferences {
     pending: VecDeque<EffectivePreference>,
 }
 
+fn appearance_for_shell(value: &str) -> &str {
+    match value {
+        "light" => "Day",
+        "dark" => "Dusk",
+        legacy => legacy,
+    }
+}
+
+fn translate_appearance_for_shell(value: &mut PreferenceValue) {
+    if let PreferenceValue::Text(text) = value {
+        *text = appearance_for_shell(text).to_owned();
+    }
+}
+
 impl DurablePreferences {
     fn open(state_dir: &Path) -> Result<Self, String> {
         let store = PrefsStore::at(state_dir);
@@ -2720,11 +2734,7 @@ impl PreferencePort for DurablePreferences {
                 .launcher_state()?
                 .get("appearance")
                 .and_then(serde_json::Value::as_str)
-                .map_or("Dusk", |value| match value {
-                    "light" => "Day",
-                    "dark" => "Dusk",
-                    legacy => legacy,
-                })
+                .map_or("Dusk", appearance_for_shell)
                 .to_owned();
             return Ok(Some(EffectivePreference {
                 key: key.clone(),
@@ -2752,6 +2762,10 @@ impl PreferencePort for DurablePreferences {
         self.inner.next_change(deadline).map(|poll| match poll {
             PreferencePoll::Changed(mut change) => {
                 change.effective = change.stored.clone();
+                if change.key.0 == "appearance" {
+                    translate_appearance_for_shell(&mut change.stored);
+                    translate_appearance_for_shell(&mut change.effective);
+                }
                 change.applied = true;
                 PreferencePoll::Changed(change)
             }
@@ -8677,6 +8691,31 @@ exec="./launch"
                 .effective,
             PreferenceValue::Text("Day".into())
         );
+    }
+
+    #[test]
+    fn external_appearance_change_is_translated_and_applied_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        pf_prefs::PrefsStore::at(dir.path())
+            .apply("appearance", pf_prefs::PrefValue::Enum("light"))
+            .unwrap();
+
+        let PreferencePoll::Changed(change) = preferences
+            .next_change(Deadline(MonotonicTime::ZERO))
+            .unwrap()
+        else {
+            panic!("external appearance change must be observed")
+        };
+        assert_eq!(change.stored, PreferenceValue::Text("Day".into()));
+        assert_eq!(change.effective, PreferenceValue::Text("Day".into()));
+        assert!(change.applied);
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.preference_changed(&change);
+        assert_eq!(core.theme_base(), pf_theme::Base::Day);
     }
 
     #[test]

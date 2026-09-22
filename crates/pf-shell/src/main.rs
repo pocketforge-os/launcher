@@ -1275,15 +1275,41 @@ trait EvdevHost {
 
 impl EvdevHost for FbdevHost {}
 
-struct EvdevInteractiveInput<'a> {
-    source: &'a mut EvdevActionSource,
+trait EvdevEventSource {
+    fn next_input_event_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError>;
+    fn capture_next_button(&mut self) {}
+    fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+}
+
+impl EvdevEventSource for EvdevActionSource {
+    fn next_input_event_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError> {
+        EvdevActionSource::next_input_event_timeout(self, timeout)
+    }
+
+    fn capture_next_button(&mut self) {
+        EvdevActionSource::capture_next_button(self);
+    }
+
+    fn apply_effective_map(&mut self, map: &EffectiveMap) {
+        EvdevActionSource::apply_effective_map(self, map);
+    }
+}
+
+struct EvdevInteractiveInput<'a, S = EvdevActionSource> {
+    source: &'a mut S,
     repeat: KeyRepeatScheduler,
     pending: VecDeque<(ShellAction, Option<u64>)>,
     started: Instant,
 }
 
-impl<'a> EvdevInteractiveInput<'a> {
-    fn new(source: &'a mut EvdevActionSource) -> Self {
+impl<'a, S> EvdevInteractiveInput<'a, S> {
+    fn new(source: &'a mut S) -> Self {
         Self {
             source,
             repeat: KeyRepeatScheduler::default(),
@@ -1293,7 +1319,7 @@ impl<'a> EvdevInteractiveInput<'a> {
     }
 }
 
-impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
+impl<H: EvdevHost, S: EvdevEventSource> InteractiveInput<H> for EvdevInteractiveInput<'_, S> {
     fn next_action(
         &mut self,
         host: &mut H,
@@ -1304,13 +1330,14 @@ impl<H: EvdevHost> InteractiveInput<H> for EvdevInteractiveInput<'_> {
         if host.closed() {
             return Ok(DecodedActionPoll::Closed);
         }
-        let now = self.started.elapsed();
         let timeout = if self.repeat.is_active() {
             EVDEV_REPEAT_INTERVAL
         } else {
             INTERACTIVE_IDLE_POLL_INTERVAL
         };
-        match self.source.next_input_event_timeout(timeout) {
+        let event = self.source.next_input_event_timeout(timeout);
+        let now = self.started.elapsed();
+        match event {
             Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
                 let ingress_us = latency_trace.map(LatencyTrace::now_us);
                 self.repeat.transition(
@@ -7337,6 +7364,64 @@ mod durable_tests {
             scheduler
                 .due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn evdev_press_late_in_idle_poll_repeats_after_configured_delay() {
+        struct DelayedPress {
+            pressed: bool,
+        }
+
+        impl EvdevEventSource for DelayedPress {
+            fn next_input_event_timeout(
+                &mut self,
+                timeout: Duration,
+            ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError> {
+                if self.pressed {
+                    thread::sleep(timeout);
+                    Ok(None)
+                } else {
+                    thread::sleep(Duration::from_millis(225));
+                    self.pressed = true;
+                    Ok(Some(EvdevInputEvent::Pressed {
+                        code: 103,
+                        action: Some(ShellAction::Move(pf_scene::AxisMove::Up)),
+                    }))
+                }
+            }
+        }
+
+        struct OpenHost;
+        impl EvdevHost for OpenHost {}
+
+        let mut source = DelayedPress { pressed: false };
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let mut host = OpenHost;
+        assert!(matches!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
+                .unwrap(),
+            DecodedActionPoll::Event { .. }
+        ));
+        let press_returned = Instant::now();
+
+        loop {
+            if matches!(
+                input
+                    .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
+                    .unwrap(),
+                DecodedActionPoll::Event { .. }
+            ) {
+                break;
+            }
+        }
+
+        let repeat_after = press_returned.elapsed();
+        assert!(
+            repeat_after >= Duration::from_millis(320)
+                && repeat_after <= EVDEV_REPEAT_DELAY + EVDEV_REPEAT_INTERVAL,
+            "first repeat arrived {repeat_after:?} after the press (expected {EVDEV_REPEAT_DELAY:?} ± {EVDEV_REPEAT_INTERVAL:?})"
         );
     }
 

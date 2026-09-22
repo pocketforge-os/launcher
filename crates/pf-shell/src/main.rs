@@ -2,7 +2,7 @@ use pf_catalog::{
     CatalogItem, CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
     VariantPinCommitResult,
 };
-use pf_framehost::{FbdevHost, OffscreenHost};
+use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
@@ -149,7 +149,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -872,7 +872,9 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
         let input = value(&args, "--input").unwrap_or("/dev/input/event0");
-        let mut host = FbdevHost::open(framebuffer).map_err(|e| e.to_string())?;
+        let rotation = value(&args, "--rotate").and_then(PresentRotation::from_degrees);
+        let mut host =
+            FbdevHost::open_with_rotation(framebuffer, rotation).map_err(|e| e.to_string())?;
         let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
             .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
@@ -2614,10 +2616,65 @@ struct DurablePreferences {
     pending: VecDeque<EffectivePreference>,
 }
 
+const APPEARANCE_LABELS: [(&str, &str); 2] = [("light", "Day"), ("dark", "Dusk")];
+
+fn appearance_for_shell(value: &str) -> &str {
+    APPEARANCE_LABELS
+        .iter()
+        .find_map(|(stored, shell)| (*stored == value).then_some(*shell))
+        .unwrap_or(value)
+}
+
+fn appearance_for_storage(value: &str) -> &str {
+    APPEARANCE_LABELS
+        .iter()
+        .find_map(|(stored, shell)| (*shell == value).then_some(*stored))
+        .unwrap_or(value)
+}
+
+fn translate_appearance_for_shell(value: &mut PreferenceValue) {
+    if let PreferenceValue::Text(text) = value {
+        *text = appearance_for_shell(text).to_owned();
+    }
+}
+
+fn apply_shell_preference_semantics(mut observed: EffectivePreference) -> EffectivePreference {
+    observed.effective = observed.stored.clone();
+    if observed.key.0 == "appearance" {
+        translate_appearance_for_shell(&mut observed.stored);
+        translate_appearance_for_shell(&mut observed.effective);
+    }
+    observed.applied = true;
+    observed
+}
+
 impl DurablePreferences {
     fn open(state_dir: &Path) -> Result<Self, String> {
         let store = PrefsStore::at(state_dir);
         let state_file = store.path().to_owned();
+        // Runtime schema v2 owns `appearance` as the stable light/dark enum. Migrate the
+        // launcher's former presentation labels before pf-prefs validates the document.
+        if let Ok(text) = fs::read_to_string(&state_file)
+            && let Ok(mut state) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            && let Some(appearance) = state.get_mut("appearance")
+        {
+            let canonical = appearance.as_str().map(appearance_for_storage);
+            if canonical != appearance.as_str() {
+                let canonical = canonical.expect("string appearance when translation differs");
+                *appearance = serde_json::Value::String(canonical.into());
+                let temporary =
+                    state_file.with_extension(format!("json.migrate.tmp.{}", std::process::id()));
+                fs::write(
+                    &temporary,
+                    serde_json::to_vec_pretty(&state)
+                        .map_err(|e| format!("preferences migration: {e}"))?,
+                )
+                .map_err(|e| format!("preferences migration: {e}"))?;
+                fs::rename(temporary, &state_file)
+                    .map_err(|e| format!("preferences migration: {e}"))?;
+            }
+        }
         let inner =
             PrefsPreferencePort::for_user(store).map_err(|e| format!("preferences: {e:?}"))?;
         Ok(Self {
@@ -2687,41 +2744,23 @@ impl DurablePreferences {
 
 impl PreferencePort for DurablePreferences {
     fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
-        if key.0 == "appearance" {
-            let value = self
-                .launcher_state()?
-                .get("appearance")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Dusk")
-                .to_owned();
-            return Ok(Some(EffectivePreference {
-                key: key.clone(),
-                effective: PreferenceValue::Text(value.clone()),
-                stored: PreferenceValue::Text(value),
-                applied: true,
-            }));
-        }
         if matches!(key.0.as_str(), "firstRunComplete" | "safeReturnBinding") {
             return Ok(None);
         }
-        self.inner.read(key).map(|value| {
-            value.map(|mut observed| {
-                observed.effective = observed.stored.clone();
-                observed.applied = true;
-                observed
-            })
-        })
+        self.inner
+            .read(key)
+            .map(|value| value.map(apply_shell_preference_semantics))
     }
 
     fn next_change(&mut self, deadline: Deadline) -> Result<PreferencePoll, PreferenceError> {
         if let Some(change) = self.pending.pop_front() {
-            return Ok(PreferencePoll::Changed(change));
+            return Ok(PreferencePoll::Changed(apply_shell_preference_semantics(
+                change,
+            )));
         }
         self.inner.next_change(deadline).map(|poll| match poll {
-            PreferencePoll::Changed(mut change) => {
-                change.effective = change.stored.clone();
-                change.applied = true;
-                PreferencePoll::Changed(change)
+            PreferencePoll::Changed(change) => {
+                PreferencePoll::Changed(apply_shell_preference_semantics(change))
             }
             other => other,
         })
@@ -2733,30 +2772,27 @@ impl PreferencePort for DurablePreferences {
     ) -> Result<PreferenceChangeResult, PreferenceError> {
         if matches!(
             change.key.0.as_str(),
-            "firstRunComplete" | "safeReturnBinding" | "appearance"
+            "firstRunComplete" | "safeReturnBinding"
         ) {
             if change.authority != ChangeAuthority("user".into()) {
                 return Ok(PreferenceChangeResult::Unauthorized);
             }
             let mut state = self.launcher_state()?;
-            let effective = change.value.clone();
+            let key = change.key;
             let value = match change.value {
                 PreferenceValue::Bool(value) => serde_json::Value::Bool(value),
                 PreferenceValue::Text(value) => serde_json::Value::String(value),
                 PreferenceValue::Integer(value) => serde_json::Value::Number(value.into()),
             };
-            let key = change.key;
             state.insert(key.0.clone(), value);
             self.write_launcher_state(&state)?;
-            if key.0 == "appearance" {
-                self.pending.push_back(EffectivePreference {
-                    key,
-                    effective: effective.clone(),
-                    stored: effective,
-                    applied: true,
-                });
-            }
             return Ok(PreferenceChangeResult::Accepted);
+        }
+        let mut change = change;
+        if change.key.0 == "appearance"
+            && let PreferenceValue::Text(value) = &mut change.value
+        {
+            *value = appearance_for_storage(value).to_owned();
         }
         let key = change.key.clone();
         let result = self.inner.submit_change(change)?;
@@ -3820,9 +3856,10 @@ fn assert_raster_text_legible(
 fn failed_source_ids(notes: &[RenderNote]) -> Vec<&str> {
     notes
         .iter()
-        .map(|note| match note {
+        .filter_map(|note| match note {
             RenderNote::ImageDecodeFailed { source_id }
-            | RenderNote::ImageTooLarge { source_id, .. } => source_id.as_str(),
+            | RenderNote::ImageTooLarge { source_id, .. } => Some(source_id.as_str()),
+            RenderNote::DecorationRingTargetMissing { .. } => None,
         })
         .collect()
 }
@@ -3996,7 +4033,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 12] = [
+    const VALUE_FLAGS: [&str; 13] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -4005,6 +4042,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--device",
         "--input",
         "--out",
+        "--rotate",
         "--session-socket",
         "--state-dir",
         "--surface",
@@ -4026,6 +4064,14 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         && !matches!(scale, "100" | "150" | "200")
     {
         return Err("usage error: --text-scale must be 100, 150, or 200".into());
+    }
+    if let Some(rotation) = value(args, "--rotate")
+        && PresentRotation::from_degrees(rotation).is_none()
+    {
+        return Err("usage error: --rotate must be 0, 90, 180, or 270".into());
+    }
+    if value(args, "--rotate").is_some() && !args.iter().any(|arg| arg == "--fbdev") {
+        return Err("usage error: --rotate requires --fbdev".into());
     }
     #[cfg(not(feature = "wayland"))]
     if args.iter().any(|arg| arg == "--wayland") {
@@ -8627,6 +8673,74 @@ exec="./launch"
                 .effective,
             PreferenceValue::Text("Day".into())
         );
+    }
+
+    #[test]
+    fn external_appearance_change_is_translated_and_applied_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        pf_prefs::PrefsStore::at(dir.path())
+            .apply("appearance", pf_prefs::PrefValue::Enum("light"))
+            .unwrap();
+
+        let PreferencePoll::Changed(change) = preferences
+            .next_change(Deadline(MonotonicTime::ZERO))
+            .unwrap()
+        else {
+            panic!("external appearance change must be observed")
+        };
+        assert_eq!(change.stored, PreferenceValue::Text("Day".into()));
+        assert_eq!(change.effective, PreferenceValue::Text("Day".into()));
+        assert!(change.applied);
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.preference_changed(&change);
+        assert_eq!(core.theme_base(), pf_theme::Base::Day);
+    }
+
+    #[test]
+    fn appearance_reads_and_writes_use_the_inner_preference_backend() {
+        let backend_dir = tempfile::tempdir().unwrap();
+        let launcher_dir = tempfile::tempdir().unwrap();
+        let backend = pf_prefs::PrefsStore::at(backend_dir.path());
+        backend
+            .apply("appearance", pf_prefs::PrefValue::Enum("light"))
+            .unwrap();
+        let launcher_state = launcher_dir.path().join("prefs.json");
+        std::fs::write(&launcher_state, r#"{"firstRunComplete":true}"#).unwrap();
+        let mut preferences = DurablePreferences {
+            inner: PrefsPreferencePort::for_user(backend.clone()).unwrap(),
+            state_file: launcher_state.clone(),
+            pending: VecDeque::new(),
+        };
+
+        let observed = preferences
+            .read(&PreferenceKey("appearance".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.stored, PreferenceValue::Text("Day".into()));
+        assert_eq!(observed.effective, PreferenceValue::Text("Day".into()));
+
+        assert_eq!(
+            preferences
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("appearance".into()),
+                    value: PreferenceValue::Text("Day".into()),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap(),
+            PreferenceChangeResult::Accepted
+        );
+        assert_eq!(
+            backend.load().unwrap().value("appearance").unwrap(),
+            pf_prefs::PrefValue::Enum("light")
+        );
+        let launcher_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(launcher_state).unwrap()).unwrap();
+        assert_eq!(launcher_json.get("appearance"), None);
+        assert_eq!(launcher_json["firstRunComplete"], true);
     }
 
     #[test]

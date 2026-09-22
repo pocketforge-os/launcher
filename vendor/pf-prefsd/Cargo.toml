@@ -11,7 +11,7 @@
 
 [package]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 name = "pf-prefsd"
 version = "0.0.1"
 authors = ["PocketForge <noreply@pocketforge.os>"]
@@ -37,6 +37,10 @@ path = "src/bin/pf-prefsd.rs"
 [[test]]
 name = "daemon"
 path = "tests/daemon.rs"
+
+[[test]]
+name = "systemd_units"
+path = "tests/systemd_units.rs"
 
 [dependencies.libc]
 version = "0.2"

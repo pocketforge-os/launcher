@@ -8,6 +8,7 @@ members = [
   "tools/pf-input-feed",
   "tools/taffy-spike",
 ]
+exclude = ["vendor/pf-session-authority"]
 resolver = "2"
 
 [workspace.package]

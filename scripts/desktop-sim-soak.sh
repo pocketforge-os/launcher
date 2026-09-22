@@ -54,9 +54,9 @@ if [ -z "$runtime_rev" ]; then
 fi
 
 step="build-real-authority"
-cargo install --quiet --locked \
-    --git https://github.com/pocketforge-os/runtime.git \
-    --rev "$runtime_rev" --root "$work_dir/install" \
+cargo install --quiet --offline --locked \
+    --path "$repo_dir/vendor/pf-session-authority" \
+    --root "$work_dir/install" \
     --bin pf-session-authorityd pf-session-authority
 
 step="build-pf-shell"

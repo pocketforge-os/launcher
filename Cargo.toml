@@ -24,6 +24,7 @@ all = "warn"
 pedantic = "warn"
 
 [workspace.dependencies]
+pf-app-launch = { git = "https://github.com/pocketforge-os/runtime.git", rev = "0589fcfa959dca9150563ef0ed18d7d44b420dc5" }
 pf-app-manifest = { git = "https://github.com/pocketforge-os/runtime.git", rev = "0589fcfa959dca9150563ef0ed18d7d44b420dc5" }
 pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "0589fcfa959dca9150563ef0ed18d7d44b420dc5" }
 pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "0589fcfa959dca9150563ef0ed18d7d44b420dc5" }

@@ -1,5 +1,7 @@
+#[cfg(feature = "desktop-sim")]
+use pf_app_manifest::Resolver;
 use pf_app_manifest::{
-    PLATFORM_CONTRACT_PATH, PlatformContractErrorReason, Resolver, parse_platform_contract,
+    PLATFORM_CONTRACT_PATH, PlatformContractErrorReason, parse_platform_contract,
 };
 use pf_catalog::{
     CatalogItem, CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
@@ -9,8 +11,10 @@ use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
+#[cfg(feature = "desktop-sim")]
+use pf_ports::Clock;
 use pf_ports::{
-    AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Clock, Deadline,
+    AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Deadline,
     EffectivePreference, FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort,
     FakeTransferPort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime, NetworkError,
     NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
@@ -24,10 +28,11 @@ use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::{RasterFrame, Rasterizer, RenderNote};
 use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
+#[cfg(feature = "desktop-sim")]
 use pf_session_authority::{
-    Authority, CommandSystem, CommandTemplates, EndPrecision, EndStamp, FileStore, HistoryEntry,
-    serve_connection,
+    Authority, CommandSystem, CommandTemplates, FileStore, serve_connection,
 };
+use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
@@ -37,11 +42,13 @@ use pf_shell_core::{DeviceStatus, DeviceStatusPort, Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+#[cfg(feature = "desktop-sim")]
+use std::os::unix::net::UnixListener;
 use std::{
     collections::VecDeque,
     env, fs,
     io::{BufWriter, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock,
@@ -155,7 +162,13 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
+#[cfg(feature = "desktop-sim")]
+const DESKTOP_SIM_AUTHORITY_HELP: &str =
+    "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
+#[cfg(not(feature = "desktop-sim"))]
+const DESKTOP_SIM_AUTHORITY_HELP: &str = "";
+const HELP_AFTER_DESKTOP_SIM_AUTHORITY: &str = "  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlatformSupport {
@@ -776,7 +789,9 @@ fn main() -> Result<(), String> {
         .iter()
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
-        println!("{HELP}  --device-fixtures  use deterministic device state in interactive modes");
+        println!(
+            "{HELP_BEFORE_DESKTOP_SIM_AUTHORITY}{DESKTOP_SIM_AUTHORITY_HELP}{HELP_AFTER_DESKTOP_SIM_AUTHORITY}  --device-fixtures  use deterministic device state in interactive modes"
+        );
         return Ok(());
     }
     validate_args(&args)?;
@@ -786,6 +801,7 @@ fn main() -> Result<(), String> {
         env::var_os("PF_BASELINE_RECORD_ONLY").is_some(),
         env::var_os("PF_RASTER_INK_GUARD").is_some(),
     )?;
+    #[cfg(feature = "desktop-sim")]
     if args.iter().any(|arg| arg == "--desktop-sim-authority") {
         let state_dir = value(&args, "--authority-state-dir")
             .ok_or("--desktop-sim-authority requires --authority-state-dir")?;
@@ -2129,14 +2145,17 @@ fn authority_rpc(
     }
 }
 
+#[cfg(feature = "desktop-sim")]
 struct DesktopSimClock(Instant);
 
+#[cfg(feature = "desktop-sim")]
 impl Clock for DesktopSimClock {
     fn now(&self) -> MonotonicTime {
         MonotonicTime::from_nanos(u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     }
 }
 
+#[cfg(feature = "desktop-sim")]
 fn run_desktop_sim_authority(
     socket: &Path,
     state_dir: &Path,
@@ -4259,6 +4278,10 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--surface",
         "--text-scale",
     ];
+    #[cfg(not(feature = "desktop-sim"))]
+    if args.iter().any(|arg| arg == "--desktop-sim-authority") {
+        return Err("usage error: unknown mode --desktop-sim-authority; run --help".into());
+    }
     for (index, arg) in args.iter().enumerate() {
         if VALUE_FLAGS.contains(&arg.as_str())
             && args

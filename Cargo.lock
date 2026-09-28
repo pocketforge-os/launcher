@@ -439,6 +439,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "pf-app-launch"
+version = "0.0.1"
+source = "git+https://github.com/pocketforge-os/runtime.git?rev=0589fcfa959dca9150563ef0ed18d7d44b420dc5#0589fcfa959dca9150563ef0ed18d7d44b420dc5"
+dependencies = [
+ "pf-app-manifest",
+ "serde_json",
+]
+
+[[package]]
 name = "pf-app-manifest"
 version = "0.0.1"
 source = "git+https://github.com/pocketforge-os/runtime.git?rev=0589fcfa959dca9150563ef0ed18d7d44b420dc5#0589fcfa959dca9150563ef0ed18d7d44b420dc5"
@@ -596,6 +605,7 @@ version = "0.1.0"
 dependencies = [
  "evdev",
  "libc",
+ "pf-app-launch",
  "pf-app-manifest",
  "pf-catalog",
  "pf-framehost",

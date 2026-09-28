@@ -79,8 +79,8 @@ jobs:
         run: cargo nextest run --workspace --locked
       - name: Doc-tests (nextest does not run doc-tests; keep them from silently dropping)
         run: cargo test --workspace --locked --doc
-      - name: Soak desktop launch and return against real authority
+      - name: Soak desktop launch and return against desktop-sim authority
         run: ./scripts/desktop-sim-soak.sh
-      - run: cargo build -p pf-shell --features wayland --locked
-      - run: cargo test -p pf-shell --bin pf-shell --features wayland --locked wayland_
-      - run: cargo clippy -p pf-shell --features wayland --all-targets -- -D warnings
+      - run: cargo build -p pf-shell --features wayland,desktop-sim --locked
+      - run: cargo test -p pf-shell --bin pf-shell --features wayland,desktop-sim --locked wayland_
+      - run: cargo clippy -p pf-shell --features wayland,desktop-sim --all-targets -- -D warnings

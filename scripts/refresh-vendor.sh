@@ -27,8 +27,13 @@ trap 'find "$tmp" -mindepth 1 -delete; rmdir "$tmp"' EXIT
 # Resolve every workspace feature before vendoring. `cargo vendor` has no
 # `--all-features` flag: it copies every package present in Cargo.lock, so this
 # locked resolution is the guard that the lock includes optional feature deps.
-CARGO_NET_OFFLINE=false cargo metadata --locked --all-features \
-  --format-version 1 >/dev/null
+# Run outside the repository so a newly locked package is not hidden by the
+# still-stale committed offline replacement that this command is about to refresh.
+(
+  cd "$tmp"
+  CARGO_NET_OFFLINE=false cargo metadata --manifest-path "$root/Cargo.toml" \
+    --locked --all-features --format-version 1 >/dev/null
+)
 
 # Run outside the repository so Cargo does not discover .cargo/config.toml's
 # deliberately offline crates-io replacement. Refresh is the sole networked

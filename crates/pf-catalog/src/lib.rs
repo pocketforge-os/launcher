@@ -436,16 +436,16 @@ impl InstalledAppProvider {
                 required,
                 ReasonCode::PlatformVersionMismatch,
             ))
-        } else if let Some(capability) = unsupported {
-            Some((
-                Availability::UnsupportedCapability {
-                    capability: capability.clone(),
-                },
-                capability,
-                ReasonCode::UnsupportedCapability,
-            ))
         } else {
-            None
+            unsupported.map(|capability| {
+                (
+                    Availability::UnsupportedCapability {
+                        capability: capability.clone(),
+                    },
+                    capability,
+                    ReasonCode::UnsupportedCapability,
+                )
+            })
         };
         let availability = if let Some((availability, _, _)) = &incompatibility {
             availability.clone()

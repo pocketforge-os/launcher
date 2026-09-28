@@ -172,12 +172,8 @@
           "availability": {
             "state": "ready"
           },
-          "requirements": [
-            {
-              "capability": "network",
-              "optional": false
-            }
-          ],
+          "needs_network": true,
+          "requirements": [],
           "provenance": {
             "provider_id": "fixture",
             "app_version": "1",

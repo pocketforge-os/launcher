@@ -13849,10 +13849,7 @@ mod tests {
     #[test]
     fn on_card_plate_and_badge_bounds_ignore_accessible_text_scale() {
         let mut ready = variant("stream", "steam-link", Availability::Ready);
-        ready.requirements.push(Requirement {
-            capability: "network".into(),
-            optional: false,
-        });
+        ready.needs_network = true;
         let mut plate = item("steam-link", "Steam Link", vec![ready]);
         plate.kind = AppKind::Stream;
         plate.tags.push("kind-label:Stream".into());

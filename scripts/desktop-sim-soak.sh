@@ -53,8 +53,27 @@ if [ -z "$runtime_rev" ]; then
     false
 fi
 
-step="build-pf-shell"
+step="build-default-pf-shell"
 cargo build --quiet --locked --manifest-path "$repo_dir/Cargo.toml" -p pf-shell
+
+step="assert-default-rejects-desktop-sim-authority"
+default_authority_log="$work_dir/default-authority.log"
+if "$repo_dir/target/debug/pf-shell" --desktop-sim-authority >"$default_authority_log" 2>&1; then
+    false
+fi
+grep -Eq 'unknown mode|--help' "$default_authority_log"
+
+step="assert-default-help-omits-desktop-sim-authority"
+if "$repo_dir/target/debug/pf-shell" --help | grep -q -- '--desktop-sim-authority'; then
+    false
+fi
+
+step="build-desktop-sim-pf-shell"
+cargo build --quiet --locked --manifest-path "$repo_dir/Cargo.toml" -p pf-shell \
+    --features desktop-sim
+
+step="assert-desktop-sim-help-includes-authority"
+"$repo_dir/target/debug/pf-shell" --help | grep -q -- '--desktop-sim-authority'
 
 state_dir="$work_dir/authority"
 socket="$work_dir/session-authority.sock"
@@ -85,7 +104,7 @@ printf '%s\n' \
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$app_dir/bin/app"
 chmod 0755 "$app_dir/bin/app"
 
-step="start-real-authority"
+step="start-desktop-sim-authority"
 "$repo_dir/target/debug/pf-shell" \
     --desktop-sim-authority --authority-state-dir "$state_dir" --session-socket "$socket" \
     --catalog-root "$app_root" --platform-capabilities "$platform_contract" \

@@ -53,12 +53,6 @@ if [ -z "$runtime_rev" ]; then
     false
 fi
 
-step="build-real-authority"
-cargo install --quiet --offline --locked \
-    --path "$repo_dir/vendor/pf-session-authority" \
-    --root "$work_dir/install" \
-    --bin pf-session-authorityd pf-session-authority
-
 step="build-pf-shell"
 cargo build --quiet --locked --manifest-path "$repo_dir/Cargo.toml" -p pf-shell
 
@@ -66,11 +60,35 @@ state_dir="$work_dir/authority"
 socket="$work_dir/session-authority.sock"
 authority_log="$work_dir/authority.log"
 shell_log="$work_dir/shell.log"
-mkdir -p "$state_dir"
+app_id="org.pocketforge.hollow-tides"
+app_root="$work_dir/apps"
+app_dir="$app_root/$app_id"
+platform_contract="$work_dir/platform-capabilities.toml"
+mkdir -p "$state_dir" "$app_dir/bin"
+printf '%s\n' \
+    'schema_version = 1' \
+    'runtime_family = "pocketforge/native"' \
+    'runtime_abi = "1"' \
+    'platform_version = "1"' \
+    'supported_capabilities = []' >"$platform_contract"
+printf '%s\n' \
+    '[app]' \
+    "id = \"$app_id\"" \
+    'name = "Desktop Sim"' \
+    'use = []' \
+    '[runtime]' \
+    'family = "pocketforge/native"' \
+    'abi = "1"' \
+    'platform-version = "1"' \
+    '[launch]' \
+    'exec = "bin/app"' >"$app_dir/app.toml"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$app_dir/bin/app"
+chmod 0755 "$app_dir/bin/app"
 
 step="start-real-authority"
-"$work_dir/install/bin/pf-session-authorityd" \
-    --command-preset desktop-sim --state-dir "$state_dir" --socket "$socket" \
+"$repo_dir/target/debug/pf-shell" \
+    --desktop-sim-authority --authority-state-dir "$state_dir" --session-socket "$socket" \
+    --catalog-root "$app_root" --platform-capabilities "$platform_contract" \
     >"$authority_log" 2>&1 &
 authority_pid=$!
 deadline=$(( $(date +%s) + 5 ))

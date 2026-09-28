@@ -1,5 +1,6 @@
 use pf_catalog::{
-    Availability, FavoriteCommitResult, InstalledAppProvider, ManifestErrorKind, ProviderItemResult,
+    Availability, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider, ManifestErrorKind,
+    ProviderItemResult,
 };
 use std::{
     fs,
@@ -34,6 +35,7 @@ fn write(root: &Path, dir: &str, value: &str) {
 }
 fn provider(root: &Path, state: &Path) -> InstalledAppProvider {
     InstalledAppProvider::new(root, state, "pocketforge/a133-powervr", "1")
+        .with_platform_version(Some("1".into()))
         .with_supported_capabilities(["input".into()])
 }
 
@@ -83,10 +85,16 @@ fn all_typed_states_and_duplicate_titles_are_preserved() {
             .filter(|i| i.title == "Same")
             .all(|i| i.variants[0].provenance.provider_id == "installed-applications")
     );
-    assert!(s.items.iter().any(|i| matches!(
-        i.variants[0].availability,
-        Availability::NeedsNetwork { .. }
-    )));
+    let network = s
+        .items
+        .iter()
+        .find(|item| item.id.ends_with("com.example.network"))
+        .unwrap();
+    assert!(matches!(
+        network.variants[0].availability,
+        Availability::Ready
+    ));
+    assert!(network.variants[0].needs_network);
     assert!(
         s.provider_results
             .iter()
@@ -295,25 +303,157 @@ fn concurrent_favorite_commits_compare_and_swap() {
 }
 
 #[test]
-fn unknown_fields_are_typed_invalid_not_drift() {
+fn unknown_app_field_is_refused_by_shared_manifest_parser() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
     fs::create_dir(&root).unwrap();
     write(
         &root,
         "drift",
-        &manifest(
-            "com.example.drift",
-            "Drift",
-            "pocketforge/a133-powervr",
-            "invented=true",
-        ),
+        &manifest("com.example.drift", "Drift", "pocketforge/a133-powervr", "")
+            .replace("category=\"game\"", "category=\"game\"\ntheme=\"dark\""),
     );
     let s = provider(&root, &t.path().join("favorites"))
         .snapshot()
         .unwrap();
     assert!(s.items.is_empty());
     assert!(
-        matches!(&s.provider_results[0],ProviderItemResult::Invalid{error,..} if error.kind==ManifestErrorKind::Parse)
+        matches!(&s.provider_results[0],ProviderItemResult::Invalid{error,..} if error.kind==ManifestErrorKind::Validation)
     );
+}
+
+fn poolsuite_manifest() -> String {
+    r#"[app]
+id="org.pocketforge.poolsuite"
+name="Poolsuite"
+category="media"
+version="1.0.0"
+use=["input", "audio"]
+[runtime]
+family="pocketforge/a133-powervr"
+abi="1"
+platform-version="20"
+[launch]
+exec="bin/poolsuite"
+needs_network=true
+audio=true
+"#
+    .into()
+}
+
+fn scan_a133(source: &str) -> CatalogSnapshot {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    fs::create_dir(&root).unwrap();
+    write(&root, "poolsuite", source);
+    InstalledAppProvider::new(
+        &root,
+        t.path().join("favorites"),
+        "pocketforge/a133-powervr",
+        "1",
+    )
+    .with_platform_version(Some("20".into()))
+    .with_supported_capabilities(["audio".into(), "input".into()])
+    .snapshot()
+    .unwrap()
+}
+
+fn compatibility_reason(snapshot: &CatalogSnapshot) -> &str {
+    match &snapshot.provider_results[0] {
+        ProviderItemResult::Incompatible { reason, .. } => reason,
+        result => panic!("expected incompatible result, got {result:?}"),
+    }
+}
+
+#[test]
+fn a133_open_poolsuite_descriptor_is_ready_with_network_cue_metadata() {
+    let snapshot = scan_a133(&poolsuite_manifest());
+    let variant = &snapshot.items[0].variants[0];
+
+    assert!(matches!(variant.availability, Availability::Ready));
+    assert!(variant.needs_network);
+    assert!(matches!(
+        snapshot.provider_results[0],
+        ProviderItemResult::Valid { .. }
+    ));
+}
+
+#[test]
+fn runtime_family_mismatch_reports_stable_reason_code() {
+    let snapshot = scan_a133(
+        &poolsuite_manifest().replace("pocketforge/a133-powervr", "pocketforge/a523-mali"),
+    );
+
+    assert_eq!(compatibility_reason(&snapshot), "runtime_family_mismatch");
+}
+
+#[test]
+fn runtime_abi_mismatch_reports_stable_reason_code() {
+    let snapshot = scan_a133(&poolsuite_manifest().replace("abi=\"1\"", "abi=\"2\""));
+
+    assert_eq!(compatibility_reason(&snapshot), "runtime_abi_mismatch");
+}
+
+#[test]
+fn platform_version_mismatch_reports_stable_reason_code() {
+    let snapshot = scan_a133(
+        &poolsuite_manifest().replace("platform-version=\"20\"", "platform-version=\"21\""),
+    );
+
+    assert_eq!(compatibility_reason(&snapshot), "platform_version_mismatch");
+}
+
+#[test]
+fn unsupported_required_capability_reports_stable_reason_code() {
+    let snapshot = scan_a133(&poolsuite_manifest().replace(
+        "use=[\"input\", \"audio\"]",
+        "use=[\"input\", \"audio\", \"settings\"]",
+    ));
+
+    assert_eq!(compatibility_reason(&snapshot), "unsupported_capability");
+    assert!(matches!(
+        snapshot.items[0].variants[0].availability,
+        Availability::UnsupportedCapability { .. }
+    ));
+}
+
+#[test]
+fn unsupported_optional_capability_does_not_block() {
+    let snapshot = scan_a133(&poolsuite_manifest().replace(
+        "use=[\"input\", \"audio\"]",
+        "use=[\"input\", \"audio\", \"settings?\"]",
+    ));
+
+    assert!(matches!(
+        snapshot.items[0].variants[0].availability,
+        Availability::Ready
+    ));
+}
+
+#[test]
+fn invalid_app_id_is_refused_by_shared_manifest_parser() {
+    let snapshot =
+        scan_a133(&poolsuite_manifest().replace("org.pocketforge.poolsuite", "org..poolsuite"));
+
+    assert!(snapshot.items.is_empty());
+    assert!(matches!(
+        &snapshot.provider_results[0],
+        ProviderItemResult::Invalid { error, .. }
+            if error.kind == ManifestErrorKind::Validation
+                && error.message.contains("invalid app.id")
+    ));
+}
+
+#[test]
+fn snapshot_without_needs_network_deserializes_as_false() {
+    let snapshot = scan_a133(&poolsuite_manifest());
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["items"][0]["variants"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("needs_network");
+
+    let restored: CatalogSnapshot = serde_json::from_value(value).unwrap();
+
+    assert!(!restored.items[0].variants[0].needs_network);
 }

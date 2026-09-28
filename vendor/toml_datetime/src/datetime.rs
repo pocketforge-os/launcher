@@ -1,5 +1,9 @@
-use core::fmt;
-use core::str::{self, FromStr};
+use std::error;
+use std::fmt;
+use std::str::{self, FromStr};
+
+#[cfg(feature = "serde")]
+use serde::{de, ser};
 
 /// A parsed TOML datetime value
 ///
@@ -94,14 +98,12 @@ pub struct Datetime {
 //
 // In general the TOML encoder/decoder will catch this and not literally emit
 // these strings but rather emit datetimes as they're intended.
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const FIELD: &str = "$__toml_private_datetime";
+pub const FIELD: &str = "$__toml_private_datetime";
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const NAME: &str = "$__toml_private_Datetime";
-#[cfg(feature = "serde")]
-pub(crate) fn is_datetime(name: &'static str) -> bool {
-    name == NAME
-}
+pub const NAME: &str = "$__toml_private_Datetime";
 
 /// A parsed TOML date value
 ///
@@ -210,7 +212,7 @@ impl Time {
 
 impl From<Date> for Datetime {
     fn from(other: Date) -> Self {
-        Self {
+        Datetime {
             date: Some(other),
             time: None,
             offset: None,
@@ -220,7 +222,7 @@ impl From<Date> for Datetime {
 
 impl From<Time> for Datetime {
     fn from(other: Time) -> Self {
-        Self {
+        Datetime {
             date: None,
             time: Some(other),
             offset: None,
@@ -228,7 +230,6 @@ impl From<Time> for Datetime {
     }
 }
 
-#[cfg(feature = "alloc")]
 impl fmt::Display for Datetime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(ref date) = self.date {
@@ -253,12 +254,11 @@ impl fmt::Display for Date {
     }
 }
 
-#[cfg(feature = "alloc")]
 impl fmt::Display for Time {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:02}:{:02}:{:02}", self.hour, self.minute, self.second)?;
         if self.nanosecond != 0 {
-            let s = alloc::format!("{:09}", self.nanosecond);
+            let s = format!("{:09}", self.nanosecond);
             write!(f, ".{}", s.trim_end_matches('0'))?;
         }
         Ok(())
@@ -268,8 +268,8 @@ impl fmt::Display for Time {
 impl fmt::Display for Offset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Z => write!(f, "Z"),
-            Self::Custom { mut minutes } => {
+            Offset::Z => write!(f, "Z"),
+            Offset::Custom { mut minutes } => {
                 let mut sign = '+';
                 if minutes < 0 {
                     minutes *= -1;
@@ -286,7 +286,7 @@ impl fmt::Display for Offset {
 impl FromStr for Datetime {
     type Err = DatetimeParseError;
 
-    fn from_str(date: &str) -> Result<Self, DatetimeParseError> {
+    fn from_str(date: &str) -> Result<Datetime, DatetimeParseError> {
         // Accepted formats:
         //
         // 0000-00-00T00:00:00.00Z
@@ -310,7 +310,7 @@ impl FromStr for Datetime {
         // time-numoffset = ( "+" / "-" ) time-hour ":" time-minute
         // time-offset    = "Z" / time-numoffset
         //
-        // partial-time = time-hour ":" time-minute [ ":" time-second [ time-secfrac ] ]
+        // partial-time   = time-hour ":" time-minute ":" time-second [ time-secfrac ]
         // full-date      = date-fullyear "-" date-month "-" date-mday
         // full-time      = partial-time time-offset
         //
@@ -330,7 +330,7 @@ impl FromStr for Datetime {
         //
         // local-time = partial-time
         // ```
-        let mut result = Self {
+        let mut result = Datetime {
             date: None,
             time: None,
             offset: None,
@@ -454,23 +454,21 @@ impl FromStr for Datetime {
             minute
                 .is(TokenKind::Digits)
                 .map_err(|err| err.what("time").expected("minute"))?;
-            let second = if lexer.clone().next().map(|t| t.kind) == Some(TokenKind::Colon) {
-                let sep = lexer.next().ok_or(DatetimeParseError::new())?;
-                sep.is(TokenKind::Colon)?;
-                let second = lexer
-                    .next()
-                    .ok_or(DatetimeParseError::new().what("time").expected("second"))?;
-                second
-                    .is(TokenKind::Digits)
-                    .map_err(|err| err.what("time").expected("second"))?;
-                Some(second)
-            } else {
-                None
-            };
+            let sep = lexer.next().ok_or(
+                DatetimeParseError::new()
+                    .what("time")
+                    .expected("`:` (MM:SS)"),
+            )?;
+            sep.is(TokenKind::Colon)
+                .map_err(|err| err.what("time").expected("`:` (MM:SS)"))?;
+            let second = lexer
+                .next()
+                .ok_or(DatetimeParseError::new().what("time").expected("second"))?;
+            second
+                .is(TokenKind::Digits)
+                .map_err(|err| err.what("time").expected("second"))?;
 
-            let nanosecond = if second.is_some()
-                && lexer.clone().next().map(|t| t.kind) == Some(TokenKind::Dot)
-            {
+            let nanosecond = if lexer.clone().next().map(|t| t.kind) == Some(TokenKind::Dot) {
                 let sep = lexer.next().ok_or(DatetimeParseError::new())?;
                 sep.is(TokenKind::Dot)?;
                 let nanosecond = lexer.next().ok_or(
@@ -496,12 +494,10 @@ impl FromStr for Datetime {
                     .what("time")
                     .expected("a two-digit minute (MM)"));
             }
-            if let Some(second) = second {
-                if second.raw.len() != 2 {
-                    return Err(DatetimeParseError::new()
-                        .what("time")
-                        .expected("a two-digit second (SS)"));
-                }
+            if second.raw.len() != 2 {
+                return Err(DatetimeParseError::new()
+                    .what("time")
+                    .expected("a two-digit second (SS)"));
             }
 
             let time = Time {
@@ -511,8 +507,9 @@ impl FromStr for Datetime {
                     .parse()
                     .map_err(|_err| DatetimeParseError::new())?,
                 second: second
-                    .map(|t| t.raw.parse().map_err(|_err| DatetimeParseError::new()))
-                    .unwrap_or(Ok(0))?,
+                    .raw
+                    .parse()
+                    .map_err(|_err| DatetimeParseError::new())?,
                 nanosecond: nanosecond.map(|t| s_to_nanoseconds(t.raw)).unwrap_or(0),
             };
 
@@ -765,20 +762,15 @@ impl fmt::Display for DatetimeParseError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for DatetimeParseError {}
-#[cfg(all(not(feature = "std"), feature = "serde"))]
-impl serde_core::de::StdError for DatetimeParseError {}
+impl error::Error for DatetimeParseError {}
 
 #[cfg(feature = "serde")]
-#[cfg(feature = "alloc")]
-impl serde_core::ser::Serialize for Datetime {
+impl ser::Serialize for Datetime {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde_core::ser::Serializer,
+        S: ser::Serializer,
     {
-        use crate::alloc::string::ToString as _;
-        use serde_core::ser::SerializeStruct;
+        use serde::ser::SerializeStruct;
 
         let mut s = serializer.serialize_struct(NAME, 1)?;
         s.serialize_field(FIELD, &self.to_string())?;
@@ -787,36 +779,34 @@ impl serde_core::ser::Serialize for Datetime {
 }
 
 #[cfg(feature = "serde")]
-#[cfg(feature = "alloc")]
-impl serde_core::ser::Serialize for Date {
+impl ser::Serialize for Date {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde_core::ser::Serializer,
+        S: ser::Serializer,
     {
         Datetime::from(*self).serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-#[cfg(feature = "alloc")]
-impl serde_core::ser::Serialize for Time {
+impl ser::Serialize for Time {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde_core::ser::Serializer,
+        S: ser::Serializer,
     {
         Datetime::from(*self).serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde_core::de::Deserialize<'de> for Datetime {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> de::Deserialize<'de> for Datetime {
+    fn deserialize<D>(deserializer: D) -> Result<Datetime, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         struct DatetimeVisitor;
 
-        impl<'de> serde_core::de::Visitor<'de> for DatetimeVisitor {
+        impl<'de> de::Visitor<'de> for DatetimeVisitor {
             type Value = Datetime;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -825,11 +815,11 @@ impl<'de> serde_core::de::Deserialize<'de> for Datetime {
 
             fn visit_map<V>(self, mut visitor: V) -> Result<Datetime, V::Error>
             where
-                V: serde_core::de::MapAccess<'de>,
+                V: de::MapAccess<'de>,
             {
                 let value = visitor.next_key::<DatetimeKey>()?;
                 if value.is_none() {
-                    return Err(serde_core::de::Error::custom("datetime key not found"));
+                    return Err(de::Error::custom("datetime key not found"));
                 }
                 let v: DatetimeFromString = visitor.next_value()?;
                 Ok(v.value)
@@ -842,10 +832,10 @@ impl<'de> serde_core::de::Deserialize<'de> for Datetime {
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde_core::de::Deserialize<'de> for Date {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> de::Deserialize<'de> for Date {
+    fn deserialize<D>(deserializer: D) -> Result<Date, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         match Datetime::deserialize(deserializer)? {
             Datetime {
@@ -853,8 +843,8 @@ impl<'de> serde_core::de::Deserialize<'de> for Date {
                 time: None,
                 offset: None,
             } => Ok(date),
-            datetime => Err(serde_core::de::Error::invalid_type(
-                serde_core::de::Unexpected::Other(datetime.type_name()),
+            datetime => Err(de::Error::invalid_type(
+                de::Unexpected::Other(datetime.type_name()),
                 &Self::type_name(),
             )),
         }
@@ -862,10 +852,10 @@ impl<'de> serde_core::de::Deserialize<'de> for Date {
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde_core::de::Deserialize<'de> for Time {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> de::Deserialize<'de> for Time {
+    fn deserialize<D>(deserializer: D) -> Result<Time, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         match Datetime::deserialize(deserializer)? {
             Datetime {
@@ -873,8 +863,8 @@ impl<'de> serde_core::de::Deserialize<'de> for Time {
                 time: Some(time),
                 offset: None,
             } => Ok(time),
-            datetime => Err(serde_core::de::Error::invalid_type(
-                serde_core::de::Unexpected::Other(datetime.type_name()),
+            datetime => Err(de::Error::invalid_type(
+                de::Unexpected::Other(datetime.type_name()),
                 &Self::type_name(),
             )),
         }
@@ -885,14 +875,14 @@ impl<'de> serde_core::de::Deserialize<'de> for Time {
 struct DatetimeKey;
 
 #[cfg(feature = "serde")]
-impl<'de> serde_core::de::Deserialize<'de> for DatetimeKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> de::Deserialize<'de> for DatetimeKey {
+    fn deserialize<D>(deserializer: D) -> Result<DatetimeKey, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         struct FieldVisitor;
 
-        impl serde_core::de::Visitor<'_> for FieldVisitor {
+        impl de::Visitor<'_> for FieldVisitor {
             type Value = ();
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -901,37 +891,36 @@ impl<'de> serde_core::de::Deserialize<'de> for DatetimeKey {
 
             fn visit_str<E>(self, s: &str) -> Result<(), E>
             where
-                E: serde_core::de::Error,
+                E: de::Error,
             {
                 if s == FIELD {
                     Ok(())
                 } else {
-                    Err(serde_core::de::Error::custom(
-                        "expected field with custom name",
-                    ))
+                    Err(de::Error::custom("expected field with custom name"))
                 }
             }
         }
 
         deserializer.deserialize_identifier(FieldVisitor)?;
-        Ok(Self)
+        Ok(DatetimeKey)
     }
 }
 
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) struct DatetimeFromString {
-    pub(crate) value: Datetime,
+pub struct DatetimeFromString {
+    pub value: Datetime,
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde_core::de::Deserialize<'de> for DatetimeFromString {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> de::Deserialize<'de> for DatetimeFromString {
+    fn deserialize<D>(deserializer: D) -> Result<DatetimeFromString, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         struct Visitor;
 
-        impl serde_core::de::Visitor<'_> for Visitor {
+        impl de::Visitor<'_> for Visitor {
             type Value = DatetimeFromString;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -940,11 +929,11 @@ impl<'de> serde_core::de::Deserialize<'de> for DatetimeFromString {
 
             fn visit_str<E>(self, s: &str) -> Result<DatetimeFromString, E>
             where
-                E: serde_core::de::Error,
+                E: de::Error,
             {
                 match s.parse() {
                     Ok(date) => Ok(DatetimeFromString { value: date }),
-                    Err(e) => Err(serde_core::de::Error::custom(e)),
+                    Err(e) => Err(de::Error::custom(e)),
                 }
             }
         }

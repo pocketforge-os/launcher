@@ -1,15 +1,14 @@
 # toml_datetime
 
-[![Documentation](https://img.shields.io/badge/docs-master-blue.svg)](https://docs.rs/toml_datetime)
-![License](https://img.shields.io/crates/l/toml_datetime.svg)
-[![Crates Status](https://img.shields.io/crates/v/toml_datetime.svg)](https://crates.io/crates/toml_datetime)
+[![Latest Version](https://img.shields.io/crates/v/toml_datetime.svg)](https://crates.io/crates/toml_datetime)
+[![Documentation](https://docs.rs/toml_datetime/badge.svg)](https://docs.rs/toml_datetime)
 
 ## License
 
 Licensed under either of
 
-* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/license/mit>)
+* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 

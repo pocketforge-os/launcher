@@ -33,6 +33,10 @@ path = "src/lib.rs"
 name = "pf-session-authorityd"
 path = "src/bin/pf-session-authorityd.rs"
 
+[dependencies.pf-app-manifest]
+version = "0.0.1"
+path = "../pf-app-manifest"
+
 [dependencies.pf-ports]
 version = "0.0.1"
 path = "../pf-ports"
@@ -47,3 +51,6 @@ features = ["derive"]
 
 [dependencies.serde_json]
 version = "1"
+
+[dev-dependencies.pf-app-launch]
+path = "../pf-app-launch"

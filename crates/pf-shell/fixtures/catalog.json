@@ -71,7 +71,7 @@
             "platform_version": null
           },
           "launch_target": {
-            "app_id": "hollow-tides",
+            "app_id": "org.pocketforge.hollow-tides",
             "descriptor_path": "fixtures/hollow-tides.toml",
             "observed_digest": "fixture"
           }
@@ -172,12 +172,8 @@
           "availability": {
             "state": "ready"
           },
-          "requirements": [
-            {
-              "capability": "network",
-              "optional": false
-            }
-          ],
+          "needs_network": true,
+          "requirements": [],
           "provenance": {
             "provider_id": "fixture",
             "app_version": "1",

@@ -1,3 +1,6 @@
+use pf_app_manifest::{
+    PLATFORM_CONTRACT_PATH, PlatformContractErrorReason, Resolver, parse_platform_contract,
+};
 use pf_catalog::{
     CatalogItem, CatalogRevision, CatalogSnapshot, FavoriteCommitResult, InstalledAppProvider,
     VariantPinCommitResult,
@@ -7,7 +10,7 @@ use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 use pf_ports::{
-    AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Deadline,
+    AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Clock, Deadline,
     EffectivePreference, FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort,
     FakeTransferPort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime, NetworkError,
     NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
@@ -21,7 +24,10 @@ use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
 use pf_render::{RasterFrame, Rasterizer, RenderNote};
 use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
-use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
+use pf_session_authority::{
+    Authority, CommandSystem, CommandTemplates, EndPrecision, EndStamp, FileStore, HistoryEntry,
+    serve_connection,
+};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
@@ -35,7 +41,7 @@ use std::{
     collections::VecDeque,
     env, fs,
     io::{BufWriter, Write},
-    os::unix::net::UnixStream,
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock,
@@ -149,7 +155,76 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlatformSupport {
+    runtime_family: String,
+    runtime_abi: String,
+    platform_version: Option<String>,
+    supported_capabilities: Vec<String>,
+}
+
+impl PlatformSupport {
+    fn fallback() -> Self {
+        Self {
+            runtime_family: RUNTIME_FAMILY.into(),
+            runtime_abi: RUNTIME_ABI.into(),
+            platform_version: None,
+            supported_capabilities: Vec::new(),
+        }
+    }
+}
+
+struct PlatformSupportLoad {
+    support: PlatformSupport,
+    warning: Option<String>,
+}
+
+fn platform_contract_warning(reason: PlatformContractErrorReason, path: &Path) -> String {
+    let path = serde_json::to_string(path.to_string_lossy().as_ref())
+        .expect("serializing a platform contract path cannot fail");
+    format!(
+        "pf-shell: platform_contract_fallback reason={} path={path}",
+        reason.as_str()
+    )
+}
+
+fn platform_contract_fallback(
+    reason: PlatformContractErrorReason,
+    path: &Path,
+) -> PlatformSupportLoad {
+    PlatformSupportLoad {
+        support: PlatformSupport::fallback(),
+        warning: Some(platform_contract_warning(reason, path)),
+    }
+}
+
+fn load_platform_support(path: &Path) -> PlatformSupportLoad {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => {
+            let reason = if error.kind() == std::io::ErrorKind::NotFound {
+                PlatformContractErrorReason::Missing
+            } else {
+                PlatformContractErrorReason::Read
+            };
+            return platform_contract_fallback(reason, path);
+        }
+    };
+    match parse_platform_contract(&source) {
+        Ok(contract) => PlatformSupportLoad {
+            support: PlatformSupport {
+                runtime_family: contract.runtime_family,
+                runtime_abi: contract.runtime_abi,
+                platform_version: Some(contract.platform_version),
+                supported_capabilities: contract.supported_capabilities,
+            },
+            warning: None,
+        },
+        Err(error) => platform_contract_fallback(error.reason, path),
+    }
+}
 
 fn empty_catalog_snapshot() -> Result<CatalogSnapshot, String> {
     let mut snapshot: CatalogSnapshot =
@@ -181,8 +256,24 @@ fn catalog_snapshot(
     }
 }
 
+#[cfg(test)]
 fn installed_app_provider(root: &Path, favorites_path: PathBuf) -> InstalledAppProvider {
-    InstalledAppProvider::new(root, favorites_path, RUNTIME_FAMILY, RUNTIME_ABI)
+    installed_app_provider_for_platform(root, favorites_path, &PlatformSupport::fallback())
+}
+
+fn installed_app_provider_for_platform(
+    root: &Path,
+    favorites_path: PathBuf,
+    platform: &PlatformSupport,
+) -> InstalledAppProvider {
+    InstalledAppProvider::new(
+        root,
+        favorites_path,
+        &platform.runtime_family,
+        &platform.runtime_abi,
+    )
+    .with_platform_version(platform.platform_version.clone())
+    .with_supported_capabilities(platform.supported_capabilities.iter().cloned())
 }
 
 #[cfg(feature = "wayland")]
@@ -695,6 +786,21 @@ fn main() -> Result<(), String> {
         env::var_os("PF_BASELINE_RECORD_ONLY").is_some(),
         env::var_os("PF_RASTER_INK_GUARD").is_some(),
     )?;
+    if args.iter().any(|arg| arg == "--desktop-sim-authority") {
+        let state_dir = value(&args, "--authority-state-dir")
+            .ok_or("--desktop-sim-authority requires --authority-state-dir")?;
+        let app_root = value(&args, "--catalog-root")
+            .ok_or("--desktop-sim-authority requires --catalog-root")?;
+        let platform_contract = value(&args, "--platform-capabilities")
+            .ok_or("--desktop-sim-authority requires --platform-capabilities")?;
+        let socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        return run_desktop_sim_authority(
+            Path::new(socket),
+            Path::new(state_dir),
+            Path::new(app_root),
+            Path::new(platform_contract),
+        );
+    }
     let interactive_mode = args
         .iter()
         .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
@@ -709,8 +815,22 @@ fn main() -> Result<(), String> {
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
     let snapshot_path = value(&args, "--catalog-snapshot").map(PathBuf::from);
-    let installed = (!fixture_mode && snapshot_path.is_none())
-        .then(|| installed_app_provider(&catalog_root, state_dir.join("favorites.json")));
+    let installed = if !fixture_mode && snapshot_path.is_none() {
+        let platform_path = PathBuf::from(
+            value(&args, "--platform-capabilities").unwrap_or(PLATFORM_CONTRACT_PATH),
+        );
+        let platform = load_platform_support(&platform_path);
+        if let Some(warning) = &platform.warning {
+            eprintln!("{warning}");
+        }
+        Some(installed_app_provider_for_platform(
+            &catalog_root,
+            state_dir.join("favorites.json"),
+            &platform.support,
+        ))
+    } else {
+        None
+    };
     let snapshot: CatalogSnapshot = if let Some(path) = &snapshot_path {
         load_catalog_snapshot(path)?
     } else if let Some(provider) = &installed {
@@ -1607,17 +1727,29 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         "pf-shell",
         SocketTransport::connect(session_socket.to_path_buf()),
     );
+    let mut presentation_acknowledger = PresentationAcknowledger::default();
     match wait_for_session_authority(&mut session, Duration::from_secs(3)) {
-        Ok(()) => drive_socket_session(core, &mut session)?,
+        Ok(()) => {
+            drive_socket_session(core, &mut session)?;
+            let history = session
+                .transport_mut()
+                .history_entries()
+                .map_err(|error| format!("session history: {error:?}"))?;
+            presentation_acknowledger = PresentationAcknowledger::from_history(&history);
+        }
         Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
         Err(error) => return Err(format!("session: {error:?}")),
     }
     apply_text_scale(host, core)?;
     let mut frames = automation::FrameCounter::default();
     let mut presented_revision = 0;
-    if present_interactive(host, core, &activate)? {
+    let first_frame_presented = present_interactive(host, core, &activate)?;
+    if first_frame_presented {
         frames.increment();
         presented_revision = core.revision();
+    }
+    if presentation_acknowledger.after_present(session_socket, first_frame_presented)? {
+        drive_socket_session(core, &mut session)?;
     }
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
@@ -1997,6 +2129,84 @@ fn authority_rpc(
     }
 }
 
+struct DesktopSimClock(Instant);
+
+impl Clock for DesktopSimClock {
+    fn now(&self) -> MonotonicTime {
+        MonotonicTime::from_nanos(u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+}
+
+fn run_desktop_sim_authority(
+    socket: &Path,
+    state_dir: &Path,
+    app_root: &Path,
+    platform_contract: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(state_dir).map_err(|error| error.to_string())?;
+    let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
+    let mut authority = Authority::open_with_resolver(
+        FileStore::new(state_dir.join("authority.json")),
+        CommandSystem::new(CommandTemplates::desktop_sim(state_dir)),
+        DesktopSimClock(Instant::now()),
+        32,
+        Duration::from_secs(10),
+        Resolver::new(app_root, platform_contract),
+    )
+    .map_err(|error| format!("open desktop authority: {error:?}"))?;
+    authority
+        .reconcile()
+        .map_err(|error| format!("reconcile desktop authority: {error:?}"))?;
+    for connection in listener.incoming() {
+        let mut stream = connection.map_err(|error| error.to_string())?;
+        let mut writer = stream.try_clone().map_err(|error| error.to_string())?;
+        if let Err(error) = serve_connection(&mut authority, &mut stream, &mut writer) {
+            eprintln!("pf-shell: desktop authority connection error: {error:?}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct PresentationAcknowledger {
+    pending: bool,
+    sent: bool,
+}
+
+impl PresentationAcknowledger {
+    fn from_history(entries: &[HistoryEntry]) -> Self {
+        Self {
+            pending: entries
+                .iter()
+                .any(|entry| entry.ended_at.is_some() && entry.receipt.is_none()),
+            sent: false,
+        }
+    }
+
+    fn after_present(&mut self, socket: &Path, presented: bool) -> Result<bool, String> {
+        use pf_session_authority::{RpcObservation, RpcRequest, RpcResponse};
+
+        if !presented || !self.pending || self.sent {
+            return Ok(false);
+        }
+        match authority_rpc(
+            socket,
+            &RpcRequest::Observe {
+                observation: RpcObservation::PresentationAcknowledged,
+            },
+        ) {
+            Ok(RpcResponse::Ok) => {
+                self.sent = true;
+                Ok(true)
+            }
+            Ok(response) => Err(format!(
+                "unexpected presentation acknowledgement response: {response:?}"
+            )),
+            Err(message) => Err(format!("presentation acknowledgement: {message}")),
+        }
+    }
+}
+
 fn observe_desktop_sim(
     socket: &Path,
     observation: pf_session_authority::RpcObservation,
@@ -2068,7 +2278,7 @@ fn phase_is_stopping_session(phase: &pf_session_authority::Phase, session_id: &s
     matches!(
         phase,
         pf_session_authority::Phase::StoppingGracefully { session_id: active, .. }
-            | pf_session_authority::Phase::ForceStopping { session_id: active }
+            | pf_session_authority::Phase::ForceStopping { session_id: active, .. }
             if active == session_id
     )
 }
@@ -4033,7 +4243,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 13] = [
+    const VALUE_FLAGS: [&str; 14] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -4042,6 +4252,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--device",
         "--input",
         "--out",
+        "--platform-capabilities",
         "--rotate",
         "--session-socket",
         "--state-dir",
@@ -7878,7 +8089,7 @@ exec="./launch"
     }
 
     #[test]
-    fn production_catalog_provider_matches_canonical_runtime_only() {
+    fn production_catalog_provider_uses_platform_identity_version_and_capabilities() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("apps");
         let ready_app = root.join("ready");
@@ -7887,18 +8098,31 @@ exec="./launch"
         fs::create_dir_all(&incompatible_app).unwrap();
         fs::write(
             ready_app.join("app.toml"),
-            scanned_manifest_with_runtime("com.example.ready", "pocketforge/native", "1"),
+            scanned_manifest_with_runtime("com.example.ready", "pocketforge/a133-powervr", "1")
+                .replace("[runtime]", "use=[\"audio\", \"input\"]\n[runtime]")
+                .replace("[launch]", "platform-version=\"20\"\n[launch]"),
         )
         .unwrap();
         fs::write(
             incompatible_app.join("app.toml"),
-            scanned_manifest_with_runtime("com.example.incompatible", "pocketforge/other", "2"),
+            scanned_manifest_with_runtime("com.example.incompatible", "pocketforge/other", "2")
+                .replace("[launch]", "platform-version=\"20\"\n[launch]"),
         )
         .unwrap();
 
-        let snapshot = installed_app_provider(&root, dir.path().join("favorites.json"))
-            .snapshot()
-            .unwrap();
+        let platform = PlatformSupport {
+            runtime_family: "pocketforge/a133-powervr".into(),
+            runtime_abi: "1".into(),
+            platform_version: Some("20".into()),
+            supported_capabilities: vec!["audio".into(), "input".into()],
+        };
+        let snapshot = installed_app_provider_for_platform(
+            &root,
+            dir.path().join("favorites.json"),
+            &platform,
+        )
+        .snapshot()
+        .unwrap();
         let availability = |id: &str| {
             &snapshot
                 .items
@@ -7918,6 +8142,13 @@ exec="./launch"
             availability("com.example.incompatible"),
             pf_catalog::Availability::IncompatibleRuntime { .. }
         ));
+        assert_eq!(
+            snapshot.items[0].variants[0]
+                .provenance
+                .platform_version
+                .as_deref(),
+            Some("20")
+        );
     }
 
     #[test]
@@ -8119,9 +8350,143 @@ exec="./launch"
             "150".into(),
             "--out".into(),
             "evidence/offscreen".into(),
+            "--platform-capabilities".into(),
+            "/tmp/platform.toml".into(),
         ];
 
         assert!(validate_args(&args).is_ok());
+    }
+
+    const VALID_PLATFORM_CONTRACT: &str = "schema_version = 1\n\
+        runtime_family = \"pocketforge/a133-powervr\"\n\
+        runtime_abi = \"1\"\n\
+        platform_version = \"20\"\n\
+        supported_capabilities = [\"audio\", \"entropy\", \"input\", \"settings\"]\n";
+
+    fn assert_platform_fallback(path: &Path, reason: PlatformContractErrorReason) {
+        let loaded = load_platform_support(path);
+        assert_eq!(loaded.support, PlatformSupport::fallback());
+        assert_eq!(
+            loaded.warning,
+            Some(platform_contract_warning(reason, path))
+        );
+    }
+
+    fn assert_platform_source_fallback(source: &str, reason: PlatformContractErrorReason) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("platform.toml");
+        fs::write(&path, source).unwrap();
+        assert_platform_fallback(&path, reason);
+    }
+
+    #[test]
+    fn valid_a133_platform_contract_loads_exact_tuple_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("platform.toml");
+        fs::write(&path, VALID_PLATFORM_CONTRACT).unwrap();
+
+        let loaded = load_platform_support(&path);
+
+        assert_eq!(
+            loaded.support,
+            PlatformSupport {
+                runtime_family: "pocketforge/a133-powervr".into(),
+                runtime_abi: "1".into(),
+                platform_version: Some("20".into()),
+                supported_capabilities: vec![
+                    "audio".into(),
+                    "entropy".into(),
+                    "input".into(),
+                    "settings".into(),
+                ],
+            }
+        );
+        assert_eq!(loaded.warning, None);
+    }
+
+    #[test]
+    fn missing_platform_contract_logs_exact_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_platform_fallback(
+            &dir.path().join("missing.toml"),
+            PlatformContractErrorReason::Missing,
+        );
+    }
+
+    #[test]
+    fn unreadable_platform_contract_logs_exact_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("platform.toml");
+        fs::create_dir(&path).unwrap();
+        assert_platform_fallback(&path, PlatformContractErrorReason::Read);
+    }
+
+    #[test]
+    fn malformed_platform_contract_logs_exact_parse_fallback() {
+        assert_platform_source_fallback("not = [toml", PlatformContractErrorReason::Parse);
+    }
+
+    #[test]
+    fn wrong_schema_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace("schema_version = 1", "schema_version = 2"),
+            PlatformContractErrorReason::Schema,
+        );
+    }
+
+    #[test]
+    fn invalid_family_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace("pocketforge/a133-powervr", "other/a133-powervr"),
+            PlatformContractErrorReason::InvalidFamily,
+        );
+    }
+
+    #[test]
+    fn invalid_abi_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace("runtime_abi = \"1\"", "runtime_abi = \"v1\""),
+            PlatformContractErrorReason::InvalidAbi,
+        );
+    }
+
+    #[test]
+    fn invalid_platform_version_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT
+                .replace("platform_version = \"20\"", "platform_version = \"v20\""),
+            PlatformContractErrorReason::InvalidPlatformVersion,
+        );
+    }
+
+    #[test]
+    fn invalid_capability_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace("\"settings\"", "\"telepathy\""),
+            PlatformContractErrorReason::InvalidCapability,
+        );
+    }
+
+    #[test]
+    fn duplicate_capability_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace(
+                "\"audio\", \"entropy\", \"input\", \"settings\"",
+                "\"audio\", \"audio\", \"input\", \"settings\"",
+            ),
+            PlatformContractErrorReason::DuplicateCapability,
+        );
+    }
+
+    #[test]
+    fn unsorted_capabilities_platform_contract_logs_exact_fallback() {
+        assert_platform_source_fallback(
+            &VALID_PLATFORM_CONTRACT.replace(
+                "\"audio\", \"entropy\", \"input\", \"settings\"",
+                "\"input\", \"audio\", \"entropy\", \"settings\"",
+            ),
+            PlatformContractErrorReason::UnsortedCapabilities,
+        );
     }
 
     fn write_power_supply(root: &Path, name: &str, capacity: &str, status: &str, scope: &str) {
@@ -8494,6 +8859,57 @@ exec="./launch"
         let mut host = OffscreenHost::new(metrics);
         present(&mut host, &mut core, "A Open").unwrap();
         assert!(host.frame().is_some());
+    }
+
+    #[test]
+    fn presentation_ack_is_sent_once_after_first_restored_frame_across_shell_restart() {
+        use std::os::unix::net::UnixListener;
+
+        let active_history = [HistoryEntry {
+            session_id: "session-1".into(),
+            item_id: "org.example.app".into(),
+            receipt: None,
+            started_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            ended_at: None,
+        }];
+        let mut before_restart = PresentationAcknowledger::from_history(&active_history);
+        assert!(
+            !before_restart
+                .after_present(Path::new("/missing/authority.sock"), true)
+                .unwrap(),
+            "the shell that launched the still-running app must not acknowledge restoration"
+        );
+
+        let restored_history = [HistoryEntry {
+            ended_at: Some(EndStamp {
+                at: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                precision: EndPrecision::Observed,
+            }),
+            ..active_history[0].clone()
+        }];
+        let mut after_restart = PresentationAcknowledger::from_history(&restored_history);
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = pf_wire::read_frame(&mut stream).unwrap();
+            let request: pf_session_authority::RpcRequest = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                serde_json::to_value(request).unwrap(),
+                serde_json::json!({
+                    "method": "observe",
+                    "observation": {"kind": "presentation_acknowledged"}
+                })
+            );
+            let body = serde_json::to_vec(&pf_session_authority::RpcResponse::Ok).unwrap();
+            pf_wire::write_frame(&mut stream, &body).unwrap();
+        });
+
+        assert!(!after_restart.after_present(&socket, false).unwrap());
+        assert!(after_restart.after_present(&socket, true).unwrap());
+        assert!(!after_restart.after_present(&socket, true).unwrap());
+        server.join().unwrap();
     }
 
     #[test]

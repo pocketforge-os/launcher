@@ -8063,12 +8063,7 @@ fn add_unavailable_card_cues(
         }
     };
     if matches!(availability, Availability::Ready)
-        && best_variant(item).is_some_and(|variant| {
-            variant
-                .requirements
-                .iter()
-                .any(|requirement| !requirement.optional && requirement.capability == "network")
-        })
+        && best_variant(item).is_some_and(|variant| variant.needs_network)
     {
         let badge_scale = if fixed_scale_on_art_cues {
             100
@@ -9839,6 +9834,7 @@ mod tests {
                         id: "default".into(),
                         provider_id: "fixture".into(),
                         availability: Availability::Ready,
+                        needs_network: false,
                         requirements: vec![],
                         provenance: Provenance {
                             provider_id: "fixture".into(),
@@ -12547,6 +12543,7 @@ mod tests {
             id: id.into(),
             provider_id: format!("provider-{id}"),
             availability,
+            needs_network: false,
             requirements: vec![],
             provenance: Provenance {
                 provider_id: format!("provider-{id}"),
@@ -13852,10 +13849,7 @@ mod tests {
     #[test]
     fn on_card_plate_and_badge_bounds_ignore_accessible_text_scale() {
         let mut ready = variant("stream", "steam-link", Availability::Ready);
-        ready.requirements.push(Requirement {
-            capability: "network".into(),
-            optional: false,
-        });
+        ready.needs_network = true;
         let mut plate = item("steam-link", "Steam Link", vec![ready]);
         plate.kind = AppKind::Stream;
         plate.tags.push("kind-label:Stream".into());
@@ -13956,18 +13950,12 @@ mod tests {
     }
 
     #[test]
-    fn ready_network_cues_follow_the_selected_variants_requirement_not_item_identity() {
+    fn ready_network_cues_follow_needs_network_metadata_not_item_identity() {
         let mut differently_named = variant("stream", "moonlight", Availability::Ready);
-        differently_named.requirements.push(Requirement {
-            capability: "network".into(),
-            optional: false,
-        });
+        differently_named.needs_network = true;
         let ordinary = variant("native", "ordinary", Availability::Ready);
         let mut steam_link = variant("stream", "steam-link", Availability::Ready);
-        steam_link.requirements.push(Requirement {
-            capability: "network".into(),
-            optional: false,
-        });
+        steam_link.needs_network = true;
         let core = fixture_core(vec![
             item("moonlight", "Moonlight", vec![differently_named]),
             item("ordinary", "Ordinary", vec![ordinary]),
@@ -18659,6 +18647,22 @@ mod tests {
             core.action(&ShellAction::Activate),
             Some(Effect::Launch(LaunchRequest {
                 item_id: "ready-app-two".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn ready_app_activation_sends_launch_target_app_id() {
+        let mut core = fixture_core(vec![item(
+            "installed-applications:org.example.app",
+            "Example",
+            vec![variant("native", "org.example.app", Availability::Ready)],
+        )]);
+
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "org.example.app".into(),
             }))
         );
     }

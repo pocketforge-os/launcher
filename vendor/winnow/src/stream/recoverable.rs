@@ -182,8 +182,9 @@ where
         self.input.reset(&checkpoint.inner);
     }
 
-    fn trace(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.input.trace(f)
+    #[inline(always)]
+    fn raw(&self) -> &dyn core::fmt::Debug {
+        &self.input
     }
 }
 

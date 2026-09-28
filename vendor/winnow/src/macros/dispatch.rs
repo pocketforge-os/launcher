@@ -23,7 +23,6 @@
 /// # Example
 ///
 /// ```rust
-/// # #[cfg(feature = "parser")] {
 /// use winnow::prelude::*;
 /// use winnow::combinator::dispatch;
 /// # use winnow::token::take;
@@ -42,11 +41,9 @@
 /// }
 ///
 /// assert_eq!(integer.parse_peek("0x100 Hello"), Ok((" Hello", 0x100)));
-/// # }
 /// ```
 ///
 /// ```rust
-/// # #[cfg(feature = "parser")] {
 /// use winnow::prelude::*;
 /// use winnow::combinator::dispatch;
 /// # use winnow::token::any;
@@ -73,7 +70,6 @@
 /// }
 ///
 /// assert_eq!(escaped.parse_peek("\\nHello"), Ok(("Hello", '\n')));
-/// # }
 /// ```
 #[macro_export]
 #[doc(hidden)] // forced to be visible in intended location

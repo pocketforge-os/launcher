@@ -1163,8 +1163,11 @@ Ok(
 mod partial {
     use super::*;
 
-    use crate::binary::{be_u16, be_u8};
     use crate::Partial;
+    use crate::{
+        ascii::digit1 as digit,
+        binary::{be_u16, be_u8},
+    };
     #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
     use core::str::{self, FromStr};
@@ -3158,10 +3161,7 @@ Ok(
 
     #[test]
     #[cfg(feature = "alloc")]
-    #[cfg(feature = "ascii")]
     fn length_repeat_test() {
-        use crate::ascii::digit1 as digit;
-
         fn number<'i>(i: &mut Partial<&'i [u8]>) -> TestResult<Partial<&'i [u8]>, u32> {
             digit
                 .try_map(str::from_utf8)
@@ -3428,10 +3428,7 @@ Err(
     }
 
     #[test]
-    #[cfg(feature = "ascii")]
     fn length_take_test() {
-        use crate::ascii::digit1 as digit;
-
         fn number<'i>(i: &mut Partial<&'i [u8]>) -> TestResult<Partial<&'i [u8]>, u32> {
             digit
                 .try_map(str::from_utf8)

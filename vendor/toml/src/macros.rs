@@ -1,6 +1,5 @@
-pub use serde_core::de::{Deserialize, IntoDeserializer};
+pub use serde::de::{Deserialize, IntoDeserializer};
 
-use crate::alloc_prelude::*;
 use crate::value::{Array, Table, Value};
 
 /// Construct a [`Table`] from TOML syntax.
@@ -194,27 +193,27 @@ macro_rules! toml_internal {
     }};
 
     (@value (-nan)) => {
-        $crate::Value::Float(::core::f64::NAN.copysign(-1.0))
+        $crate::Value::Float(::std::f64::NAN.copysign(-1.0))
     };
 
     (@value (nan)) => {
-        $crate::Value::Float(::core::f64::NAN.copysign(1.0))
+        $crate::Value::Float(::std::f64::NAN.copysign(1.0))
     };
 
     (@value nan) => {
-        $crate::Value::Float(::core::f64::NAN.copysign(1.0))
+        $crate::Value::Float(::std::f64::NAN.copysign(1.0))
     };
 
     (@value (-inf)) => {
-        $crate::Value::Float(::core::f64::NEG_INFINITY)
+        $crate::Value::Float(::std::f64::NEG_INFINITY)
     };
 
     (@value (inf)) => {
-        $crate::Value::Float(::core::f64::INFINITY)
+        $crate::Value::Float(::std::f64::INFINITY)
     };
 
     (@value inf) => {
-        $crate::Value::Float(::core::f64::INFINITY)
+        $crate::Value::Float(::std::f64::INFINITY)
     };
 
     // Construct a Value from any other type, probably string or boolean or number.

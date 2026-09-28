@@ -1,6 +1,10 @@
 //! Installed-application catalog with immutable snapshots and a separate favorites overlay.
 
 use fs2::FileExt;
+use pf_app_manifest::{
+    AppCategory, ManifestErrorKind as SharedManifestErrorKind, ReasonCode,
+    parse_capability_requirement, parse_manifest,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -53,6 +57,8 @@ pub struct Variant {
     pub id: String,
     pub provider_id: String,
     pub availability: Availability,
+    #[serde(default)]
+    pub needs_network: bool,
     pub requirements: Vec<Requirement>,
     pub provenance: Provenance,
     pub launch_target: AppManifestRef,
@@ -99,6 +105,8 @@ pub enum ProviderItemResult {
     Incompatible {
         item_id: String,
         required: String,
+        #[serde(default)]
+        reason: String,
     },
     NetworkRequired {
         item_id: String,
@@ -147,78 +155,12 @@ pub enum ProviderError {
     Projection(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    app: App,
-    runtime: Runtime,
-    launch: Option<Launch>,
-    health: Option<Health>,
-    fetch: Option<Fetch>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct App {
-    id: String,
-    name: Option<String>,
-    category: Option<AppKind>,
-    order: Option<i64>,
-    icon: Option<String>,
-    version: Option<String>,
-    upstream_version: Option<String>,
-    #[serde(default, rename = "use")]
-    capabilities: Vec<String>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Runtime {
-    family: String,
-    abi: String,
-    #[serde(rename = "platform-version")]
-    platform_version: Option<String>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Launch {
-    exec: String,
-    #[serde(default)]
-    needs_network: bool,
-    #[serde(default)]
-    takes_display: bool,
-    #[serde(default)]
-    audio: bool,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Health {
-    preflight: Option<String>,
-    timeout_sec: Option<u64>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Fetch {
-    enabled: bool,
-    destination: Option<String>,
-    reason: Option<String>,
-    files: Option<Vec<FetchFile>>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FetchFile {
-    url: String,
-    sha256: String,
-    size: Option<u64>,
-    format: Option<String>,
-    dest: Option<String>,
-    strip_components: Option<u64>,
-    executable: Option<std::collections::BTreeMap<String, String>>,
-}
-
 pub struct InstalledAppProvider {
     root: PathBuf,
     favorites: PathBuf,
     runtime_family: String,
     runtime_abi: String,
+    platform_version: Option<String>,
     capabilities: BTreeSet<String>,
     observed_at: u64,
 }
@@ -235,6 +177,7 @@ impl InstalledAppProvider {
             favorites: favorites.into(),
             runtime_family: family.into(),
             runtime_abi: abi.into(),
+            platform_version: None,
             capabilities: BTreeSet::new(),
             observed_at: 0,
         }
@@ -242,6 +185,11 @@ impl InstalledAppProvider {
     #[must_use]
     pub fn with_supported_capabilities(mut self, values: impl IntoIterator<Item = String>) -> Self {
         self.capabilities = values.into_iter().collect();
+        self
+    }
+    #[must_use]
+    pub fn with_platform_version(mut self, value: Option<String>) -> Self {
+        self.platform_version = value;
         self
     }
     #[must_use]
@@ -431,37 +379,76 @@ impl InstalledAppProvider {
                 return;
             }
         };
-        let m: Manifest = match toml::from_str(text) {
+        let m = match parse_manifest(text) {
             Ok(v) => v,
             Err(e) => {
-                results.push(invalid(path, e.to_string(), ManifestErrorKind::Parse));
+                let kind = match e.kind {
+                    SharedManifestErrorKind::Parse => ManifestErrorKind::Parse,
+                    SharedManifestErrorKind::Invalid
+                    | SharedManifestErrorKind::InvalidLaunchExec => ManifestErrorKind::Validation,
+                };
+                results.push(invalid(path, e.to_string(), kind));
                 return;
             }
         };
-        if let Err(e) = validate(&m) {
-            results.push(ProviderItemResult::Invalid {
-                descriptor_path: path,
-                error: e,
-            });
-            return;
-        }
         let id = format!("installed-applications:{}", m.app.id);
-        let incompatible =
-            m.runtime.family != self.runtime_family || m.runtime.abi != self.runtime_abi;
         let unsupported = m.app.capabilities.iter().find_map(|c| {
-            let optional = c.ends_with('?');
-            let base = c.trim_end_matches('?').split(':').next().unwrap_or(c);
-            (!optional && !self.capabilities.contains(base)).then(|| base.to_owned())
+            let requirement = parse_capability_requirement(c);
+            (!requirement.optional
+                && requirement.base != "egress"
+                && !self.capabilities.contains(&requirement.base))
+            .then_some(requirement.base)
         });
-        let network = m.launch.as_ref().is_some_and(|l| l.needs_network);
         let setup = m.fetch.as_ref().is_some_and(|f| f.enabled);
-        let availability = if incompatible {
-            Availability::IncompatibleRuntime {
-                required: format!("{}@{}", m.runtime.family, m.runtime.abi),
-                available: format!("{}@{}", self.runtime_family, self.runtime_abi),
-            }
-        } else if let Some(capability) = unsupported {
-            Availability::UnsupportedCapability { capability }
+        let incompatibility = if m.runtime.family != self.runtime_family {
+            Some((
+                Availability::IncompatibleRuntime {
+                    required: format!("{}@{}", m.runtime.family, m.runtime.abi),
+                    available: format!("{}@{}", self.runtime_family, self.runtime_abi),
+                },
+                m.runtime.family.clone(),
+                ReasonCode::RuntimeFamilyMismatch,
+            ))
+        } else if m.runtime.abi != self.runtime_abi {
+            Some((
+                Availability::IncompatibleRuntime {
+                    required: format!("{}@{}", m.runtime.family, m.runtime.abi),
+                    available: format!("{}@{}", self.runtime_family, self.runtime_abi),
+                },
+                m.runtime.abi.clone(),
+                ReasonCode::RuntimeAbiMismatch,
+            ))
+        } else if m
+            .runtime
+            .platform_version
+            .as_deref()
+            .is_some_and(|version| self.platform_version.as_deref() != Some(version))
+        {
+            let required = m.runtime.platform_version.clone().unwrap_or_default();
+            Some((
+                Availability::IncompatibleRuntime {
+                    required: format!("platform {required}"),
+                    available: self.platform_version.as_ref().map_or_else(
+                        || "platform unspecified".into(),
+                        |version| format!("platform {version}"),
+                    ),
+                },
+                required,
+                ReasonCode::PlatformVersionMismatch,
+            ))
+        } else {
+            unsupported.map(|capability| {
+                (
+                    Availability::UnsupportedCapability {
+                        capability: capability.clone(),
+                    },
+                    capability,
+                    ReasonCode::UnsupportedCapability,
+                )
+            })
+        };
+        let availability = if let Some((availability, _, _)) = &incompatibility {
+            availability.clone()
         } else if setup {
             Availability::NeedsSetup {
                 reason: m
@@ -470,45 +457,46 @@ impl InstalledAppProvider {
                     .and_then(|f| f.reason.clone())
                     .unwrap_or_else(|| "setup required".into()),
             }
-        } else if network {
-            Availability::NeedsNetwork {
-                reason: "network required".into(),
-            }
         } else {
             Availability::Ready
         };
-        let result = match &availability {
-            Availability::IncompatibleRuntime { required, .. } => {
-                ProviderItemResult::Incompatible {
-                    item_id: id.clone(),
-                    required: required.clone(),
-                }
+        let result = if let Some((_, required, reason)) = incompatibility {
+            ProviderItemResult::Incompatible {
+                item_id: id.clone(),
+                required,
+                reason: reason.as_str().into(),
             }
-            Availability::NeedsNetwork { .. } => ProviderItemResult::NetworkRequired {
+        } else if matches!(availability, Availability::NeedsSetup { .. }) {
+            ProviderItemResult::SetupRequired {
                 item_id: id.clone(),
-            },
-            Availability::NeedsSetup { .. } => ProviderItemResult::SetupRequired {
+            }
+        } else {
+            ProviderItemResult::Valid {
                 item_id: id.clone(),
-            },
-            _ => ProviderItemResult::Valid {
-                item_id: id.clone(),
-            },
+            }
         };
-        consume_reserved(&m);
         let digest = format!("{:x}", Sha256::digest(bytes));
         let requirements = m
             .app
             .capabilities
             .iter()
-            .map(|c| Requirement {
-                capability: c.trim_end_matches('?').into(),
-                optional: c.ends_with('?'),
+            .map(|capability| {
+                let requirement = parse_capability_requirement(capability);
+                Requirement {
+                    capability: requirement.modifier.as_ref().map_or_else(
+                        || requirement.base.clone(),
+                        |modifier| format!("{}:{modifier}", requirement.base),
+                    ),
+                    optional: requirement.optional,
+                }
             })
             .collect();
+        let needs_network = m.launch.as_ref().is_some_and(|launch| launch.needs_network);
         let variant = Variant {
             id: format!("{id}:{}", m.runtime.family),
             provider_id: "installed-applications".into(),
             availability,
+            needs_network,
             requirements,
             provenance: Provenance {
                 provider_id: "installed-applications".into(),
@@ -528,7 +516,7 @@ impl InstalledAppProvider {
         items.push(CatalogItem {
             id,
             title: m.app.name.unwrap_or(m.app.id),
-            kind: m.app.category.unwrap_or(AppKind::Game),
+            kind: app_kind(m.app.category),
             presentation: Presentation {
                 icon_decodable: icon_reference.is_some(),
                 icon_reference,
@@ -546,74 +534,13 @@ fn invalid(path: PathBuf, message: String, kind: ManifestErrorKind) -> ProviderI
         error: ManifestError { kind, message },
     }
 }
-fn validate(m: &Manifest) -> Result<(), ManifestError> {
-    let mut v = vec![];
-    if m.app.id.is_empty()
-        || !m.app.id.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
-        })
-    {
-        v.push("invalid app.id");
-    }
-    if !m.runtime.family.starts_with("pocketforge/") {
-        v.push("invalid runtime.family");
-    }
-    if m.runtime.abi.is_empty() || !m.runtime.abi.bytes().all(|b| b.is_ascii_digit()) {
-        v.push("invalid runtime.abi");
-    }
-    let mut seen = BTreeSet::new();
-    for c in &m.app.capabilities {
-        if !seen.insert(c) || c.is_empty() || c.bytes().any(|b| b.is_ascii_whitespace()) {
-            v.push("invalid or duplicate capability");
-        }
-    }
-    if m.launch.as_ref().is_some_and(|l| l.exec.is_empty()) {
-        v.push("empty launch.exec");
-    }
-    if let Some(f) = &m.fetch {
-        if f.enabled && f.reason.as_deref().unwrap_or_default().is_empty() {
-            v.push("enabled fetch requires reason");
-        }
-        for x in f.files.as_deref().unwrap_or_default() {
-            if x.sha256.len() != 64
-                || !x
-                    .sha256
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
-                v.push("invalid fetch sha256");
-            }
-        }
-    }
-    if v.is_empty() {
-        Ok(())
-    } else {
-        Err(ManifestError {
-            kind: ManifestErrorKind::Validation,
-            message: v.join("; "),
-        })
-    }
-}
-fn consume_reserved(m: &Manifest) {
-    let _ = m.app.order;
-    if let Some(l) = &m.launch {
-        let _ = (&l.exec, l.takes_display, l.audio);
-    }
-    if let Some(h) = &m.health {
-        let _ = (&h.preflight, h.timeout_sec);
-    }
-    if let Some(f) = &m.fetch {
-        let _ = &f.destination;
-        for x in f.files.as_deref().unwrap_or_default() {
-            let _ = (
-                &x.url,
-                x.size,
-                &x.format,
-                &x.dest,
-                x.strip_components,
-                &x.executable,
-            );
-        }
+fn app_kind(category: Option<AppCategory>) -> AppKind {
+    match category.unwrap_or(AppCategory::Game) {
+        AppCategory::Media => AppKind::Media,
+        AppCategory::Stream => AppKind::Stream,
+        AppCategory::Game => AppKind::Game,
+        AppCategory::System => AppKind::System,
+        AppCategory::Settings => AppKind::Settings,
     }
 }
 fn result_key(r: &ProviderItemResult) -> String {

@@ -17,8 +17,7 @@
 //!
 //! A TOML document is represented with the [`Table`] type which maps `String` to the [`Value`] enum:
 //!
-#![cfg_attr(not(feature = "default"), doc = " ```ignore")]
-#![cfg_attr(feature = "default", doc = " ```")]
+//! ```rust
 //! # use toml::value::{Datetime, Array, Table};
 //! pub enum Value {
 //!     String(String),
@@ -35,8 +34,8 @@
 //!
 //! The easiest way to parse a TOML document is via the [`Table`] type:
 //!
-#![cfg_attr(not(feature = "default"), doc = " ```ignore")]
-#![cfg_attr(feature = "default", doc = " ```")]
+#![cfg_attr(not(feature = "parse"), doc = " ```ignore")]
+#![cfg_attr(feature = "parse", doc = " ```")]
 //! use toml::Table;
 //!
 //! let value = "foo = 'bar'".parse::<Table>().unwrap();
@@ -72,8 +71,8 @@
 //!
 //! An example of deserializing with TOML is:
 //!
-#![cfg_attr(not(feature = "default"), doc = " ```ignore")]
-#![cfg_attr(feature = "default", doc = " ```")]
+#![cfg_attr(not(feature = "parse"), doc = " ```ignore")]
+#![cfg_attr(feature = "parse", doc = " ```")]
 //! use serde::Deserialize;
 //!
 //! #[derive(Deserialize)]
@@ -105,8 +104,8 @@
 //!
 //! You can serialize types in a similar fashion:
 //!
-#![cfg_attr(not(feature = "default"), doc = " ```ignore")]
-#![cfg_attr(feature = "default", doc = " ```")]
+#![cfg_attr(not(feature = "display"), doc = " ```ignore")]
+#![cfg_attr(feature = "display", doc = " ```")]
 //! use serde::Serialize;
 //!
 //! #[derive(Serialize)]
@@ -139,10 +138,7 @@
 //! [`serde`]: https://serde.rs/
 //! [serde]: https://serde.rs/
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
-#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
-#![warn(clippy::std_instead_of_core)]
-#![warn(clippy::std_instead_of_alloc)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 // Makes rustc abort compilation if there are any unsafe blocks in the crate.
 // Presence of this annotation is picked up by tools such as cargo-geiger
 // and lets them ensure that there is indeed no unsafe code as opposed to
@@ -152,45 +148,30 @@
 #![warn(clippy::print_stderr)]
 #![warn(clippy::print_stdout)]
 
-#[allow(unused_extern_crates)]
-extern crate alloc;
-
-pub(crate) mod alloc_prelude {
-    pub(crate) use alloc::borrow::ToOwned as _;
-    pub(crate) use alloc::format;
-    pub(crate) use alloc::string::String;
-    pub(crate) use alloc::string::ToString as _;
-    pub(crate) use alloc::vec::Vec;
-}
-
 pub mod map;
-#[cfg(feature = "serde")]
 pub mod value;
 
 pub mod de;
-#[cfg(feature = "serde")]
 pub mod ser;
 
 #[doc(hidden)]
-#[cfg(feature = "serde")]
 pub mod macros;
 
-#[cfg(feature = "serde")]
+mod edit;
+#[cfg(feature = "display")]
+mod fmt;
 mod table;
 
-#[doc(inline)]
 #[cfg(feature = "parse")]
-#[cfg(feature = "serde")]
-pub use crate::de::{from_slice, from_str, Deserializer};
 #[doc(inline)]
+pub use crate::de::{from_str, Deserializer};
 #[cfg(feature = "display")]
-#[cfg(feature = "serde")]
+#[doc(inline)]
 pub use crate::ser::{to_string, to_string_pretty, Serializer};
 #[doc(inline)]
-#[cfg(feature = "serde")]
 pub use crate::value::Value;
+
 pub use serde_spanned::Spanned;
-#[cfg(feature = "serde")]
 pub use table::Table;
 
 // Shortcuts for the module doc-comment

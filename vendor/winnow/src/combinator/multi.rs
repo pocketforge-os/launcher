@@ -9,119 +9,7 @@ use crate::stream::Stream;
 use crate::Parser;
 use crate::Result;
 
-/// Repeats the embedded parser, lazily returning the results
-///
-/// This can serve as a building block for custom parsers like [`repeat`].
-/// To iterate over all of the input in your application, see [`Parser::parse_iter`].
-///
-/// Call the iterator's [`ParserIterator::finish`] method to get the remaining input if successful,
-/// or the error value if we encountered an error.
-///
-/// On [`ErrMode::Backtrack`][crate::error::ErrMode::Backtrack], iteration will stop. To instead chain an error up, see [`cut_err`][crate::combinator::cut_err].
-///
-/// # Example
-///
-/// ```rust
-/// # #[cfg(feature = "ascii")] {
-/// # use winnow::prelude::*;
-/// # use winnow::Result;
-/// use winnow::{combinator::iterator, ascii::alpha1, combinator::terminated};
-/// use std::collections::HashMap;
-///
-/// let mut data = "abc|defg|hijkl|mnopqr|123";
-/// let mut it = iterator(&mut data, terminated(alpha1, "|"));
-///
-/// let parsed = it.map(|v| (v, v.len())).collect::<HashMap<_,_>>();
-/// let res: Result<_> = it.finish();
-///
-/// assert_eq!(parsed, [("abc", 3usize), ("defg", 4), ("hijkl", 5), ("mnopqr", 6)].iter().cloned().collect());
-/// assert_eq!(data, "123");
-/// # }
-/// ```
-pub fn iterator<Input, Output, Error, ParseNext>(
-    input: &mut Input,
-    parser: ParseNext,
-) -> ParserIterator<'_, ParseNext, Input, Output, Error>
-where
-    ParseNext: Parser<Input, Output, Error>,
-    Input: Stream,
-    Error: ParserError<Input>,
-{
-    ParserIterator {
-        parser,
-        input,
-        state: State::Running,
-        marker: Default::default(),
-    }
-}
-
-/// Main structure associated to [`iterator`].
-pub struct ParserIterator<'i, F, I, O, E>
-where
-    F: Parser<I, O, E>,
-    I: Stream,
-{
-    parser: F,
-    input: &'i mut I,
-    state: State<E>,
-    marker: core::marker::PhantomData<O>,
-}
-
-impl<F, I, O, E> ParserIterator<'_, F, I, O, E>
-where
-    F: Parser<I, O, E>,
-    I: Stream,
-    E: ParserError<I>,
-{
-    /// Returns the remaining input if parsing was successful, or the error if we encountered an error.
-    pub fn finish(self) -> Result<(), E> {
-        match self.state {
-            State::Running | State::Done => Ok(()),
-            State::Cut(e) => Err(e),
-        }
-    }
-}
-
-impl<F, I, O, E> core::iter::Iterator for &mut ParserIterator<'_, F, I, O, E>
-where
-    F: Parser<I, O, E>,
-    I: Stream,
-    E: ParserError<I>,
-{
-    type Item = O;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if matches!(self.state, State::Running) {
-            let start = self.input.checkpoint();
-
-            match self.parser.parse_next(self.input) {
-                Ok(o) => {
-                    self.state = State::Running;
-                    Some(o)
-                }
-                Err(e) if e.is_backtrack() => {
-                    self.input.reset(&start);
-                    self.state = State::Done;
-                    None
-                }
-                Err(e) => {
-                    self.state = State::Cut(e);
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    }
-}
-
-enum State<E> {
-    Running,
-    Done,
-    Cut(E),
-}
-
-/// [`Accumulate`] the output of a parser into a container, like `Vec` (bound by `occurrences`)
+/// [`Accumulate`] the output of a parser into a container, like `Vec`
 ///
 /// This stops before `n` when the parser returns [`ErrMode::Backtrack`][crate::error::ErrMode::Backtrack]. To instead chain an error up, see
 /// [`cut_err`][crate::combinator::cut_err].
@@ -129,9 +17,6 @@ enum State<E> {
 /// To take a series of tokens, [`Accumulate`] into a `()`
 /// (e.g. with [`.map(|()| ())`][Parser::map])
 /// and then [`Parser::take`].
-///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
 ///
 /// <div class="warning">
 ///
@@ -239,7 +124,10 @@ where
     Repeat {
         occurrences: occurrences.into(),
         parser,
-        marker: Default::default(),
+        i: Default::default(),
+        o: Default::default(),
+        c: Default::default(),
+        e: Default::default(),
     }
 }
 
@@ -253,7 +141,10 @@ where
 {
     occurrences: Range,
     parser: P,
-    marker: core::marker::PhantomData<(I, O, C, E)>,
+    i: core::marker::PhantomData<I>,
+    o: core::marker::PhantomData<O>,
+    c: core::marker::PhantomData<C>,
+    e: core::marker::PhantomData<E>,
 }
 
 impl<ParseNext, Input, Output, Error> Repeat<ParseNext, Input, Output, (), Error>
@@ -910,17 +801,11 @@ where
 }
 
 /// [`Accumulate`] the output of parser `f` into a container, like `Vec`, until the parser `g`
-/// produces a result (bound by `occurrences`).
+/// produces a result.
 ///
 /// Returns a tuple of the results of `f` in a `Vec` and the result of `g`.
 ///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
-///
 /// `f` keeps going so long as `g` produces [`ErrMode::Backtrack`][crate::error::ErrMode::Backtrack]. To instead chain an error up, see [`cut_err`][crate::combinator::cut_err].
-///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
 ///
 /// To take a series of tokens, [`Accumulate`] into a `()`
 /// (e.g. with [`.map(|((), _)| ())`][Parser::map])
@@ -1083,7 +968,7 @@ where
     unreachable!()
 }
 
-/// [`Accumulate`] the output of a parser, interleaved with `sep` (bound by `occurrences`)
+/// [`Accumulate`] the output of a parser, interleaved with `sep`
 ///
 /// This stops when either parser returns [`ErrMode::Backtrack`][crate::error::ErrMode::Backtrack]. To instead chain an error up, see
 /// [`cut_err`][crate::combinator::cut_err].
@@ -1091,9 +976,6 @@ where
 /// To take a series of tokens, [`Accumulate`] into a `()`
 /// (e.g. with [`.map(|()| ())`][Parser::map])
 /// and then [`Parser::take`].
-///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
 ///
 /// <div class="warning">
 ///
@@ -1294,8 +1176,12 @@ where
     let mut acc = C::initial(None);
 
     // Parse the first element
-    let o = parser.parse_next(input)?;
-    acc.accumulate(o);
+    match parser.parse_next(input) {
+        Err(e) => return Err(e),
+        Ok(o) => {
+            acc.accumulate(o);
+        }
+    }
 
     loop {
         let start = input.checkpoint();
@@ -1484,7 +1370,6 @@ where
 /// # Example
 ///
 /// ```rust
-/// # #[cfg(feature = "ascii")] {
 /// # use winnow::{error::ErrMode, error::Needed};
 /// # use winnow::prelude::*;
 /// use winnow::combinator::separated_foldl1;
@@ -1497,7 +1382,6 @@ where
 /// assert_eq!(parser.parse_peek("9-3-5"), Ok(("", 1)));
 /// assert!(parser.parse_peek("").is_err());
 /// assert!(parser.parse_peek("def|abc").is_err());
-/// # }
 /// ```
 pub fn separated_foldl1<Input, Output, Sep, Error, ParseNext, SepParser, Op>(
     mut parser: ParseNext,
@@ -1556,7 +1440,6 @@ where
 /// # Example
 ///
 /// ```rust
-/// # #[cfg(feature = "ascii")] {
 /// # use winnow::{error::ErrMode, error::Needed};
 /// # use winnow::prelude::*;
 /// use winnow::combinator::separated_foldr1;
@@ -1570,7 +1453,6 @@ where
 /// assert_eq!(parser.parse_peek("2"), Ok(("", 2)));
 /// assert!(parser.parse_peek("").is_err());
 /// assert!(parser.parse_peek("def|abc").is_err());
-/// # }
 /// ```
 #[cfg(feature = "alloc")]
 pub fn separated_foldr1<Input, Output, Sep, Error, ParseNext, SepParser, Op>(

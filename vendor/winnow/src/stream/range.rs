@@ -2,7 +2,7 @@
 ///
 /// This is flexible in what can be converted to a [Range]:
 /// ```rust
-/// # #[cfg(all(feature = "std", feature = "parser"))] {
+/// # #[cfg(feature = "std")] {
 /// # use winnow::prelude::*;
 /// # use winnow::token::any;
 /// # use winnow::combinator::repeat;

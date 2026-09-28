@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.65.0"
 name = "winnow"
-version = "1.0.4"
+version = "0.7.15"
 build = false
 include = [
     "build.rs",
@@ -89,8 +89,6 @@ exactly = 1
 
 [features]
 alloc = []
-ascii = ["parser"]
-binary = ["parser"]
 debug = [
     "std",
     "dep:anstream",
@@ -98,12 +96,7 @@ debug = [
     "dep:is_terminal_polyfill",
     "dep:terminal_size",
 ]
-default = [
-    "std",
-    "ascii",
-    "binary",
-]
-parser = []
+default = ["std"]
 simd = ["dep:memchr"]
 std = [
     "alloc",
@@ -112,12 +105,10 @@ std = [
 unstable-doc = [
     "alloc",
     "std",
-    "ascii",
-    "binary",
     "simd",
     "unstable-recover",
 ]
-unstable-recover = ["parser"]
+unstable-recover = []
 
 [lib]
 name = "winnow"
@@ -127,145 +118,96 @@ path = "src/lib.rs"
 name = "arithmetic"
 path = "examples/arithmetic/main.rs"
 test = true
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[example]]
 name = "c_expression"
 path = "examples/c_expression/main.rs"
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[example]]
 name = "css"
 path = "examples/css/main.rs"
 test = true
-required-features = [
-    "alloc",
-    "parser",
-]
+required-features = ["alloc"]
 
 [[example]]
 name = "custom_error"
 path = "examples/custom_error.rs"
 test = true
-required-features = [
-    "alloc",
-    "parser",
-]
+required-features = ["alloc"]
 
 [[example]]
 name = "http"
 path = "examples/http/main.rs"
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[example]]
 name = "ini"
 path = "examples/ini/main.rs"
 test = true
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[example]]
 name = "iterator"
 path = "examples/iterator.rs"
-required-features = ["ascii"]
 
 [[example]]
 name = "json"
 path = "examples/json/main.rs"
 test = true
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[example]]
 name = "json_iterator"
 path = "examples/json_iterator.rs"
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[example]]
 name = "ndjson"
 path = "examples/ndjson/main.rs"
 test = true
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[example]]
 name = "s_expression"
 path = "examples/s_expression/main.rs"
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[example]]
 name = "string"
 path = "examples/string/main.rs"
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[bench]]
 name = "arithmetic"
 path = "examples/arithmetic/bench.rs"
 harness = false
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[bench]]
 name = "c_expression"
 path = "examples/c_expression/bench.rs"
 harness = false
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[bench]]
 name = "http"
 path = "examples/http/bench.rs"
 harness = false
-required-features = [
-    "alloc",
-    "ascii",
-]
+required-features = ["alloc"]
 
 [[bench]]
 name = "ini"
 path = "examples/ini/bench.rs"
 harness = false
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [[bench]]
 name = "json"
 path = "examples/json/bench.rs"
 harness = false
-required-features = [
-    "std",
-    "ascii",
-]
+required-features = ["std"]
 
 [dependencies.anstream]
 version = "0.6.15"
@@ -322,7 +264,6 @@ version = "0.2.0"
 [lints.clippy]
 bool_assert_comparison = "allow"
 branches_sharing_code = "allow"
-byte_char_slices = "allow"
 checked_conversions = "warn"
 collapsible_else_if = "allow"
 create_dir = "warn"
@@ -376,7 +317,7 @@ todo = "warn"
 trait_duplication_in_bounds = "warn"
 uninlined_format_args = "warn"
 verbose_file_reads = "warn"
-wildcard_imports = "warn"
+wildcard_imports = "allow"
 zero_sized_map_values = "warn"
 
 [lints.rust]

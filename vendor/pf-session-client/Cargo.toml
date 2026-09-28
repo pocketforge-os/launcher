@@ -51,3 +51,7 @@ features = ["derive"]
 
 [dependencies.serde_json]
 version = "1"
+
+[dev-dependencies.pf-app-manifest]
+version = "0.0.1"
+path = "../pf-app-manifest"

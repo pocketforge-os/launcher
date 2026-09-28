@@ -54,5 +54,5 @@ macro_rules! impl_partial_ord {
     };
 }
 
-#[cfg(all(test, feature = "ascii"))]
+#[cfg(test)]
 mod tests;

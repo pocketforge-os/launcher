@@ -1,5 +1,5 @@
-use core::cmp::Ordering;
-use core::hash::{Hash, Hasher};
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 // Currently serde itself doesn't have a spanned type, so we map our `Spanned`
 // to a special value in the serde data model. Namely one with these special
@@ -7,24 +7,29 @@ use core::hash::{Hash, Hasher};
 //
 // In general, supported deserializers should catch this and not literally emit
 // these strings but rather emit `Spanned` as they're intended.
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const NAME: &str = "$__serde_spanned_private_Spanned";
+pub const NAME: &str = "$__serde_spanned_private_Spanned";
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const START_FIELD: &str = "$__serde_spanned_private_start";
+pub const START_FIELD: &str = "$__serde_spanned_private_start";
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const END_FIELD: &str = "$__serde_spanned_private_end";
+pub const END_FIELD: &str = "$__serde_spanned_private_end";
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) const VALUE_FIELD: &str = "$__serde_spanned_private_value";
+pub const VALUE_FIELD: &str = "$__serde_spanned_private_value";
+#[doc(hidden)]
 #[cfg(feature = "serde")]
-pub(crate) fn is_spanned(name: &'static str) -> bool {
-    name == NAME
+pub fn is_spanned(name: &'static str, fields: &'static [&'static str]) -> bool {
+    name == NAME && fields == [START_FIELD, END_FIELD, VALUE_FIELD]
 }
 
 /// A spanned value, indicating the range at which it is defined in the source.
 #[derive(Clone, Debug)]
 pub struct Spanned<T> {
     /// Byte range
-    span: core::ops::Range<usize>,
+    span: std::ops::Range<usize>,
     /// The spanned value.
     value: T,
 }
@@ -83,12 +88,12 @@ impl<T> Spanned<T> {
     /// #
     /// # type DetailedDependency = std::collections::BTreeMap<String, String>;
     /// ```
-    pub fn new(range: core::ops::Range<usize>, value: T) -> Self {
-        Self { span: range, value }
+    pub fn new(range: std::ops::Range<usize>, value: T) -> Self {
+        Spanned { span: range, value }
     }
 
     /// Byte range
-    pub fn span(&self) -> core::ops::Range<usize> {
+    pub fn span(&self) -> std::ops::Range<usize> {
         self.span.clone()
     }
 
@@ -108,29 +113,7 @@ impl<T> Spanned<T> {
     }
 }
 
-#[cfg(feature = "serde")]
-impl<T> Spanned<T> {
-    pub(crate) const START_FIELD: &str = START_FIELD;
-    pub(crate) const END_FIELD: &str = END_FIELD;
-    pub(crate) const VALUE_FIELD: &str = VALUE_FIELD;
-}
-
-impl<T: core::fmt::Display> core::fmt::Display for Spanned<T> {
-    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.get_ref().fmt(fmt)
-    }
-}
-
-#[cfg(feature = "alloc")]
-#[allow(unused_qualifications)]
-impl core::borrow::Borrow<str> for Spanned<alloc::string::String> {
-    fn borrow(&self) -> &str {
-        self.get_ref()
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl core::borrow::Borrow<str> for Spanned<alloc::borrow::Cow<'_, str>> {
+impl std::borrow::Borrow<str> for Spanned<String> {
     fn borrow(&self) -> &str {
         self.get_ref()
     }
@@ -175,29 +158,29 @@ impl<T: Ord> Ord for Spanned<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T> serde_core::de::Deserialize<'de> for Spanned<T>
+impl<'de, T> serde::de::Deserialize<'de> for Spanned<T>
 where
-    T: serde_core::de::Deserialize<'de>,
+    T: serde::de::Deserialize<'de>,
 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Spanned<T>, D::Error>
     where
-        D: serde_core::de::Deserializer<'de>,
+        D: serde::de::Deserializer<'de>,
     {
-        struct SpannedVisitor<T>(::core::marker::PhantomData<T>);
+        struct SpannedVisitor<T>(::std::marker::PhantomData<T>);
 
-        impl<'de, T> serde_core::de::Visitor<'de> for SpannedVisitor<T>
+        impl<'de, T> serde::de::Visitor<'de> for SpannedVisitor<T>
         where
-            T: serde_core::de::Deserialize<'de>,
+            T: serde::de::Deserialize<'de>,
         {
             type Value = Spanned<T>;
 
-            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a spanned value")
             }
 
             fn visit_map<V>(self, mut visitor: V) -> Result<Spanned<T>, V::Error>
             where
-                V: serde_core::de::MapAccess<'de>,
+                V: serde::de::MapAccess<'de>,
             {
                 let mut start: Option<usize> = None;
                 let mut end: Option<usize> = None;
@@ -206,24 +189,24 @@ where
                     match key {
                         START_FIELD => {
                             if start.is_some() {
-                                return Err(serde_core::de::Error::duplicate_field(START_FIELD));
+                                return Err(serde::de::Error::duplicate_field(START_FIELD));
                             }
                             start = Some(visitor.next_value()?);
                         }
                         END_FIELD => {
                             if end.is_some() {
-                                return Err(serde_core::de::Error::duplicate_field(END_FIELD));
+                                return Err(serde::de::Error::duplicate_field(END_FIELD));
                             }
                             end = Some(visitor.next_value()?);
                         }
                         VALUE_FIELD => {
                             if value.is_some() {
-                                return Err(serde_core::de::Error::duplicate_field(VALUE_FIELD));
+                                return Err(serde::de::Error::duplicate_field(VALUE_FIELD));
                             }
                             value = Some(visitor.next_value()?);
                         }
                         field => {
-                            return Err(serde_core::de::Error::unknown_field(
+                            return Err(serde::de::Error::unknown_field(
                                 field,
                                 &[START_FIELD, END_FIELD, VALUE_FIELD],
                             ));
@@ -235,26 +218,26 @@ where
                         span: start..end,
                         value,
                     }),
-                    (None, _, _) => Err(serde_core::de::Error::missing_field(START_FIELD)),
-                    (_, None, _) => Err(serde_core::de::Error::missing_field(END_FIELD)),
-                    (_, _, None) => Err(serde_core::de::Error::missing_field(VALUE_FIELD)),
+                    (None, _, _) => Err(serde::de::Error::missing_field(START_FIELD)),
+                    (_, None, _) => Err(serde::de::Error::missing_field(END_FIELD)),
+                    (_, _, None) => Err(serde::de::Error::missing_field(VALUE_FIELD)),
                 }
             }
         }
 
         static FIELDS: [&str; 3] = [START_FIELD, END_FIELD, VALUE_FIELD];
 
-        let visitor = SpannedVisitor(::core::marker::PhantomData);
+        let visitor = SpannedVisitor(::std::marker::PhantomData);
 
         deserializer.deserialize_struct(NAME, &FIELDS, visitor)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<T: serde_core::ser::Serialize> serde_core::ser::Serialize for Spanned<T> {
+impl<T: serde::ser::Serialize> serde::ser::Serialize for Spanned<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde_core::ser::Serializer,
+        S: serde::ser::Serializer,
     {
         self.value.serialize(serializer)
     }

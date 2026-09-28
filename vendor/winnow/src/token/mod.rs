@@ -1,6 +1,6 @@
 //! Parsers extracting tokens from the stream
 
-#[cfg(all(test, feature = "ascii"))]
+#[cfg(test)]
 mod tests;
 
 use crate::combinator::trace;
@@ -138,7 +138,6 @@ where
 /// ```
 ///
 /// ```rust
-/// # #[cfg(feature = "ascii")] {
 /// # use winnow::{error::ErrMode, error::ContextError, error::Needed};
 /// # use winnow::prelude::*;
 /// use winnow::token::literal;
@@ -153,7 +152,6 @@ where
 /// assert_eq!(parser.parse_peek("HeLlO, World!"), Ok((", World!", "HeLlO")));
 /// assert!(parser.parse_peek("Something").is_err());
 /// assert!(parser.parse_peek("").is_err());
-/// # }
 /// ```
 #[inline(always)]
 #[doc(alias = "tag")]
@@ -327,10 +325,10 @@ where
     )
 }
 
-/// Recognize the longest input slice (bound by `occurrences`) that matches a [set of tokens][ContainsToken]
+/// Recognize the longest (m <= len <= n) input slice that matches a [set of tokens][ContainsToken]
 ///
 /// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
+/// of range (m <= len <= n).
 ///
 /// *[Partial version][crate::_topic::partial]* will return a `ErrMode::Incomplete(Needed::new(1))` if a member of the set of tokens reaches the end of the input or is too short.
 ///
@@ -609,12 +607,9 @@ where
     }
 }
 
-/// Recognize the longest input slice  (bound by `occurrences`) till a member of a [set of tokens][ContainsToken] is found.
+/// Recognize the longest input slice (if any) till a member of a [set of tokens][ContainsToken] is found.
 ///
 /// It doesn't consume the terminating token from the set.
-///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
 ///
 /// *[Partial version][crate::_topic::partial]* will return a `ErrMode::Incomplete(Needed::new(1))` if the match reaches the
 /// end of input or if there was not match.
@@ -816,14 +811,11 @@ where
     }
 }
 
-/// Recognize the input slice (bound by `occurrences`) up to the first occurrence of a [literal].
+/// Recognize the input slice up to the first occurrence of a [literal].
 ///
 /// Feature `simd` will enable the use of [`memchr`](https://docs.rs/memchr/latest/memchr/).
 ///
 /// It doesn't consume the literal.
-///
-/// It will return an `ErrMode::Backtrack(_)` if the set of tokens wasn't met or is out
-/// of `occurrences` range.
 ///
 /// *Complete version*: It will return `Err(ErrMode::Backtrack(_))`
 /// if the literal wasn't met.

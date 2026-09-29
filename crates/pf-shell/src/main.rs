@@ -1743,30 +1743,22 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         "pf-shell",
         SocketTransport::connect(session_socket.to_path_buf()),
     );
+    connect_session_at_startup(core, &mut session)?;
     let mut presentation_acknowledger = PresentationAcknowledger::default();
-    match wait_for_session_authority(&mut session, Duration::from_secs(3)) {
-        Ok(()) => {
-            drive_socket_session(core, &mut session)?;
-            let history = session
-                .transport_mut()
-                .history_entries()
-                .map_err(|error| format!("session history: {error:?}"))?;
-            presentation_acknowledger = PresentationAcknowledger::from_history(&history);
-        }
-        Err(SessionError::BackendUnavailable) => core.session_backend_unavailable_at_boot(),
-        Err(error) => return Err(format!("session: {error:?}")),
-    }
     apply_text_scale(host, core)?;
     let mut frames = automation::FrameCounter::default();
     let mut presented_revision = 0;
-    let first_frame_presented = present_interactive(host, core, &activate)?;
-    if first_frame_presented {
+    if present_interactive(host, core, &activate)? {
         frames.increment();
         presented_revision = core.revision();
     }
-    if presentation_acknowledger.after_present(session_socket, first_frame_presented)? {
-        drive_socket_session(core, &mut session)?;
-    }
+    acknowledge_presented_frames(
+        &mut presentation_acknowledger,
+        session_socket,
+        frames,
+        core,
+        &mut session,
+    )?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     loop {
@@ -1812,6 +1804,13 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 &before,
                 &mut frames,
                 &mut presented_revision,
+            )?;
+            acknowledge_presented_frames(
+                &mut presentation_acknowledger,
+                session_socket,
+                frames,
+                core,
+                &mut session,
             )?;
             continue;
         };
@@ -1960,6 +1959,13 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         if let (Some(trace), Some(ingress_us)) = (latency_trace.as_mut(), ingress_us) {
             trace.action(&action, ingress_us, presented, core.revision())?;
         }
+        acknowledge_presented_frames(
+            &mut presentation_acknowledger,
+            session_socket,
+            frames,
+            core,
+            &mut session,
+        )?;
     }
 }
 
@@ -2186,26 +2192,39 @@ fn run_desktop_sim_authority(
     Ok(())
 }
 
+/// Retry cadence while the authority is not yet at the presentation rung.
+const PRESENTATION_ACK_RETRY: Duration = Duration::from_millis(250);
+
+/// Sends `Observe{PresentationAcknowledged}` whenever the authority may be waiting on this shell.
+///
+/// Re-evaluated on every loop step (never computed once at startup): the obligation exists while
+/// the latest history entry has ended and still owes its receipt, the shell has presented a frame
+/// and currently shows one, and that session has not been acknowledged yet. The authority's
+/// `InvalidObservation` answer means it has not reached the presentation rung (or waits in a
+/// terminal recovery); it is retried, never fatal.
 #[derive(Default)]
 struct PresentationAcknowledger {
-    pending: bool,
-    sent: bool,
+    acknowledged: Option<String>,
+    retry_after: Option<Instant>,
 }
 
 impl PresentationAcknowledger {
-    fn from_history(entries: &[HistoryEntry]) -> Self {
-        Self {
-            pending: entries
-                .iter()
-                .any(|entry| entry.ended_at.is_some() && entry.receipt.is_none()),
-            sent: false,
-        }
-    }
-
-    fn after_present(&mut self, socket: &Path, presented: bool) -> Result<bool, String> {
+    fn poll(
+        &mut self,
+        socket: &Path,
+        core: &ShellCore,
+        frames: automation::FrameCounter,
+    ) -> Result<bool, String> {
         use pf_session_authority::{RpcObservation, RpcRequest, RpcResponse};
 
-        if !presented || !self.pending || self.sent {
+        let Some(session) = core.restoration_pending_session() else {
+            return Ok(false);
+        };
+        if self.acknowledged.as_deref() == Some(session)
+            || frames.get() == 0
+            || !core.has_shell_frame()
+            || self.retry_after.is_some_and(|at| Instant::now() < at)
+        {
             return Ok(false);
         }
         match authority_rpc(
@@ -2215,8 +2234,13 @@ impl PresentationAcknowledger {
             },
         ) {
             Ok(RpcResponse::Ok) => {
-                self.sent = true;
+                self.acknowledged = Some(session.to_owned());
+                self.retry_after = None;
                 Ok(true)
+            }
+            Err(message) if message == "InvalidObservation" => {
+                self.retry_after = Some(Instant::now() + PRESENTATION_ACK_RETRY);
+                Ok(false)
             }
             Ok(response) => Err(format!(
                 "unexpected presentation acknowledgement response: {response:?}"
@@ -2224,6 +2248,36 @@ impl PresentationAcknowledger {
             Err(message) => Err(format!("presentation acknowledgement: {message}")),
         }
     }
+}
+
+/// Connects a starting shell to the session authority and replays its unacknowledged events.
+/// History refreshes inside [`drive_socket_session`] discard replayed Starting/Running for a
+/// session the authority is already restoring (see [`refresh_history`]).
+fn connect_session_at_startup(
+    core: &mut ShellCore,
+    session: &mut SessionClient<SocketTransport>,
+) -> Result<(), String> {
+    match wait_for_session_authority(session, Duration::from_secs(3)) {
+        Ok(()) => drive_socket_session(core, session),
+        Err(SessionError::BackendUnavailable) => {
+            core.session_backend_unavailable_at_boot();
+            Ok(())
+        }
+        Err(error) => Err(format!("session: {error:?}")),
+    }
+}
+
+fn acknowledge_presented_frames(
+    acknowledger: &mut PresentationAcknowledger,
+    socket: &Path,
+    frames: automation::FrameCounter,
+    core: &mut ShellCore,
+    session: &mut SessionClient<SocketTransport>,
+) -> Result<(), String> {
+    if acknowledger.poll(socket, core, frames)? {
+        drive_socket_session(core, session)?;
+    }
+    Ok(())
 }
 
 fn observe_desktop_sim(
@@ -2818,6 +2872,11 @@ fn session_backend_unavailable(core: &mut ShellCore) {
 fn refresh_history(core: &mut ShellCore, session: &mut SessionClient<SocketTransport>) {
     if let Ok(entries) = session.transport_mut().history_entries() {
         core.load_history(&entries);
+        // The latest session has ended and the authority is restoring it: any Starting/Running
+        // this shell holds (replayed or stale) describes an app that is gone. Present the shell.
+        if core.restoration_pending_session().is_some() {
+            core.discard_replayed_session_observations();
+        }
     }
 }
 
@@ -8888,6 +8947,10 @@ exec="./launch"
     fn presentation_ack_is_sent_once_after_first_restored_frame_across_shell_restart() {
         use std::os::unix::net::UnixListener;
 
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
         let active_history = [HistoryEntry {
             session_id: "session-1".into(),
             item_id: "org.example.app".into(),
@@ -8895,10 +8958,13 @@ exec="./launch"
             started_at: Some(std::time::SystemTime::UNIX_EPOCH),
             ended_at: None,
         }];
-        let mut before_restart = PresentationAcknowledger::from_history(&active_history);
+        core.load_history(&active_history);
+        let mut frames = automation::FrameCounter::default();
+        frames.increment();
+        let mut before_restart = PresentationAcknowledger::default();
         assert!(
             !before_restart
-                .after_present(Path::new("/missing/authority.sock"), true)
+                .poll(Path::new("/missing/authority.sock"), &core, frames)
                 .unwrap(),
             "the shell that launched the still-running app must not acknowledge restoration"
         );
@@ -8910,7 +8976,8 @@ exec="./launch"
             }),
             ..active_history[0].clone()
         }];
-        let mut after_restart = PresentationAcknowledger::from_history(&restored_history);
+        core.load_history(&restored_history);
+        let mut after_restart = PresentationAcknowledger::default();
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("authority.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -8929,9 +8996,11 @@ exec="./launch"
             pf_wire::write_frame(&mut stream, &body).unwrap();
         });
 
-        assert!(!after_restart.after_present(&socket, false).unwrap());
-        assert!(after_restart.after_present(&socket, true).unwrap());
-        assert!(!after_restart.after_present(&socket, true).unwrap());
+        let no_frames = automation::FrameCounter::default();
+        assert!(!after_restart.poll(&socket, &core, no_frames).unwrap());
+        assert!(after_restart.poll(&socket, &core, frames).unwrap());
+        frames.increment();
+        assert!(!after_restart.poll(&socket, &core, frames).unwrap());
         server.join().unwrap();
     }
 
@@ -9667,5 +9736,415 @@ exec="./launch"
             .unwrap();
         assert!(filtered["latency_us"].is_null());
         assert!(filtered["t_present_us"].is_null());
+    }
+
+    // ---- tsp-f3fm.219 L1/L2: a restored shell always presents and acknowledges ----
+
+    /// One scripted session-authority socket. `events` become visible once the shell has made
+    /// `after_events_calls` Events requests (0 = immediately). Every request is recorded.
+    struct FakeAuthority {
+        socket: PathBuf,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        server: Option<thread::JoinHandle<()>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeAuthority {
+        fn serve(
+            events: Vec<(usize, u64, pf_session_authority::RpcEvent)>,
+            history: Vec<HistoryEntry>,
+        ) -> Self {
+            Self::serve_script(events, vec![(0, history)], 0)
+        }
+
+        /// `history` steps become current once the shell has made that many History requests;
+        /// the first `early_observes` presentation acknowledgements are answered the way the
+        /// authority answers before it reaches the presentation rung.
+        fn serve_script(
+            events: Vec<(usize, u64, pf_session_authority::RpcEvent)>,
+            history: Vec<(usize, Vec<HistoryEntry>)>,
+            early_observes: usize,
+        ) -> Self {
+            use pf_session_authority::{RpcRequest, RpcResponse};
+            use std::os::unix::net::UnixListener;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::{Arc, Mutex};
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("authority.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (log, halt) = (requests.clone(), stop.clone());
+            let server = thread::spawn(move || {
+                let (mut acknowledged, mut events_calls) = (0_u64, 0_usize);
+                let (mut history_calls, mut observes) = (0_usize, 0_usize);
+                while !halt.load(Ordering::Acquire) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => panic!("fake authority accept: {error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let body = pf_wire::read_frame(&mut stream).unwrap();
+                    let request: RpcRequest = serde_json::from_slice(&body).unwrap();
+                    log.lock()
+                        .unwrap()
+                        .push(serde_json::to_value(&request).unwrap());
+                    let response = match request {
+                        RpcRequest::Events { .. } => {
+                            events_calls += 1;
+                            RpcResponse::Events {
+                                events: events
+                                    .iter()
+                                    .filter(|(after, sequence, _)| {
+                                        *after < events_calls && *sequence > acknowledged
+                                    })
+                                    .map(|(_, sequence, event)| (*sequence, event.clone()))
+                                    .collect(),
+                            }
+                        }
+                        RpcRequest::Acknowledge { sequence, .. } => {
+                            acknowledged = acknowledged.max(sequence);
+                            RpcResponse::Ok
+                        }
+                        RpcRequest::History => {
+                            let current = history
+                                .iter()
+                                .rev()
+                                .find(|(after, _)| *after <= history_calls)
+                                .map(|(_, entries)| entries.clone())
+                                .unwrap_or_default();
+                            history_calls += 1;
+                            RpcResponse::History { entries: current }
+                        }
+                        RpcRequest::Observe { .. } => {
+                            observes += 1;
+                            if observes <= early_observes {
+                                RpcResponse::Error {
+                                    message: "InvalidObservation".into(),
+                                }
+                            } else {
+                                RpcResponse::Ok
+                            }
+                        }
+                        _ => RpcResponse::Ok,
+                    };
+                    let body = serde_json::to_vec(&response).unwrap();
+                    pf_wire::write_frame(&mut stream, &body).unwrap();
+                }
+            });
+            Self {
+                socket,
+                requests,
+                stop,
+                server: Some(server),
+                _dir: dir,
+            }
+        }
+
+        fn presentation_acks(&self) -> usize {
+            let ack = serde_json::json!({
+                "method": "observe",
+                "observation": {"kind": "presentation_acknowledged"}
+            });
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| **request == ack)
+                .count()
+        }
+    }
+
+    impl Drop for FakeAuthority {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+        }
+    }
+
+    fn history_entry(session_id: &str, ended: bool) -> HistoryEntry {
+        HistoryEntry {
+            session_id: session_id.into(),
+            item_id: "org.pocketforge.poolsuite".into(),
+            receipt: None,
+            started_at: Some(std::time::SystemTime::UNIX_EPOCH),
+            ended_at: ended.then(|| EndStamp {
+                at: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                precision: EndPrecision::Approximate,
+            }),
+        }
+    }
+
+    fn replayed_session_events() -> Vec<(usize, u64, pf_session_authority::RpcEvent)> {
+        use pf_session_authority::RpcEvent;
+        vec![(0, 1, RpcEvent::Starting), (0, 2, RpcEvent::Running)]
+    }
+
+    fn offscreen_metrics() -> SurfaceMetrics {
+        SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        }
+    }
+
+    /// Runs the production interactive loop against `authority` for `idle_polls` idle cycles.
+    fn run_loop_against(
+        authority: &FakeAuthority,
+        idle_polls: usize,
+    ) -> (ShellCore, OffscreenHost) {
+        run_loop_against_paced(authority, idle_polls, Duration::ZERO)
+    }
+
+    /// Idle cycles that each take `idle` of wall time, like the device's input poll deadline.
+    struct PacedIdleInput {
+        remaining: usize,
+        idle: Duration,
+    }
+
+    impl InteractiveInput<OffscreenHost> for PacedIdleInput {
+        fn next_action(
+            &mut self,
+            _host: &mut OffscreenHost,
+            _deadline: Deadline,
+            _latency_trace: Option<&LatencyTrace>,
+        ) -> Result<DecodedActionPoll, String> {
+            if self.remaining == 0 {
+                return Ok(DecodedActionPoll::Closed);
+            }
+            self.remaining -= 1;
+            thread::sleep(self.idle);
+            Ok(DecodedActionPoll::DeadlineReached)
+        }
+        fn capture_next_button(&mut self) {}
+        fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+        fn has_pending(&self) -> bool {
+            false
+        }
+    }
+
+    fn run_loop_against_paced(
+        authority: &FakeAuthority,
+        idle_polls: usize,
+        idle: Duration,
+    ) -> (ShellCore, OffscreenHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let snapshot_path = dir.path().join("catalog.json");
+        fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let catalog = SnapshotCatalog {
+            path: snapshot_path,
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        core.set_control_bindings(control_bindings(&map));
+        let mut host = OffscreenHost::new(offscreen_metrics());
+        let mut input = PacedIdleInput {
+            remaining: idle_polls,
+            idle,
+        };
+        let mut preferences = fixture_preferences();
+        let mut power = FakePowerPort::new(Vec::new(), IdlePolicy::default());
+        let (mut network, mut time, mut transfer) = fixture_device_ports();
+        let status = FakeDeviceStatusPort { attention: false };
+        run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer_prompt(&map),
+            &mut preferences,
+            &mut power,
+            map,
+            &catalog,
+            &ArtPolicy::VendoredFixture,
+            &authority.socket,
+            &mut network,
+            &mut time,
+            &mut transfer,
+            &status,
+            dir.path(),
+            JsonRemapStore::at(dir.path().join("remaps.json")),
+            &mut None,
+            "scripted",
+            &mut None,
+        )
+        .unwrap();
+        (core, host)
+    }
+
+    #[test]
+    fn restored_shell_ignores_replayed_running_presents_home_and_acknowledges() {
+        let authority = FakeAuthority::serve(
+            replayed_session_events(),
+            vec![history_entry("session-1", true)],
+        );
+
+        let (core, host) = run_loop_against(&authority, 0);
+
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        assert!(
+            host.frame().is_some(),
+            "the restored shell drew its Home frame"
+        );
+        assert_eq!(authority.presentation_acks(), 1);
+    }
+
+    #[test]
+    fn live_session_replay_stays_frameless_and_never_acknowledges() {
+        // Negative control: the same replay while the session is still live (no ended_at).
+        let authority = FakeAuthority::serve(
+            replayed_session_events(),
+            vec![history_entry("session-1", false)],
+        );
+
+        let (core, host) = run_loop_against(&authority, 2);
+
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Running);
+        assert!(
+            host.frame().is_none(),
+            "the foreground app owns presentation"
+        );
+        assert_eq!(authority.presentation_acks(), 0);
+    }
+
+    #[test]
+    fn startup_discards_replay_only_for_a_pending_restoration() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        for (ended, expected) in [
+            (true, pf_shell_core::Presentation::Ready),
+            (false, pf_shell_core::Presentation::Running),
+        ] {
+            let authority = FakeAuthority::serve(
+                replayed_session_events(),
+                vec![history_entry("session-1", ended)],
+            );
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.authority_snapshot(false);
+            let mut session = SessionClient::new(
+                "pf-shell",
+                SocketTransport::connect(authority.socket.clone()),
+            );
+
+            connect_session_at_startup(&mut core, &mut session).unwrap();
+
+            assert_eq!(core.presentation(), &expected);
+            assert_eq!(
+                core.restoration_pending_session(),
+                ended.then_some("session-1")
+            );
+        }
+    }
+
+    #[test]
+    fn acknowledger_waits_for_a_frame_then_acknowledges_the_session_once() {
+        let authority = FakeAuthority::serve(Vec::new(), Vec::new());
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        core.load_history(&[history_entry("session-1", true)]);
+        let mut acknowledger = PresentationAcknowledger::default();
+        let mut frames = automation::FrameCounter::default();
+
+        assert!(!acknowledger.poll(&authority.socket, &core, frames).unwrap());
+        frames.increment();
+        assert!(acknowledger.poll(&authority.socket, &core, frames).unwrap());
+        frames.increment();
+        assert!(!acknowledger.poll(&authority.socket, &core, frames).unwrap());
+        assert_eq!(authority.presentation_acks(), 1);
+    }
+    fn recovery_required(seq: u64, reason: &str) -> (usize, u64, pf_session_authority::RpcEvent) {
+        (
+            0,
+            seq,
+            pf_session_authority::RpcEvent::RecoveryRequired {
+                session_id: "session-1".into(),
+                reason: reason.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn shell_first_connecting_after_the_presentation_deadline_draws_home_and_acknowledges() {
+        let authority = FakeAuthority::serve(
+            vec![recovery_required(
+                3,
+                "presentation_not_acknowledged: presentation not acknowledged within 10000 ms",
+            )],
+            vec![history_entry("session-1", true)],
+        );
+
+        let (core, host) = run_loop_against(&authority, 1);
+
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        assert!(host.frame().is_some(), "the late shell drew Home");
+        assert_eq!(authority.presentation_acks(), 1);
+    }
+
+    #[test]
+    fn every_other_recovery_reason_stays_frameless_and_never_acknowledges() {
+        // Negative control for L3: same shape, a terminal recovery reason.
+        let authority = FakeAuthority::serve(
+            vec![recovery_required(3, "owner_not_active: unavailable")],
+            vec![history_entry("session-1", true)],
+        );
+
+        let (core, host) = run_loop_against(&authority, 2);
+
+        assert_eq!(
+            core.presentation(),
+            &pf_shell_core::Presentation::RecoveryRequired
+        );
+        assert!(host.frame().is_none());
+        assert_eq!(authority.presentation_acks(), 0);
+    }
+
+    #[test]
+    fn shell_whose_startup_precedes_the_crash_observation_still_acknowledges() {
+        // At startup the authority has not yet observed the crash: history is live and the
+        // replay says Running, so the shell is (correctly) frameless. Later history shows the
+        // session ended with its receipt owed, and the first acknowledgement arrives before the
+        // authority reaches the presentation rung. The shell must present and keep trying.
+        let authority = FakeAuthority::serve_script(
+            replayed_session_events(),
+            vec![
+                (0, vec![history_entry("session-1", false)]),
+                (4, vec![history_entry("session-1", true)]),
+            ],
+            1,
+        );
+
+        let (core, host) = run_loop_against_paced(&authority, 20, Duration::from_millis(40));
+
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        assert!(host.frame().is_some());
+        assert_eq!(
+            authority.presentation_acks(),
+            2,
+            "one early attempt refused by the authority, then exactly one accepted"
+        );
+    }
+
+    #[test]
+    fn shell_core_presentation_timeout_code_matches_the_authority_reason_code() {
+        assert_eq!(
+            pf_shell_core::PRESENTATION_NOT_ACKNOWLEDGED,
+            pf_app_manifest::ReasonCode::PresentationNotAcknowledged.as_str()
+        );
     }
 }

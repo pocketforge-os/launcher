@@ -1755,8 +1755,11 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     acknowledge_presented_frames(
         &mut presentation_acknowledger,
         session_socket,
-        frames,
+        host,
         core,
+        &activate,
+        &mut frames,
+        &mut presented_revision,
         &mut session,
     )?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
@@ -1808,8 +1811,11 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             acknowledge_presented_frames(
                 &mut presentation_acknowledger,
                 session_socket,
-                frames,
+                host,
                 core,
+                &activate,
+                &mut frames,
+                &mut presented_revision,
                 &mut session,
             )?;
             continue;
@@ -1962,8 +1968,11 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         acknowledge_presented_frames(
             &mut presentation_acknowledger,
             session_socket,
-            frames,
+            host,
             core,
+            &activate,
+            &mut frames,
+            &mut presented_revision,
             &mut session,
         )?;
     }
@@ -2267,15 +2276,26 @@ fn connect_session_at_startup(
     }
 }
 
+/// Sends a due presentation acknowledgement, then drives the events it releases and presents
+/// what they changed. The acknowledgement is what lets the authority finish restoring and publish
+/// the owed receipt, so the receipt arrives here, after this loop step's redraw snapshot and its
+/// present. Presenting here is required: the next step's snapshot already includes the change,
+/// and it would otherwise stay undrawn (tsp-f3fm.221: an invisible return summary consumed A).
+#[allow(clippy::too_many_arguments)]
 fn acknowledge_presented_frames(
     acknowledger: &mut PresentationAcknowledger,
     socket: &Path,
-    frames: automation::FrameCounter,
+    host: &mut impl RenderedFrameHost,
     core: &mut ShellCore,
+    activate: &str,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
     session: &mut SessionClient<SocketTransport>,
 ) -> Result<(), String> {
-    if acknowledger.poll(socket, core, frames)? {
+    if acknowledger.poll(socket, core, *frames)? {
+        let before = redraw_state(core);
         drive_socket_session(core, session)?;
+        present_if_changed(host, core, activate, &before, frames, presented_revision)?;
     }
     Ok(())
 }
@@ -9740,6 +9760,12 @@ exec="./launch"
 
     // ---- tsp-f3fm.219 L1/L2: a restored shell always presents and acknowledges ----
 
+    /// Events and history an authority publishes once a presentation acknowledgement lands.
+    type AfterAck = (
+        Vec<(u64, pf_session_authority::RpcEvent)>,
+        Vec<HistoryEntry>,
+    );
+
     /// One scripted session-authority socket. `events` become visible once the shell has made
     /// `after_events_calls` Events requests (0 = immediately). Every request is recorded.
     struct FakeAuthority {
@@ -9766,6 +9792,19 @@ exec="./launch"
             history: Vec<(usize, Vec<HistoryEntry>)>,
             early_observes: usize,
         ) -> Self {
+            Self::serve_with_restoration(events, history, early_observes, None)
+        }
+
+        /// Like the device authority completing a restoration: `after_ack` events and history
+        /// become visible only once a presentation acknowledgement has been accepted
+        /// (vendor authority `complete_restoration` publishes the receipt at that moment).
+        /// Launch requests are accepted as `session-2`.
+        fn serve_with_restoration(
+            events: Vec<(usize, u64, pf_session_authority::RpcEvent)>,
+            history: Vec<(usize, Vec<HistoryEntry>)>,
+            early_observes: usize,
+            after_ack: Option<AfterAck>,
+        ) -> Self {
             use pf_session_authority::{RpcRequest, RpcResponse};
             use std::os::unix::net::UnixListener;
             use std::sync::atomic::{AtomicBool, Ordering};
@@ -9781,6 +9820,7 @@ exec="./launch"
             let server = thread::spawn(move || {
                 let (mut acknowledged, mut events_calls) = (0_u64, 0_usize);
                 let (mut history_calls, mut observes) = (0_usize, 0_usize);
+                let mut restored = false;
                 while !halt.load(Ordering::Acquire) {
                     let mut stream = match listener.accept() {
                         Ok((stream, _)) => stream,
@@ -9799,6 +9839,12 @@ exec="./launch"
                     let response = match request {
                         RpcRequest::Events { .. } => {
                             events_calls += 1;
+                            let released = after_ack
+                                .iter()
+                                .filter(|_| restored)
+                                .flat_map(|(events, _)| events.iter())
+                                .filter(|(sequence, _)| *sequence > acknowledged)
+                                .map(|(sequence, event)| (*sequence, event.clone()));
                             RpcResponse::Events {
                                 events: events
                                     .iter()
@@ -9806,6 +9852,7 @@ exec="./launch"
                                         *after < events_calls && *sequence > acknowledged
                                     })
                                     .map(|(_, sequence, event)| (*sequence, event.clone()))
+                                    .chain(released)
                                     .collect(),
                             }
                         }
@@ -9814,12 +9861,15 @@ exec="./launch"
                             RpcResponse::Ok
                         }
                         RpcRequest::History => {
-                            let current = history
-                                .iter()
-                                .rev()
-                                .find(|(after, _)| *after <= history_calls)
-                                .map(|(_, entries)| entries.clone())
-                                .unwrap_or_default();
+                            let current = match &after_ack {
+                                Some((_, entries)) if restored => entries.clone(),
+                                _ => history
+                                    .iter()
+                                    .rev()
+                                    .find(|(after, _)| *after <= history_calls)
+                                    .map(|(_, entries)| entries.clone())
+                                    .unwrap_or_default(),
+                            };
                             history_calls += 1;
                             RpcResponse::History { entries: current }
                         }
@@ -9830,9 +9880,13 @@ exec="./launch"
                                     message: "InvalidObservation".into(),
                                 }
                             } else {
+                                restored = true;
                                 RpcResponse::Ok
                             }
                         }
+                        RpcRequest::Launch { .. } => RpcResponse::Accepted {
+                            session_id: "session-2".into(),
+                        },
                         _ => RpcResponse::Ok,
                     };
                     let body = serde_json::to_vec(&response).unwrap();
@@ -9846,6 +9900,15 @@ exec="./launch"
                 server: Some(server),
                 _dir: dir,
             }
+        }
+
+        fn launches(&self) -> usize {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == "launch")
+                .count()
         }
 
         fn presentation_acks(&self) -> usize {
@@ -10146,5 +10209,282 @@ exec="./launch"
             pf_shell_core::PRESENTATION_NOT_ACKNOWLEDGED,
             pf_app_manifest::ReasonCode::PresentationNotAcknowledged.as_str()
         );
+    }
+
+    // ---- tsp-f3fm.221: the first A after a return launches; receipt changes are presented ----
+
+    /// Offscreen host that records a digest of every presented frame, in order.
+    struct RecordingHost {
+        inner: OffscreenHost,
+        presents: Vec<[u8; 32]>,
+    }
+
+    impl FrameHost for RecordingHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.inner.metrics()
+        }
+        fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+            self.inner.set_theme_base(base);
+        }
+        fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            let result = self.inner.present(scene);
+            if let Some(bytes) = self.inner.bytes() {
+                self.presents.push(Sha256::digest(bytes).into());
+            }
+            result
+        }
+    }
+
+    impl RenderedFrameHost for RecordingHost {
+        fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+            RenderedFrameHost::set_text_scale(&mut self.inner, factor)
+        }
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            self.inner.render_notes()
+        }
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            self.inner.raster_frame()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Step {
+        /// One idle input poll lasting this long.
+        Idle(Duration),
+        Press(ShellAction),
+    }
+
+    /// What the loop had done when the input was polled for step `index`.
+    #[derive(Clone, Debug)]
+    struct PollRecord {
+        presents: usize,
+        launches: usize,
+    }
+
+    struct ScriptedInput {
+        steps: std::collections::VecDeque<Step>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        polls: Vec<PollRecord>,
+    }
+
+    impl InteractiveInput<RecordingHost> for ScriptedInput {
+        fn next_action(
+            &mut self,
+            host: &mut RecordingHost,
+            _deadline: Deadline,
+            _latency_trace: Option<&LatencyTrace>,
+        ) -> Result<DecodedActionPoll, String> {
+            self.polls.push(PollRecord {
+                presents: host.presents.len(),
+                launches: self
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["method"] == "launch")
+                    .count(),
+            });
+            Ok(match self.steps.pop_front() {
+                None => DecodedActionPoll::Closed,
+                Some(Step::Idle(idle)) => {
+                    thread::sleep(idle);
+                    DecodedActionPoll::DeadlineReached
+                }
+                Some(Step::Press(action)) => DecodedActionPoll::Event {
+                    action,
+                    ingress_us: None,
+                },
+            })
+        }
+        fn capture_next_button(&mut self) {}
+        fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+        fn has_pending(&self) -> bool {
+            false
+        }
+    }
+
+    /// Runs the production interactive loop against `authority`, driven by `steps`; returns the
+    /// core, every presented frame digest, and one record per input poll (poll `i` happens
+    /// before step `i` is delivered, so it shows the effects of steps `..i`).
+    fn run_loop_scripted(
+        authority: &FakeAuthority,
+        steps: Vec<Step>,
+    ) -> (ShellCore, Vec<[u8; 32]>, Vec<PollRecord>) {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let snapshot_path = dir.path().join("catalog.json");
+        fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let catalog = SnapshotCatalog {
+            path: snapshot_path,
+        };
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+        core.set_control_bindings(control_bindings(&map));
+        let mut host = RecordingHost {
+            inner: OffscreenHost::new(offscreen_metrics()),
+            presents: Vec::new(),
+        };
+        let mut input = ScriptedInput {
+            steps: steps.into(),
+            requests: authority.requests.clone(),
+            polls: Vec::new(),
+        };
+        let mut preferences = fixture_preferences();
+        let mut power = FakePowerPort::new(Vec::new(), IdlePolicy::default());
+        let (mut network, mut time, mut transfer) = fixture_device_ports();
+        let status = FakeDeviceStatusPort { attention: false };
+        // Preload the status the loop's periodic refresh reads, so that refresh never changes
+        // state: every present these tests count is then caused by the session or the input.
+        core.load_device_status(&status);
+        run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer_prompt(&map),
+            &mut preferences,
+            &mut power,
+            map,
+            &catalog,
+            &ArtPolicy::VendoredFixture,
+            &authority.socket,
+            &mut network,
+            &mut time,
+            &mut transfer,
+            &status,
+            dir.path(),
+            JsonRemapStore::at(dir.path().join("remaps.json")),
+            &mut None,
+            "scripted",
+            &mut None,
+        )
+        .unwrap();
+        (core, host.presents, input.polls)
+    }
+
+    /// The device restoration after Menu (P5): the restarted shell finds session-1 ended with
+    /// its receipt owed, presents Home, and its acknowledgement releases the receipt.
+    /// `early_observes` acknowledgements are refused first (authority not yet at the rung).
+    fn restoring_authority(
+        receipt_event: pf_session_authority::RpcEvent,
+        receipt: pf_session_authority::Receipt,
+        early_observes: usize,
+    ) -> FakeAuthority {
+        let mut completed = history_entry("session-1", true);
+        completed.receipt = Some(receipt);
+        FakeAuthority::serve_with_restoration(
+            Vec::new(),
+            vec![(0, vec![history_entry("session-1", true)])],
+            early_observes,
+            Some((
+                vec![
+                    (3, pf_session_authority::RpcEvent::ObservationComplete),
+                    (4, receipt_event),
+                ],
+                vec![completed],
+            )),
+        )
+    }
+
+    const IDLE: Step = Step::Idle(Duration::ZERO);
+
+    #[test]
+    fn first_a_after_a_returned_receipt_on_idle_home_sends_launch() {
+        let authority = restoring_authority(
+            pf_session_authority::RpcEvent::Returned {
+                session_id: "session-1".into(),
+            },
+            pf_session_authority::Receipt::Returned,
+            0,
+        );
+
+        let (core, presents, polls) = run_loop_scripted(
+            &authority,
+            vec![IDLE, IDLE, Step::Press(ShellAction::Activate), IDLE],
+        );
+
+        assert_eq!(authority.presentation_acks(), 1);
+        assert_eq!(polls[2].launches, 0, "no launch before the press");
+        assert_eq!(
+            polls[3].launches, 1,
+            "the FIRST A after the return sends exactly one Launch RPC"
+        );
+        assert_eq!(authority.launches(), 1);
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Starting);
+        // The receipt changed the Home heading to "RECENT · JUST NOW"; that change is presented
+        // before any input, without a modal.
+        assert!(
+            polls[0].presents >= 2,
+            "the receipt's Home cue was presented"
+        );
+        assert_ne!(presents[0], presents[1]);
+    }
+
+    #[test]
+    fn crash_receipt_modal_is_presented_first_a_dismisses_next_a_launches() {
+        let authority = restoring_authority(
+            pf_session_authority::RpcEvent::Crash {
+                session_id: "session-1".into(),
+                summary: "systemd result: exit-code".into(),
+            },
+            pf_session_authority::Receipt::Crash {
+                summary: "systemd result: exit-code".into(),
+            },
+            0,
+        );
+
+        let (core, presents, polls) = run_loop_scripted(
+            &authority,
+            vec![
+                IDLE,
+                Step::Press(ShellAction::Activate),
+                IDLE,
+                Step::Press(ShellAction::Activate),
+                IDLE,
+            ],
+        );
+
+        // Before any input: Home, then the crash modal, which differs from Home.
+        assert_eq!(polls[0].presents, 2, "Home, then the receipt modal");
+        let (home, modal) = (presents[0], presents[1]);
+        assert_ne!(modal, home, "the modal frame is drawn");
+        // First A: visibly dismisses the modal back to Home, no Launch.
+        assert_eq!(polls[2].launches, 0, "the first A dismisses without Launch");
+        assert!(polls[2].presents > polls[1].presents);
+        let dismissed = presents[polls[2].presents - 1];
+        assert_ne!(dismissed, modal, "the dismissal is visible");
+        // Next A: launches.
+        assert_eq!(polls[4].launches, 1, "the next A launches");
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Starting);
+    }
+
+    #[test]
+    fn receipt_released_by_an_idle_loop_acknowledgement_is_presented() {
+        // The first acknowledgement (at startup) is refused, so the accepted one, and with it
+        // the receipt, arrive inside the idle branch after that step's redraw snapshot.
+        let authority = restoring_authority(
+            pf_session_authority::RpcEvent::Crash {
+                session_id: "session-1".into(),
+                summary: "systemd result: exit-code".into(),
+            },
+            pf_session_authority::Receipt::Crash {
+                summary: "systemd result: exit-code".into(),
+            },
+            1,
+        );
+        let steps = vec![Step::Idle(Duration::from_millis(40)); 12];
+
+        let (core, presents, _) = run_loop_scripted(&authority, steps);
+
+        assert_eq!(authority.presentation_acks(), 2);
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Crash);
+        assert_eq!(
+            presents.len(),
+            2,
+            "Home, then exactly one present of the modal"
+        );
+        assert_ne!(presents[1], presents[0]);
     }
 }

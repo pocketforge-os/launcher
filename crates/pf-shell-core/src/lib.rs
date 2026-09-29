@@ -3225,6 +3225,19 @@ impl ShellCore {
             SessionEvent::Observed(ObservedSessionState::Running) => {
                 self.presentation = Presentation::Running
             }
+            // A user-requested return that reaches a shell already showing its idle Home (on
+            // device: the shell restarted after the app, presented Home, and its presentation
+            // acknowledgement is what made the authority publish this receipt) opens no modal.
+            // Home stays with the tile focused, so the first A launches; the "RECENT · JUST
+            // NOW" heading is the visible receipt. Crash and ForcedClose still open their modal.
+            SessionEvent::Terminal(TerminalReceipt::Returned { session_id })
+                if self.presentation == Presentation::Ready && self.route == Route::Home =>
+            {
+                self.crash_receipt_id.clone_from(session_id);
+                self.active_launch = None;
+                self.just_returned = true;
+                self.pending_ack = true;
+            }
             SessionEvent::Terminal(TerminalReceipt::Returned { session_id }) => {
                 self.presentation = Presentation::Returned;
                 self.crash_receipt_id.clone_from(session_id);
@@ -7547,6 +7560,10 @@ impl ShellCore {
             .with_ink_token(COLOR_TEXT_SECONDARY_TOKEN)
             .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0),
         );
+        // "Open again" needs the launch this process made and bound to the receipt's session.
+        // A shell restarted after the app (the device path: the app's start stops pf-shell)
+        // has no bound launch, so its Crash/ForcedClose summary offers only "Back to Home";
+        // A dismisses it and the next A on Home launches.
         let actions = if self.relaunch_target().is_some() {
             &["Back to Home", "Open again"][..]
         } else {
@@ -11923,6 +11940,95 @@ mod tests {
         );
     }
     #[test]
+    fn returned_receipt_on_idle_home_opens_no_modal_and_first_a_launches() {
+        // tsp-f3fm.221: the restarted shell already shows Home when the receipt arrives.
+        let mut c = core();
+        c.focus = 1;
+        assert_eq!(
+            (c.route(), c.presentation()),
+            (Route::Home, &Presentation::Ready)
+        );
+        let heading = |c: &ShellCore| {
+            let scene = c.scene(test_metrics(), "").unwrap();
+            node_by_id(scene.root(), "route-heading")
+                .unwrap()
+                .accessible_label
+                .clone()
+        };
+        assert_eq!(heading(&c), "RECENT · TONIGHT");
+
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "session-1".into(),
+        }));
+
+        assert_eq!(c.presentation(), &Presentation::Ready, "no summary modal");
+        assert_eq!(c.focus(), 1, "the tile keeps focus");
+        assert!(c.needs_presentation_ack());
+        let scene = c.scene(test_metrics(), "").unwrap();
+        assert!(node_by_id(scene.root(), "return-summary-action-0").is_none());
+        assert_eq!(heading(&c), "RECENT · JUST NOW", "the visible receipt cue");
+        assert_eq!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(LaunchRequest {
+                item_id: "app-1".into()
+            })),
+            "the FIRST A launches"
+        );
+    }
+    #[test]
+    fn returned_receipt_while_watching_a_session_still_opens_the_summary() {
+        // Contrast: a shell that launched and watched the session keeps the modal.
+        let mut c = core();
+        c.focus = 1;
+        assert!(matches!(
+            c.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+        c.launch_result(&LaunchResult::Accepted {
+            session_id: "session-1".into(),
+        });
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+            session_id: "session-1".into(),
+        }));
+        assert_eq!(c.presentation(), &Presentation::Returned);
+    }
+    #[test]
+    fn restarted_shell_crash_summary_offers_only_back_to_home_then_a_launches() {
+        // A restarted shell has no bound launch: Crash/ForcedClose keep their modal, with only
+        // "Back to Home". A dismisses it; the next A on Home launches.
+        for receipt in [
+            TerminalReceipt::Crash {
+                session_id: "session-1".into(),
+                summary: "systemd result: exit-code".into(),
+            },
+            TerminalReceipt::ForcedClose {
+                session_id: "session-1".into(),
+            },
+        ] {
+            let mut c = core();
+            c.focus = 1;
+            c.session_event(&SessionEvent::Terminal(receipt));
+            assert!(matches!(
+                c.presentation(),
+                Presentation::Crash | Presentation::ForcedClose
+            ));
+            let scene = c.scene(test_metrics(), "").unwrap();
+            assert!(node_by_id(scene.root(), "return-summary-action-0").is_some());
+            assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
+            c.action(&ShellAction::Move(AxisMove::Right));
+            assert_eq!(c.action(&ShellAction::Activate), None, "A dismisses");
+            assert_eq!(
+                (c.route(), c.presentation()),
+                (Route::Home, &Presentation::Ready)
+            );
+            c.focus = 1;
+            assert!(matches!(
+                c.action(&ShellAction::Activate),
+                Some(Effect::Launch(_))
+            ));
+        }
+    }
+    #[test]
     fn returned_summary_actions_relaunch_or_return_home() {
         let mut c = core();
         c.focus = 1;
@@ -12048,15 +12154,19 @@ mod tests {
         assert_eq!(c.action(&ShellAction::Back), None);
         assert!(c.active_launch.is_none());
 
-        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+        // An unrelated restored receipt that still opens a summary on idle Home (a crash;
+        // a restored Returned opens none, tsp-f3fm.221) must not inherit launch-a's context.
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "restored-unrelated".into(),
+            summary: "exit status 9".into(),
         }));
         let scene = c.scene(test_metrics(), "").unwrap();
         assert_eq!(
             node_by_id(scene.root(), "return-summary-title")
                 .unwrap()
                 .accessible_label,
-            "Returned safely"
+            "exit status 9",
+            "no launch-a title"
         );
         assert!(node_by_id(scene.root(), "return-summary-action-1").is_none());
         c.action(&ShellAction::Move(AxisMove::Right));
@@ -12264,10 +12374,13 @@ mod tests {
 
     #[test]
     fn boot_restored_summary_without_launch_request_omits_open_again() {
+        // A boot-restored Returned opens no summary on idle Home (tsp-f3fm.221); the summaries
+        // a restored shell still shows are Crash/ForcedClose, and they must omit "Open again".
         let mut c = core();
         assert!(c.active_launch.is_none());
-        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
+        c.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
             session_id: "receipt-restored".into(),
+            summary: "systemd result: exit-code".into(),
         }));
 
         let scene = c
@@ -12524,6 +12637,8 @@ mod tests {
             home_origin: None,
             session_id: None,
         });
+        // The shell watched this session (a Returned reaching idle Home opens no summary).
+        c.presentation = Presentation::Running;
         c.session_event(&SessionEvent::Terminal(TerminalReceipt::Returned {
             session_id: "receipt-safe".into(),
         }));

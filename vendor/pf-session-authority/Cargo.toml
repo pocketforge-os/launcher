@@ -33,6 +33,10 @@ path = "src/lib.rs"
 name = "pf-session-authorityd"
 path = "src/bin/pf-session-authorityd.rs"
 
+[[test]]
+name = "daemon_slow_client"
+path = "tests/daemon_slow_client.rs"
+
 [dependencies.pf-app-manifest]
 version = "0.0.1"
 path = "../pf-app-manifest"

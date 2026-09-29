@@ -559,6 +559,19 @@ pub struct Playtime {
     pub approximate: bool,
 }
 
+/// Authority reason code (`ReasonCode::PresentationNotAcknowledged`) of the one
+/// `RecoveryRequired` a shell can resolve by presenting and acknowledging.
+pub const PRESENTATION_NOT_ACKNOWLEDGED: &str = "presentation_not_acknowledged";
+
+/// Whether a `RecoveryRequired` reason is the authority's presentation-acknowledgement timeout
+/// (`presentation_not_acknowledged: <detail>`), the only non-terminal recovery for the shell.
+#[must_use]
+pub fn is_presentation_timeout(reason: &str) -> bool {
+    reason
+        .strip_prefix(PRESENTATION_NOT_ACKNOWLEDGED)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+}
+
 /// Derives authority-owned playtime totals. Entries without both wall-clock stamps do not
 /// contribute; backwards clocks contribute a known zero rather than a negative duration.
 #[must_use]
@@ -1000,6 +1013,9 @@ pub struct ShellCore {
     session_status: Option<String>,
     pending_ack: bool,
     just_returned: bool,
+    /// Session whose restoration the authority is completing (latest history entry ended, receipt
+    /// still owed). Refreshed on every history load.
+    restoration_pending_session: Option<String>,
     motion_ms: u32,
     normal_motion_ms: u32,
     /// The theme SUPPLIED to `boot` — glyph bitmaps resolve their ink against THIS theme
@@ -1166,6 +1182,7 @@ impl ShellCore {
             session_status: None,
             pending_ack: false,
             just_returned: false,
+            restoration_pending_session: None,
             motion_ms: theme
                 .resolve_motion("launch", reduced_motion)
                 .expect("motion.launch")
@@ -1283,6 +1300,10 @@ impl ShellCore {
     }
 
     pub fn load_history(&mut self, entries: &[HistoryEntry]) {
+        self.restoration_pending_session = entries
+            .first()
+            .filter(|latest| latest.ended_at.is_some() && latest.receipt.is_none())
+            .map(|latest| latest.session_id.clone());
         let playtime = derive_playtime(entries);
         let mut target_recent_use = HashMap::<String, SystemTime>::new();
         for entry in entries {
@@ -2042,6 +2063,32 @@ impl ShellCore {
 
     pub fn acknowledge_presentation(&mut self) -> bool {
         std::mem::take(&mut self.pending_ack)
+    }
+
+    /// The session the authority is restoring, if its latest history entry has ended and still
+    /// owes its receipt: the authority may be waiting on this shell's presentation.
+    #[must_use]
+    pub fn restoration_pending_session(&self) -> Option<&str> {
+        self.restoration_pending_session.as_deref()
+    }
+
+    /// Discards Starting/Running replayed from the authority's event log for a session the
+    /// authority has already ended (its latest history entry has `ended_at` and no receipt yet).
+    /// A shell starting in that state presents its own idle frame: the replayed app is gone, and a
+    /// frameless Running shell could never send the presentation acknowledgement the authority is
+    /// waiting for.
+    pub fn discard_replayed_session_observations(&mut self) {
+        if matches!(
+            self.presentation,
+            Presentation::Starting | Presentation::Running
+        ) {
+            self.bump_revision();
+            self.presentation = if self.first_run_complete {
+                Presentation::Ready
+            } else {
+                Presentation::FirstRun
+            };
+        }
     }
 
     pub fn action(&mut self, action: &ShellAction) -> Option<Effect> {
@@ -3205,6 +3252,23 @@ impl ShellCore {
                 self.crash_exit_detail.clone_from(summary);
                 self.focus = 0;
                 self.pending_ack = true;
+            }
+            // The authority only waited too long for this shell's presentation: it still owes
+            // the receipt and completes the restoration when the shell presents and
+            // acknowledges, so the shell keeps (or returns to) its own frame.
+            SessionEvent::RecoveryRequired(recovery)
+                if is_presentation_timeout(&recovery.reason) =>
+            {
+                if matches!(
+                    self.presentation,
+                    Presentation::Starting | Presentation::Running | Presentation::RecoveryRequired
+                ) {
+                    self.presentation = if self.first_run_complete {
+                        Presentation::Ready
+                    } else {
+                        Presentation::FirstRun
+                    };
+                }
             }
             SessionEvent::RecoveryRequired(_) => {
                 self.presentation = Presentation::RecoveryRequired;

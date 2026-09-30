@@ -990,6 +990,9 @@ pub struct ShellCore {
     items: Vec<Item>,
     focus: usize,
     saved_focus: [usize; 7],
+    /// Focus of the route behind the first-run sheet, frozen when the sheet opened. The sheet
+    /// owns `focus`; the backdrop renders from this value so no sheet move repaints it.
+    first_run_backdrop_focus: usize,
     caller_route: Route,
     caller_focus: usize,
     caller_focus_id: Option<String>,
@@ -1162,6 +1165,7 @@ impl ShellCore {
             items,
             focus: 0,
             saved_focus: [0; 7],
+            first_run_backdrop_focus: 0,
             caller_route: Route::Home,
             caller_focus: 0,
             caller_focus_id: None,
@@ -1549,8 +1553,7 @@ impl ShellCore {
         }
         self.first_run_complete = first_run_complete;
         if !first_run_complete {
-            self.presentation = Presentation::FirstRun;
-            self.focus = 0;
+            self.enter_first_run();
         }
         Ok(())
     }
@@ -1713,8 +1716,23 @@ impl ShellCore {
     pub fn reset_first_run(&mut self) {
         self.bump_revision();
         self.first_run_complete = false;
+        self.enter_first_run();
+    }
+    /// Presents the first-run sheet with focus on its first row. The route behind it keeps the
+    /// focus it had, frozen, so the sheet's own navigation never reaches it.
+    fn enter_first_run(&mut self) {
+        if self.presentation != Presentation::FirstRun {
+            self.first_run_backdrop_focus = self.focus;
+        }
         self.presentation = Presentation::FirstRun;
         self.focus = 0;
+    }
+    /// Leaves the first-run sheet for the route it covered, restoring that route's focus.
+    fn complete_first_run(&mut self) -> Effect {
+        self.first_run_complete = true;
+        self.presentation = Presentation::Ready;
+        self.focus = self.first_run_backdrop_focus;
+        Effect::CompleteFirstRun
     }
     #[must_use]
     pub const fn text_scale(&self) -> u16 {
@@ -2083,11 +2101,11 @@ impl ShellCore {
             Presentation::Starting | Presentation::Running
         ) {
             self.bump_revision();
-            self.presentation = if self.first_run_complete {
-                Presentation::Ready
+            if self.first_run_complete {
+                self.presentation = Presentation::Ready;
             } else {
-                Presentation::FirstRun
-            };
+                self.enter_first_run();
+            }
         }
     }
 
@@ -2139,12 +2157,7 @@ impl ShellCore {
             let rows = self.first_run_preferences();
             let row_count = rows.len();
             return match action {
-                ShellAction::Custom(name) if name == "Start" => {
-                    self.first_run_complete = true;
-                    self.presentation = Presentation::Ready;
-                    self.focus = 0;
-                    Some(Effect::CompleteFirstRun)
-                }
+                ShellAction::Custom(name) if name == "Start" => Some(self.complete_first_run()),
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
                     self.focus = (self.focus + 1).min(row_count);
                     None
@@ -2153,12 +2166,7 @@ impl ShellCore {
                     self.focus = self.focus.saturating_sub(1);
                     None
                 }
-                ShellAction::Activate if self.focus == row_count => {
-                    self.first_run_complete = true;
-                    self.presentation = Presentation::Ready;
-                    self.focus = 0;
-                    Some(Effect::CompleteFirstRun)
-                }
+                ShellAction::Activate if self.focus == row_count => Some(self.complete_first_run()),
                 ShellAction::Activate => rows
                     .get(self.focus)
                     .and_then(|row| Self::preference_effect_for(row)),
@@ -3276,11 +3284,11 @@ impl ShellCore {
                     self.presentation,
                     Presentation::Starting | Presentation::Running | Presentation::RecoveryRequired
                 ) {
-                    self.presentation = if self.first_run_complete {
-                        Presentation::Ready
+                    if self.first_run_complete {
+                        self.presentation = Presentation::Ready;
                     } else {
-                        Presentation::FirstRun
-                    };
+                        self.enter_first_run();
+                    }
                 }
             }
             SessionEvent::RecoveryRequired(_) => {
@@ -3315,19 +3323,27 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
-        let backdrop = matches!(
-            self.presentation,
-            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash
-        )
-        .then(|| {
-            let mut backdrop = self.clone();
-            backdrop.route = Route::Home;
-            backdrop.presentation = Presentation::Ready;
-            backdrop.focus = backdrop
-                .preserved_home_focus()
-                .unwrap_or(backdrop.saved_focus[backdrop.route_index()]);
-            backdrop
-        });
+        let backdrop = match self.presentation {
+            Presentation::Returned | Presentation::ForcedClose | Presentation::Crash => {
+                let mut backdrop = self.clone();
+                backdrop.route = Route::Home;
+                backdrop.presentation = Presentation::Ready;
+                backdrop.focus = backdrop
+                    .preserved_home_focus()
+                    .unwrap_or(backdrop.saved_focus[backdrop.route_index()]);
+                Some(backdrop)
+            }
+            // The first-run sheet owns `focus`. The route it covers renders from its frozen
+            // focus, so a sheet move can never repaint it (tsp-f3fm.227: one DOWN on the sheet
+            // turned Home's hero into "Nothing ready" and moved its tile ring).
+            Presentation::FirstRun => {
+                let mut backdrop = self.clone();
+                backdrop.presentation = Presentation::Ready;
+                backdrop.focus = self.first_run_backdrop_focus;
+                Some(backdrop)
+            }
+            _ => None,
+        };
         // Terminal summaries retain the launch-origin route for their actions, but
         // every visible backdrop element must come from the same inert Home snapshot.
         let scene_core = backdrop.as_ref().unwrap_or(self);
@@ -3580,7 +3596,14 @@ impl ShellCore {
         }
         match self.presentation {
             Presentation::FirstRun => {
-                self.route_nodes(&mut children, metrics);
+                // The covered route is an inert snapshot: its focused tile would otherwise be the
+                // first focused node in pre-order and take the scene's single focus ring from
+                // the sheet's row (tsp-f3fm.227).
+                let backdrop_start = children.len();
+                scene_core.route_nodes(&mut children, metrics);
+                for node in &mut children[backdrop_start..] {
+                    make_backdrop_inert(node);
+                }
                 children.push(
                     node(
                         "first-run-backdrop-dim",
@@ -10699,6 +10722,44 @@ mod tests {
             None,
             "Back cannot abandon first run"
         );
+    }
+
+    #[test]
+    fn first_run_reopened_from_settings_freezes_and_restores_the_covered_route_focus() {
+        // tsp-f3fm.227: the sheet owns focus; the route it covers keeps its own, frozen, and
+        // gets it back when first run completes.
+        let mut core = core();
+        core.load_preferences(&preferences(true), true).unwrap();
+        core.go(Route::Settings);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        core.action(&ShellAction::Move(AxisMove::Down));
+        let settings_focus = core.focus();
+        assert_ne!(settings_focus, 0);
+        let covered = settings_scene(&core).focused().unwrap().clone();
+        core.reset_first_run();
+        assert_eq!(core.focus(), 0, "the sheet opens on its first row");
+        let sheet = settings_scene(&core);
+        assert_eq!(sheet.focused().unwrap().as_str(), "comfort-0");
+        let backdrop = |scene: &Scene| {
+            let children = &scene.root().children;
+            let dim = children
+                .iter()
+                .position(|node| node.id.as_str() == "first-run-backdrop-dim")
+                .unwrap();
+            format!("{:?}", &children[..dim])
+        };
+        let frozen = backdrop(&sheet);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        let moved = settings_scene(&core);
+        assert_eq!(moved.focused().unwrap().as_str(), "comfort-1");
+        assert_eq!(backdrop(&moved), frozen);
+        assert_eq!(
+            core.action(&ShellAction::Custom("Start".into())),
+            Some(Effect::CompleteFirstRun)
+        );
+        assert_eq!(core.route(), Route::Settings);
+        assert_eq!(core.focus(), settings_focus);
+        assert_eq!(settings_scene(&core).focused().unwrap(), &covered);
     }
 
     #[test]

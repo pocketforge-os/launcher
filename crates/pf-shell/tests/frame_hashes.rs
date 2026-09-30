@@ -495,6 +495,10 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // right-aligned B Back / A Change badge renderer. tsp-3ukmb combines those pixels
     // with .404's shared status chrome on all five; first-run changes only for .404's
     // chrome because it suppresses the route footer.
+    // tsp-f3fm.227 rebaselines first-run only: the golden drew the scene's single focus ring
+    // on the covered Settings rail ("Accessibility") and none on the sheet, because the route
+    // behind the sheet shared its focus and came first in pre-order. The backdrop is now an
+    // inert frozen snapshot, so the ring sits on the sheet's Text size row.
     assert!(
         transcript.contains("a479703573325bb1b7546b72245e67198df84f412968ed544d0708a5788373be  ")
     );
@@ -511,7 +515,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("0640dda6088630b22e2db9ddc34a77027ae72f3b1deea822bb219229c95bc4cd  ")
     );
     assert!(
-        transcript.contains("1d110f9f2feaf2924a077cf6963a2ff9578b0209e1b6634378737b09ea076b34  ")
+        transcript.contains("793181721530f4d05a76f71f882f0fe12bc55b3f4143ccd8901d9ed43af873b2  ")
     );
     assert!(out.path().join("settings.png").is_file());
     assert!(out.path().join("settings-edit.png").is_file());

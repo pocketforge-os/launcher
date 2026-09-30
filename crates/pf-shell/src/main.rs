@@ -352,14 +352,29 @@ impl KeyRepeatScheduler {
         }
     }
 
+    #[cfg(any(test, feature = "wayland"))]
     fn due(&mut self, now: Duration, interval: Duration) -> Vec<ShellAction> {
+        self.due_where(now, interval, |_| true)
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect()
+    }
+
+    /// The repeats due at `now` for held controls `eligible` admits, with their control codes.
+    /// An ineligible control keeps its schedule, so it repeats at the first eligible check.
+    fn due_where(
+        &mut self,
+        now: Duration,
+        interval: Duration,
+        mut eligible: impl FnMut(u32) -> bool,
+    ) -> Vec<(u32, ShellAction)> {
         if interval.is_zero() {
             return Vec::new();
         }
         let mut due = Vec::new();
-        for (action, next) in self.held.values_mut() {
-            if *next <= now {
-                due.push(action.clone());
+        for (code, (action, next)) in &mut self.held {
+            if *next <= now && eligible(*code) {
+                due.push((*code, action.clone()));
                 // At most one repeat per check. A frame that overran the interval drops the
                 // missed repeats instead of replaying them as a burst (tsp-f3fm.227: one 80 ms
                 // tap during a slow frame became four moves).
@@ -1456,7 +1471,9 @@ impl EvdevEventSource for EvdevActionSource {
 struct EvdevInteractiveInput<'a, S = EvdevActionSource> {
     source: &'a mut S,
     repeat: KeyRepeatScheduler,
-    pending: VecDeque<(ShellAction, Option<u64>)>,
+    /// Decoded actions waiting to be applied, each with its ingress time and, for a repeat, the
+    /// control it repeats.
+    pending: VecDeque<(ShellAction, Option<u64>, Option<u32>)>,
     started: Instant,
     /// A source error met while draining, returned once the actions decoded before it are.
     deferred_error: Option<pf_ports::ActionSourceError>,
@@ -1486,7 +1503,7 @@ impl<'a, S> EvdevInteractiveInput<'a, S> {
                     EVDEV_REPEAT_DELAY,
                 );
                 self.pending
-                    .extend(action.map(|action| (action, ingress_us)));
+                    .extend(action.map(|action| (action, ingress_us, None)));
             }
             EvdevInputEvent::Released { code } => {
                 self.repeat
@@ -1545,21 +1562,24 @@ impl<H: EvdevHost, S: EvdevEventSource> InteractiveInput<H> for EvdevInteractive
                 }
             }
         }
-        // A repeat joins only an empty queue, one at a time: held moves can never build a
-        // backlog that later presses wait behind.
-        if self.pending.is_empty() && self.deferred_error.is_none() {
+        // Each held control has at most one repeat waiting: a slow frame can never build a
+        // backlog of one control's moves for later presses to wait behind, and every held
+        // control keeps repeating.
+        if self.deferred_error.is_none() {
             let now = self.started.elapsed();
-            if let Some(action) = self
-                .repeat
-                .due(now, EVDEV_REPEAT_INTERVAL)
-                .into_iter()
-                .next()
-            {
-                self.pending
-                    .push_back((action, latency_trace.map(LatencyTrace::now_us)));
-            }
+            let pending = &self.pending;
+            let due = self.repeat.due_where(now, EVDEV_REPEAT_INTERVAL, |code| {
+                !pending
+                    .iter()
+                    .any(|(_, _, repeat_of)| *repeat_of == Some(code))
+            });
+            let ingress_us = latency_trace.map(LatencyTrace::now_us);
+            self.pending.extend(
+                due.into_iter()
+                    .map(|(code, action)| (action, ingress_us, Some(code))),
+            );
         }
-        if let Some((action, ingress_us)) = self.pending.pop_front() {
+        if let Some((action, ingress_us, _)) = self.pending.pop_front() {
             return Ok(DecodedActionPoll::Event { action, ingress_us });
         }
         if let Some(error) = self.deferred_error.take() {
@@ -11281,5 +11301,59 @@ exec="./launch"
             "a slow frame must not leave {} queued repeats",
             input.pending.len()
         );
+    }
+
+    #[test]
+    fn every_held_control_keeps_repeating_and_none_piles_up() {
+        // Codex review of e77591c6: the cap must be per control. Down and Right held together
+        // across slow frames: each drain yields exactly one repeat of EACH, never zero, never
+        // a pile-up.
+        struct HeldDownRight {
+            presses: VecDeque<EvdevInputEvent>,
+        }
+        impl EvdevEventSource for HeldDownRight {
+            fn next_input_event_timeout(
+                &mut self,
+                _timeout: Duration,
+            ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError> {
+                Ok(self.presses.pop_front())
+            }
+        }
+        let down = ShellAction::Move(pf_scene::AxisMove::Down);
+        let right = ShellAction::Move(pf_scene::AxisMove::Right);
+        let mut source = HeldDownRight {
+            presses: VecDeque::from([
+                EvdevInputEvent::Pressed {
+                    code: 108,
+                    action: Some(down.clone()),
+                },
+                EvdevInputEvent::Pressed {
+                    code: 106,
+                    action: Some(right.clone()),
+                },
+            ]),
+        };
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let drain = |input: &mut EvdevInteractiveInput<'_, HeldDownRight>| {
+            let mut actions = Vec::new();
+            while let DecodedActionPoll::Event { action, .. } = input
+                .next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+                .unwrap()
+            {
+                actions.push(action);
+            }
+            actions
+        };
+        assert_eq!(drain(&mut input), vec![down.clone(), right.clone()]);
+        for frame in 0..4 {
+            thread::sleep(Duration::from_millis(500));
+            let actions = drain(&mut input);
+            let count = |wanted: &ShellAction| actions.iter().filter(|a| *a == wanted).count();
+            assert_eq!(
+                (count(&down), count(&right)),
+                (1, 1),
+                "slow frame {frame}: one repeat of each held control, got {actions:?}"
+            );
+        }
     }
 }

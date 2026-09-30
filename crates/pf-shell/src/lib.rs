@@ -15,7 +15,7 @@ use pf_ports::{
 use pf_scene::AxisMove;
 use pf_shell_core::ControlBinding;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{self, Read},
     os::fd::OwnedFd,
@@ -25,9 +25,42 @@ use std::{
 };
 
 const DEFAULT_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const EV_KEY: u16 = 0x01;
+const EV_ABS: u16 = 0x03;
+const ABS_HAT0X: u16 = 0x10;
+const ABS_HAT0Y: u16 = 0x11;
+
+/// Last reported position of the d-pad hat (`ABS_HAT0X`/`ABS_HAT0Y`, each -1, 0 or +1).
+///
+/// A hat is one physical d-pad reported as two axes (the a133 descriptor's `id="dpad"
+/// kind="hat"`, emitted by `pf-input-decode`). Each axis position is presented to the rest of the
+/// shell as the matching d-pad direction control being held: the transition to -1 or +1 presses
+/// that direction's control, the return to centre releases it, and a direct -1/+1 flip releases
+/// the old direction before pressing the new one. The direction controls are the contract's own
+/// `KEY_LEFT`/`KEY_RIGHT`/`KEY_UP`/`KEY_DOWN` controls, so the effective map (including user
+/// remaps and capture) chooses the action and the key repeat policy applies unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HatPosition {
+    x: i32,
+    y: i32,
+}
+
+/// The d-pad direction control code for one hat axis position, or `None` at centre.
+fn hat_direction_code(axis: u16, position: i32) -> Option<u16> {
+    let name = match (axis, position) {
+        (ABS_HAT0X, -1) => "KEY_LEFT",
+        (ABS_HAT0X, 1) => "KEY_RIGHT",
+        (ABS_HAT0Y, -1) => "KEY_UP",
+        (ABS_HAT0Y, 1) => "KEY_DOWN",
+        _ => return None,
+    };
+    linux_key_code(name)
+}
 
 /// Minimal Linux evdev source. It reads complete native `input_event` records without unsafe code
-/// and maps press events through the descriptor's effective semantic map.
+/// and maps press events through the descriptor's effective semantic map. Key presses (`EV_KEY`)
+/// and d-pad hat positions (`EV_ABS` `ABS_HAT0X`/`ABS_HAT0Y`, see `HatPosition`) both become
+/// control transitions.
 pub struct EvdevActionSource {
     file: File,
     // evdev releases EVIOCGRAB in Device::drop; the clone keeps the grab alive
@@ -38,6 +71,9 @@ pub struct EvdevActionSource {
     capture_next: bool,
     source: InputSourceId,
     announced: bool,
+    hat: HatPosition,
+    /// Transitions decoded from one record beyond the first (a hat flip yields two).
+    queued: VecDeque<EvdevInputEvent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +171,8 @@ impl EvdevActionSource {
                 capture_next: false,
                 source: InputSourceId(effective.device_id().into()),
                 announced: false,
+                hat: HatPosition::default(),
+                queued: VecDeque::new(),
             },
             effective,
         ))
@@ -159,7 +197,8 @@ impl ActionSource for EvdevActionSource {
 }
 
 impl EvdevActionSource {
-    /// Polls one physical key transition, including releases needed by repeat schedulers.
+    /// Polls one physical control transition (a key, or a d-pad hat direction), including releases
+    /// needed by repeat schedulers.
     ///
     /// # Errors
     /// Returns [`ActionSourceError::Unavailable`] when the device or its grab is lost, and
@@ -174,7 +213,8 @@ impl EvdevActionSource {
         self.next_input_event_timeout(DEFAULT_IDLE_POLL_INTERVAL)
     }
 
-    /// Polls one physical key transition, waiting no longer than `timeout`.
+    /// Polls one physical control transition, waiting no longer than `timeout`. A transition
+    /// already decoded from an earlier record is returned without waiting.
     ///
     /// # Errors
     /// Returns [`ActionSourceError::Unavailable`] when polling fails or the device is lost,
@@ -189,6 +229,9 @@ impl EvdevActionSource {
         if !self.announced {
             self.announced = true;
             return Ok(Some(EvdevInputEvent::ActiveSourceChanged));
+        }
+        if let Some(event) = self.queued.pop_front() {
+            return Ok(Some(event));
         }
         let mut descriptors = [rustix::event::PollFd::new(
             &self.file,
@@ -224,25 +267,58 @@ impl EvdevActionSource {
                 .try_into()
                 .expect("four bytes"),
         );
-        if event_type == 1 && value == 1 {
-            if self.capture_next {
-                self.capture_next = false;
-                if let Some(control) = self.control_by_code.get(&code) {
-                    return Ok(Some(EvdevInputEvent::Pressed {
-                        code,
-                        action: Some(ShellAction::Custom(format!("Capture.{control}"))),
-                    }));
-                }
-            }
-            return Ok(Some(EvdevInputEvent::Pressed {
-                code,
-                action: self.by_code.get(&code).cloned(),
-            }));
+        if event_type == EV_KEY && value == 1 {
+            return Ok(Some(self.pressed(code)));
         }
-        if event_type == 1 && value == 0 {
+        if event_type == EV_KEY && value == 0 {
             return Ok(Some(EvdevInputEvent::Released { code }));
         }
+        if event_type == EV_ABS && matches!(code, ABS_HAT0X | ABS_HAT0Y) {
+            self.hat_moved(code, value.signum());
+            return Ok(self.queued.pop_front());
+        }
         Ok(None)
+    }
+
+    /// Whether transitions already decoded from a read record are waiting to be returned.
+    #[must_use]
+    pub fn has_queued_events(&self) -> bool {
+        !self.queued.is_empty()
+    }
+
+    fn pressed(&mut self, code: u16) -> EvdevInputEvent {
+        if self.capture_next {
+            self.capture_next = false;
+            if let Some(control) = self.control_by_code.get(&code) {
+                return EvdevInputEvent::Pressed {
+                    code,
+                    action: Some(ShellAction::Custom(format!("Capture.{control}"))),
+                };
+            }
+        }
+        EvdevInputEvent::Pressed {
+            code,
+            action: self.by_code.get(&code).cloned(),
+        }
+    }
+
+    /// Queues the direction release/press implied by one hat axis moving to `position`.
+    fn hat_moved(&mut self, axis: u16, position: i32) {
+        let held = match axis {
+            ABS_HAT0X => &mut self.hat.x,
+            _ => &mut self.hat.y,
+        };
+        let previous = std::mem::replace(held, position);
+        if previous == position {
+            return;
+        }
+        if let Some(code) = hat_direction_code(axis, previous) {
+            self.queued.push_back(EvdevInputEvent::Released { code });
+        }
+        if let Some(code) = hat_direction_code(axis, position) {
+            let pressed = self.pressed(code);
+            self.queued.push_back(pressed);
+        }
     }
 }
 
@@ -741,6 +817,8 @@ mod tests {
             capture_next: false,
             source: InputSourceId("idle-test".into()),
             announced: true,
+            hat: HatPosition::default(),
+            queued: VecDeque::new(),
         };
         let wall_start = std::time::Instant::now();
         let cpu_start = thread_cpu_ticks();
@@ -1077,5 +1155,206 @@ mod tests {
             remap.preview("global", "Activate", Binding::single("south")),
             Err(MapError::Collision { .. })
         ));
+    }
+
+    /// One native `input_event` record (zero timestamp) as the kernel and `pf-input-decode`
+    /// write it: `timeval` (two words), then `type`, `code`, `value`.
+    fn input_event(event_type: u16, code: u16, value: i32) -> Vec<u8> {
+        let word = std::mem::size_of::<libc::c_long>();
+        let mut record = vec![0_u8; word * 2];
+        record.extend_from_slice(&event_type.to_ne_bytes());
+        record.extend_from_slice(&code.to_ne_bytes());
+        record.extend_from_slice(&value.to_ne_bytes());
+        record
+    }
+
+    /// Each `(type, code, value)` followed by `SYN_REPORT`, like the decoder's frames.
+    fn evdev_stream(events: &[(u16, u16, i32)]) -> Vec<u8> {
+        events
+            .iter()
+            .flat_map(|&(event_type, code, value)| {
+                let mut frame = input_event(event_type, code, value);
+                frame.extend(input_event(0, 0, 0));
+                frame
+            })
+            .collect()
+    }
+
+    /// Opens the shipped fixture contract on a file holding `events` and returns every decoded
+    /// transition until end of stream.
+    fn decode_with(
+        events: &[(u16, u16, i32)],
+        prepare: impl FnOnce(&mut EvdevActionSource),
+    ) -> Vec<EvdevInputEvent> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pf-gamepad");
+        std::fs::write(&path, evdev_stream(events)).unwrap();
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(&path, &contract, map).unwrap();
+        prepare(&mut source);
+        let mut decoded = Vec::new();
+        while let Ok(event) = source.next_input_event_timeout(Duration::ZERO) {
+            decoded.extend(event);
+        }
+        assert!(!source.has_queued_events());
+        decoded
+    }
+
+    fn decode(events: &[(u16, u16, i32)]) -> Vec<EvdevInputEvent> {
+        decode_with(events, |_| {})
+    }
+
+    fn moved(code: u16, direction: AxisMove) -> EvdevInputEvent {
+        EvdevInputEvent::Pressed {
+            code,
+            action: Some(ShellAction::Move(direction)),
+        }
+    }
+
+    const KEY_UP: u16 = 103;
+    const KEY_LEFT: u16 = 105;
+    const KEY_RIGHT: u16 = 106;
+    const KEY_DOWN: u16 = 108;
+
+    #[test]
+    fn dpad_hat_edges_press_and_centre_releases_the_fixture_direction_controls() {
+        // pf-input-decode reports the a133 d-pad as ABS_HAT0X/ABS_HAT0Y in -1..=1 (descriptor
+        // `id="dpad" kind="hat"`); d26dfa11 dropped every one of these records.
+        let decoded = decode(&[
+            (EV_ABS, ABS_HAT0X, 1),
+            (EV_ABS, ABS_HAT0X, 0),
+            (EV_ABS, ABS_HAT0X, -1),
+            (EV_ABS, ABS_HAT0X, 0),
+            (EV_ABS, ABS_HAT0Y, 1),
+            (EV_ABS, ABS_HAT0Y, 0),
+            (EV_ABS, ABS_HAT0Y, -1),
+            (EV_ABS, ABS_HAT0Y, 0),
+        ]);
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                moved(KEY_RIGHT, AxisMove::Right),
+                EvdevInputEvent::Released { code: KEY_RIGHT },
+                moved(KEY_LEFT, AxisMove::Left),
+                EvdevInputEvent::Released { code: KEY_LEFT },
+                moved(KEY_DOWN, AxisMove::Down),
+                EvdevInputEvent::Released { code: KEY_DOWN },
+                moved(KEY_UP, AxisMove::Up),
+                EvdevInputEvent::Released { code: KEY_UP },
+            ]
+        );
+    }
+
+    #[test]
+    fn dpad_hat_flip_releases_the_old_direction_before_pressing_the_new_one() {
+        let decoded = decode(&[
+            (EV_ABS, ABS_HAT0X, -1),
+            (EV_ABS, ABS_HAT0X, 1),
+            (EV_ABS, ABS_HAT0X, 0),
+        ]);
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                moved(KEY_LEFT, AxisMove::Left),
+                EvdevInputEvent::Released { code: KEY_LEFT },
+                moved(KEY_RIGHT, AxisMove::Right),
+                EvdevInputEvent::Released { code: KEY_RIGHT },
+            ]
+        );
+    }
+
+    #[test]
+    fn dpad_hat_axes_are_independent_and_an_unchanged_position_is_not_a_new_press() {
+        let decoded = decode(&[
+            (EV_ABS, ABS_HAT0X, 1),
+            (EV_ABS, ABS_HAT0Y, -1),
+            (EV_ABS, ABS_HAT0X, 1),
+            (EV_ABS, ABS_HAT0Y, 0),
+            (EV_ABS, ABS_HAT0X, 0),
+            (EV_ABS, ABS_HAT0X, 0),
+        ]);
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                moved(KEY_RIGHT, AxisMove::Right),
+                moved(KEY_UP, AxisMove::Up),
+                EvdevInputEvent::Released { code: KEY_UP },
+                EvdevInputEvent::Released { code: KEY_RIGHT },
+            ]
+        );
+    }
+
+    #[test]
+    fn dpad_key_path_and_other_axes_are_unchanged() {
+        // Devices that report the d-pad as KEY_* keep working; sticks and triggers stay ignored.
+        let decoded = decode(&[
+            (EV_KEY, KEY_DOWN, 1),
+            (EV_KEY, KEY_DOWN, 0),
+            (EV_ABS, 0x00, 4095),
+            (EV_ABS, 0x02, 255),
+            (EV_KEY, 305, 1),
+            (EV_KEY, 305, 0),
+        ]);
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                moved(KEY_DOWN, AxisMove::Down),
+                EvdevInputEvent::Released { code: KEY_DOWN },
+                EvdevInputEvent::Pressed {
+                    code: 305,
+                    action: Some(ShellAction::Activate),
+                },
+                EvdevInputEvent::Released { code: 305 },
+            ]
+        );
+    }
+
+    #[test]
+    fn dpad_hat_actions_follow_the_effective_map_and_capture() {
+        // The hat only names the direction CONTROL; the effective map picks its action, so a
+        // remap applies to the hat exactly as to a KEY_* d-pad, and capture names the control.
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let mut persisted = contract.effective_map.clone();
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Move.right")
+            .unwrap()
+            .binding = Binding::single("l1");
+        persisted
+            .iter_mut()
+            .find(|mapping| mapping.action == "Move.left")
+            .unwrap()
+            .binding = Binding::single("r1");
+        let remapped = EffectiveMap::from_persisted(
+            contract,
+            Some(("pocketforge-sim-gamepad".into(), persisted)),
+        )
+        .unwrap();
+        let decoded = decode_with(
+            &[(EV_ABS, ABS_HAT0X, -1), (EV_ABS, ABS_HAT0X, 0)],
+            |source| {
+                source.apply_effective_map(&remapped);
+            },
+        );
+        assert_eq!(decoded[1], moved(KEY_LEFT, AxisMove::Right));
+
+        let captured = decode_with(
+            &[(EV_ABS, ABS_HAT0Y, 1), (EV_ABS, ABS_HAT0Y, 0)],
+            |source| {
+                source.capture_next_button();
+            },
+        );
+        assert_eq!(
+            captured[1],
+            EvdevInputEvent::Pressed {
+                code: KEY_DOWN,
+                action: Some(ShellAction::Custom("Capture.r2".into())),
+            }
+        );
     }
 }

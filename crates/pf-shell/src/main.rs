@@ -1420,6 +1420,10 @@ trait EvdevEventSource {
     ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError>;
     fn capture_next_button(&mut self) {}
     fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+    /// Whether decoded transitions are waiting to be returned without another read.
+    fn has_queued_events(&self) -> bool {
+        false
+    }
 }
 
 impl EvdevEventSource for EvdevActionSource {
@@ -1436,6 +1440,10 @@ impl EvdevEventSource for EvdevActionSource {
 
     fn apply_effective_map(&mut self, map: &EffectiveMap) {
         EvdevActionSource::apply_effective_map(self, map);
+    }
+
+    fn has_queued_events(&self) -> bool {
+        EvdevActionSource::has_queued_events(self)
     }
 }
 
@@ -1527,7 +1535,7 @@ impl<H: EvdevHost, S: EvdevEventSource> InteractiveInput<H> for EvdevInteractive
         self.source.apply_effective_map(map);
     }
     fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || self.source.has_queued_events()
     }
 }
 
@@ -10486,5 +10494,280 @@ exec="./launch"
             "Home, then exactly one present of the modal"
         );
         assert_ne!(presents[1], presents[0]);
+    }
+
+    // --- D-pad hat navigation (tsp-f3fm.223) ------------------------------------------------
+    //
+    // pf-input-decode reports the a133 d-pad as EV_ABS ABS_HAT0X/ABS_HAT0Y in -1..=1 (platform
+    // devices/a133/capabilities.toml `id="dpad" kind="hat"`); /dev/input/pf-gamepad is that raw
+    // node. These tests write the decoder's exact byte stream (native input_event records, each
+    // frame closed by SYN_REPORT) to a file and read it through the PRODUCTION EvdevActionSource
+    // and EvdevInteractiveInput opened on the shipped fixture contract, then drive the real
+    // ShellCore. On d26dfa11 the source dropped every EV_ABS record, so focus never moved.
+
+    const EV_KEY: u16 = 0x01;
+    const EV_ABS: u16 = 0x03;
+    const ABS_HAT0X: u16 = 0x10;
+    const ABS_HAT0Y: u16 = 0x11;
+
+    /// One raw evdev `(type, code, value)`.
+    type RawEvent = (u16, u16, i32);
+    /// One d-pad press (axis, position) rendered as a raw press/release pair.
+    type Tap = fn(u16, i32) -> [RawEvent; 2];
+
+    fn raw_input_event(event_type: u16, code: u16, value: i32) -> Vec<u8> {
+        let word = std::mem::size_of::<libc::c_long>();
+        let mut record = vec![0_u8; word * 2];
+        record.extend_from_slice(&event_type.to_ne_bytes());
+        record.extend_from_slice(&code.to_ne_bytes());
+        record.extend_from_slice(&value.to_ne_bytes());
+        record
+    }
+
+    /// One d-pad press as the decoder emits it: the hat axis to `position`, then back to centre.
+    fn hat_tap(axis: u16, position: i32) -> [(u16, u16, i32); 2] {
+        [(EV_ABS, axis, position), (EV_ABS, axis, 0)]
+    }
+
+    /// The same press as a KEY_* d-pad (the fixture's direction controls) would report it.
+    fn key_tap(axis: u16, position: i32) -> [(u16, u16, i32); 2] {
+        let code = match (axis, position) {
+            (ABS_HAT0X, -1) => 105,
+            (ABS_HAT0X, 1) => 106,
+            (ABS_HAT0Y, -1) => 103,
+            _ => 108,
+        };
+        [(EV_KEY, code, 1), (EV_KEY, code, 0)]
+    }
+
+    const RIGHT: (u16, i32) = (ABS_HAT0X, 1);
+    const LEFT: (u16, i32) = (ABS_HAT0X, -1);
+    const DOWN: (u16, i32) = (ABS_HAT0Y, 1);
+    const UP: (u16, i32) = (ABS_HAT0Y, -1);
+
+    struct OpenEvdevHost;
+    impl EvdevHost for OpenEvdevHost {}
+
+    /// Decodes a raw pf-gamepad stream through the production evdev input into shell actions.
+    fn pf_gamepad_actions(events: &[(u16, u16, i32)]) -> Vec<ShellAction> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pf-gamepad");
+        let bytes: Vec<u8> = events
+            .iter()
+            .flat_map(|&(event_type, code, value)| {
+                let mut frame = raw_input_event(event_type, code, value);
+                frame.extend(raw_input_event(0, 0, 0));
+                frame
+            })
+            .collect();
+        fs::write(&path, bytes).unwrap();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let mut actions = Vec::new();
+        // End of the recorded stream reads as device loss, which ends the loop.
+        while let Ok(poll) =
+            input.next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+        {
+            if let DecodedActionPoll::Event { action, .. } = poll {
+                actions.push(action);
+            }
+        }
+        actions
+    }
+
+    /// Feeds `taps` to `core` through the production evdev input, one press at a time, and
+    /// returns the focus after each press.
+    fn navigate(core: &mut ShellCore, taps: &[(u16, i32)], tap: Tap) -> Vec<usize> {
+        taps.iter()
+            .map(|&(axis, position)| {
+                let actions = pf_gamepad_actions(&tap(axis, position));
+                assert_eq!(actions.len(), 1, "one press yields one action: {actions:?}");
+                core.action(&actions[0]);
+                core.focus()
+            })
+            .collect()
+    }
+
+    fn hat_core() -> ShellCore {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        core
+    }
+
+    /// Asserts the hat reproduces the KEY_* d-pad trajectory exactly and returns it.
+    fn hat_trajectory(setup: impl Fn(&mut ShellCore), taps: &[(u16, i32)]) -> Vec<usize> {
+        let mut by_hat = hat_core();
+        setup(&mut by_hat);
+        let mut by_key = hat_core();
+        setup(&mut by_key);
+        let hat = navigate(&mut by_hat, taps, hat_tap);
+        let key = navigate(&mut by_key, taps, key_tap);
+        assert_eq!(
+            hat, key,
+            "hat d-pad must navigate exactly like the KEY_* d-pad"
+        );
+        assert_eq!(by_hat.route(), by_key.route());
+        assert_eq!(by_hat.presentation(), by_key.presentation());
+        hat
+    }
+
+    #[test]
+    fn hat_dpad_decodes_to_the_fixture_move_actions() {
+        use pf_scene::AxisMove::{Down, Left, Right, Up};
+        let events: Vec<_> = [RIGHT, LEFT, DOWN, UP]
+            .into_iter()
+            .flat_map(|(axis, position)| hat_tap(axis, position))
+            .collect();
+        assert_eq!(
+            pf_gamepad_actions(&events),
+            vec![
+                ShellAction::Move(Right),
+                ShellAction::Move(Left),
+                ShellAction::Move(Down),
+                ShellAction::Move(Up),
+            ]
+        );
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_along_the_home_tile_row() {
+        let trajectory = hat_trajectory(|_| {}, &[RIGHT, RIGHT, LEFT, DOWN, UP]);
+        assert_eq!(trajectory, vec![1, 2, 1, 2, 1]);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_across_the_library_tab_bar() {
+        let enter_library = |core: &mut ShellCore| {
+            core.action(&ShellAction::Custom("Room.next".into()));
+            assert_eq!(core.route(), pf_shell_core::Route::Library);
+            assert_eq!(core.focus(), 0, "Library opens on its search field");
+        };
+        // Search field (0) -> Recent (1) -> A-Z (2) -> Games (3), then back.
+        let trajectory = hat_trajectory(enter_library, &[RIGHT, RIGHT, RIGHT, LEFT]);
+        assert_eq!(trajectory, vec![1, 2, 3, 2]);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_down_the_settings_rooms() {
+        let enter_settings = |core: &mut ShellCore| {
+            core.action(&ShellAction::Custom("Room.next".into()));
+            core.action(&ShellAction::Custom("Room.next".into()));
+            assert_eq!(core.route(), pf_shell_core::Route::Settings);
+            assert_eq!(core.focus(), 0);
+        };
+        let trajectory = hat_trajectory(enter_settings, &[DOWN, DOWN, UP]);
+        assert_eq!(trajectory, vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_on_the_first_run_sheet() {
+        let first_run = |core: &mut ShellCore| {
+            let dir = tempfile::tempdir().unwrap();
+            let preferences = DurablePreferences::open(dir.path()).unwrap();
+            core.load_preferences(&preferences, false).unwrap();
+            core.reset_first_run();
+            assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+            assert_eq!(core.focus(), 0, "the sheet opens on the Text size row");
+        };
+        let trajectory = hat_trajectory(first_run, &[DOWN, DOWN, UP, RIGHT, LEFT]);
+        assert_eq!(trajectory, vec![1, 2, 1, 2, 1]);
+
+        // A on the row the hat moved to changes THAT row, not Text size.
+        let mut core = hat_core();
+        first_run(&mut core);
+        navigate(&mut core, &[DOWN], hat_tap);
+        let Some(Effect::ChangePreference(change)) = core.action(&ShellAction::Activate) else {
+            panic!("A on a first-run row changes that preference");
+        };
+        assert_ne!(change.key.0, "textScale");
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_between_the_crash_modal_buttons() {
+        let crashed = |core: &mut ShellCore| {
+            let Some(Effect::Launch(_)) = core.action(&ShellAction::Activate) else {
+                panic!("the fixture's first Home tile launches");
+            };
+            core.launch_result(&LaunchResult::Accepted {
+                session_id: "hat-session".into(),
+            });
+            core.session_event(&SessionEvent::Observed(ObservedSessionState::Running));
+            core.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+                session_id: "hat-session".into(),
+                summary: "exit status 9".into(),
+            }));
+            assert_eq!(core.presentation(), &pf_shell_core::Presentation::Crash);
+            assert_eq!(core.focus(), 0, "the modal opens on Home");
+        };
+        let trajectory = hat_trajectory(crashed, &[RIGHT, LEFT, DOWN]);
+        assert_eq!(trajectory, vec![1, 0, 1]);
+
+        // A on the button the hat moved to relaunches instead of dismissing.
+        let mut core = hat_core();
+        crashed(&mut core);
+        navigate(&mut core, &[RIGHT], hat_tap);
+        assert!(matches!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::Launch(_))
+        ));
+    }
+
+    /// Reads the next control transition from `source` and applies it to `scheduler` at `now`,
+    /// exactly as `EvdevInteractiveInput` does.
+    fn feed(source: &mut EvdevActionSource, scheduler: &mut KeyRepeatScheduler, now: Duration) {
+        let event = loop {
+            match source.next_input_event_timeout(Duration::ZERO).unwrap() {
+                Some(EvdevInputEvent::ActiveSourceChanged) | None => {}
+                Some(event) => break event,
+            }
+        };
+        match event {
+            EvdevInputEvent::Pressed { code, action } => {
+                scheduler.transition(u32::from(code), true, action, now, EVDEV_REPEAT_DELAY);
+            }
+            EvdevInputEvent::Released { code } => {
+                scheduler.transition(u32::from(code), false, None, now, EVDEV_REPEAT_DELAY);
+            }
+            EvdevInputEvent::ActiveSourceChanged => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn hat_dpad_hold_repeats_like_a_held_key_and_centre_stops_it() {
+        // The hat's decoded transitions drive the same repeat scheduler and defaults as a held
+        // KEY_* direction (EVDEV_REPEAT_DELAY then EVDEV_REPEAT_INTERVAL); centre releases.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pf-gamepad");
+        let bytes: Vec<u8> = [(ABS_HAT0Y, 1), (ABS_HAT0Y, 0)]
+            .into_iter()
+            .flat_map(|(code, value)| raw_input_event(EV_ABS, code, value))
+            .collect();
+        fs::write(&path, bytes).unwrap();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
+        let mut scheduler = KeyRepeatScheduler::default();
+        feed(&mut source, &mut scheduler, Duration::ZERO);
+        assert!(
+            scheduler
+                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
+            vec![ShellAction::Move(pf_scene::AxisMove::Down); 3]
+        );
+        feed(&mut source, &mut scheduler, Duration::from_millis(561));
+        assert!(!scheduler.is_active(), "centre releases the held direction");
+        assert!(
+            scheduler
+                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
     }
 }

@@ -358,9 +358,15 @@ impl KeyRepeatScheduler {
         }
         let mut due = Vec::new();
         for (action, next) in self.held.values_mut() {
-            while *next <= now {
+            if *next <= now {
                 due.push(action.clone());
+                // At most one repeat per check. A frame that overran the interval drops the
+                // missed repeats instead of replaying them as a burst (tsp-f3fm.227: one 80 ms
+                // tap during a slow frame became four moves).
                 *next += interval;
+                if *next <= now {
+                    *next = now + interval;
+                }
             }
         }
         due
@@ -1452,6 +1458,8 @@ struct EvdevInteractiveInput<'a, S = EvdevActionSource> {
     repeat: KeyRepeatScheduler,
     pending: VecDeque<(ShellAction, Option<u64>)>,
     started: Instant,
+    /// A source error met while draining, returned once the actions decoded before it are.
+    deferred_error: Option<pf_ports::ActionSourceError>,
 }
 
 impl<'a, S> EvdevInteractiveInput<'a, S> {
@@ -1461,6 +1469,33 @@ impl<'a, S> EvdevInteractiveInput<'a, S> {
             repeat: KeyRepeatScheduler::default(),
             pending: VecDeque::new(),
             started: Instant::now(),
+            deferred_error: None,
+        }
+    }
+
+    fn apply_event(&mut self, event: EvdevInputEvent, latency_trace: Option<&LatencyTrace>) {
+        let now = self.started.elapsed();
+        match event {
+            EvdevInputEvent::Pressed { code, action } => {
+                let ingress_us = latency_trace.map(LatencyTrace::now_us);
+                self.repeat.transition(
+                    u32::from(code),
+                    true,
+                    action.clone(),
+                    now,
+                    EVDEV_REPEAT_DELAY,
+                );
+                self.pending
+                    .extend(action.map(|action| (action, ingress_us)));
+            }
+            EvdevInputEvent::Released { code } => {
+                self.repeat
+                    .transition(u32::from(code), false, None, now, EVDEV_REPEAT_DELAY);
+            }
+            EvdevInputEvent::ActiveSourceChanged => {
+                self.repeat.clear();
+                self.pending.clear();
+            }
         }
     }
 }
@@ -1476,51 +1511,62 @@ impl<H: EvdevHost, S: EvdevEventSource> InteractiveInput<H> for EvdevInteractive
         if host.closed() {
             return Ok(DecodedActionPoll::Closed);
         }
-        let timeout = if self.repeat.is_active() {
-            EVDEV_REPEAT_INTERVAL
-        } else {
-            INTERACTIVE_IDLE_POLL_INTERVAL
-        };
-        let event = self.source.next_input_event_timeout(timeout);
-        let now = self.started.elapsed();
-        match event {
-            Ok(Some(EvdevInputEvent::Pressed { code, action })) => {
-                let ingress_us = latency_trace.map(LatencyTrace::now_us);
-                self.repeat.transition(
-                    u32::from(code),
-                    true,
-                    action.clone(),
-                    now,
-                    EVDEV_REPEAT_DELAY,
-                );
-                self.pending
-                    .extend(action.map(|action| (action, ingress_us)));
-            }
-            Ok(Some(EvdevInputEvent::Released { code })) => {
-                self.repeat
-                    .transition(u32::from(code), false, None, now, EVDEV_REPEAT_DELAY);
-            }
-            Ok(Some(EvdevInputEvent::ActiveSourceChanged)) => {
-                self.repeat.clear();
-                self.pending.clear();
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.repeat.clear();
-                self.pending.clear();
-                return Err(format!("input: {error:?}"));
+        if self.deferred_error.is_none() {
+            // Never sit in the idle poll while decoded actions are waiting to be applied.
+            let timeout = if !self.pending.is_empty() {
+                Duration::ZERO
+            } else if self.repeat.is_active() {
+                EVDEV_REPEAT_INTERVAL
+            } else {
+                INTERACTIVE_IDLE_POLL_INTERVAL
+            };
+            match self.source.next_input_event_timeout(timeout) {
+                Ok(Some(event)) => {
+                    self.apply_event(event, latency_trace);
+                    // Drain every transition the kernel already queued before any repeat is
+                    // computed: a release that arrived during a slow frame must end the hold
+                    // before the frame's elapsed time is read as holding (tsp-f3fm.227).
+                    loop {
+                        match self.source.next_input_event_timeout(Duration::ZERO) {
+                            Ok(Some(event)) => self.apply_event(event, latency_trace),
+                            Ok(None) => break,
+                            Err(error) => {
+                                self.deferred_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.repeat.clear();
+                    self.pending.clear();
+                    return Err(format!("input: {error:?}"));
+                }
             }
         }
-        self.pending.extend(
-            self.repeat
+        // A repeat joins only an empty queue, one at a time: held moves can never build a
+        // backlog that later presses wait behind.
+        if self.pending.is_empty() && self.deferred_error.is_none() {
+            let now = self.started.elapsed();
+            if let Some(action) = self
+                .repeat
                 .due(now, EVDEV_REPEAT_INTERVAL)
                 .into_iter()
-                .map(|action| (action, latency_trace.map(LatencyTrace::now_us))),
-        );
-        self.pending.pop_front().map_or(
-            Ok(DecodedActionPoll::DeadlineReached),
-            |(action, ingress_us)| Ok(DecodedActionPoll::Event { action, ingress_us }),
-        )
+                .next()
+            {
+                self.pending
+                    .push_back((action, latency_trace.map(LatencyTrace::now_us)));
+            }
+        }
+        if let Some((action, ingress_us)) = self.pending.pop_front() {
+            return Ok(DecodedActionPoll::Event { action, ingress_us });
+        }
+        if let Some(error) = self.deferred_error.take() {
+            self.repeat.clear();
+            return Err(format!("input: {error:?}"));
+        }
+        Ok(DecodedActionPoll::DeadlineReached)
     }
 
     fn capture_next_button(&mut self) {
@@ -7656,13 +7702,10 @@ mod durable_tests {
                 .due(Duration::from_millis(299), interval)
                 .is_empty()
         );
+        // A late check yields one repeat, not the three missed intervals (tsp-f3fm.227).
         assert_eq!(
             scheduler.due(Duration::from_millis(500), interval),
-            vec![
-                ShellAction::Move(pf_scene::AxisMove::Up),
-                ShellAction::Move(pf_scene::AxisMove::Up),
-                ShellAction::Move(pf_scene::AxisMove::Up),
-            ]
+            vec![ShellAction::Move(pf_scene::AxisMove::Up)]
         );
         scheduler.transition(
             1,
@@ -7697,13 +7740,20 @@ mod durable_tests {
                 .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
                 .is_empty()
         );
+        // A check that arrives late (160 ms past the delay) yields ONE repeat, never a replay
+        // of the missed intervals (tsp-f3fm.227); the cadence then resumes from that check.
         assert_eq!(
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
-            vec![
-                ShellAction::Move(pf_scene::AxisMove::Up),
-                ShellAction::Move(pf_scene::AxisMove::Up),
-                ShellAction::Move(pf_scene::AxisMove::Up),
-            ]
+            vec![ShellAction::Move(pf_scene::AxisMove::Up)]
+        );
+        assert!(
+            scheduler
+                .due(Duration::from_millis(639), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler.due(Duration::from_millis(640), EVDEV_REPEAT_INTERVAL),
+            vec![ShellAction::Move(pf_scene::AxisMove::Up)]
         );
 
         scheduler.transition(
@@ -10793,9 +10843,15 @@ exec="./launch"
                 .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
                 .is_empty()
         );
+        // Late checks yield one repeat each, never a burst of the missed intervals.
         assert_eq!(
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
-            vec![ShellAction::Move(pf_scene::AxisMove::Down); 3]
+            vec![ShellAction::Move(pf_scene::AxisMove::Down)]
+        );
+        assert!(
+            scheduler
+                .due(Duration::from_millis(600), EVDEV_REPEAT_INTERVAL)
+                .is_empty()
         );
         feed(&mut source, &mut scheduler, Duration::from_millis(561));
         assert!(!scheduler.is_active(), "centre releases the held direction");
@@ -10803,6 +10859,427 @@ exec="./launch"
             scheduler
                 .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
                 .is_empty()
+        );
+    }
+
+    // --- First-run sheet on a fresh device (tsp-f3fm.227) -----------------------------------
+    //
+    // Bench B15 on image d8f932e3 (launcher ca22de0e): prefs.json absent, one Ready item. At
+    // rest the Home tile behind the sheet held the scene's single focus ring and no sheet row
+    // did; one DOWN turned Home's hero into "Nothing ready". The .223 tests asserted only
+    // `core.focus()`. These assert the node the scene actually draws focused (the set_focus
+    // owner) and that the Home snapshot behind the sheet never changes, driving the real hat
+    // path from a real, empty DurablePreferences state directory.
+
+    const BTN_SOUTH: u16 = 304;
+    const BTN_EAST: u16 = 305;
+    const BTN_START: u16 = 315;
+
+    const DEVICE_METRICS: SurfaceMetrics = SurfaceMetrics {
+        logical_width: 1280.0,
+        logical_height: 720.0,
+        scale: 1.0,
+        safe_insets: Insets {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        },
+        orientation: Orientation::Landscape,
+    };
+
+    /// A device on its first boot: a catalog with exactly one Ready item (Poolsuite on d8f932e3)
+    /// and the shell's real `DurablePreferences` on an empty state directory (prefs.json absent),
+    /// loaded exactly as `main` does. `text_scale` other than 100 is first submitted through the
+    /// same store, as the owner's A presses persisted it (B11) before first run completed.
+    fn fresh_device_core(text_scale: u16) -> (ShellCore, DurablePreferences, tempfile::TempDir) {
+        let mut snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        snapshot.items.truncate(1);
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        assert!(
+            !preferences.state_file.exists(),
+            "a fresh image has no prefs.json"
+        );
+        if text_scale != 100 {
+            preferences
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("textScale".into()),
+                    value: PreferenceValue::Text(format!("{text_scale}%")),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap();
+        }
+        let first_run_complete = preferences.first_run_complete().unwrap();
+        assert!(!first_run_complete);
+        core.load_preferences(&preferences, first_run_complete)
+            .unwrap();
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(core.text_scale(), text_scale);
+        (core, preferences, dir)
+    }
+
+    fn device_scene(core: &ShellCore) -> pf_scene::Scene {
+        core.scene(DEVICE_METRICS, "").expect("shell frame")
+    }
+
+    /// The node the scene draws focused: the one owner `Scene::new` keeps after `set_focus`.
+    fn focus_owner(scene: &pf_scene::Scene) -> String {
+        scene.focused().expect("a focused node").as_str().to_owned()
+    }
+
+    fn hero_title(scene: &pf_scene::Scene) -> Option<String> {
+        fn find(node: &Node) -> Option<String> {
+            (node.id.as_str() == "hero-title")
+                .then(|| node.accessible_label.clone())
+                .or_else(|| node.children.iter().find_map(find))
+        }
+        find(scene.root())
+    }
+
+    fn any_focused(node: &Node) -> bool {
+        node.state.focused || node.children.iter().any(any_focused)
+    }
+
+    /// Everything the scene draws beneath the named dim layer (the covered route snapshot).
+    fn backdrop_below<'a>(scene: &'a pf_scene::Scene, dim: &str) -> &'a [Node] {
+        let children = &scene.root().children;
+        let end = children
+            .iter()
+            .position(|node| node.id.as_str() == dim)
+            .unwrap_or_else(|| panic!("{dim} layer"));
+        &children[..end]
+    }
+
+    fn first_run_backdrop(scene: &pf_scene::Scene) -> String {
+        let backdrop = backdrop_below(scene, "first-run-backdrop-dim");
+        assert!(
+            !backdrop.iter().any(any_focused),
+            "nothing behind the sheet may hold focus"
+        );
+        format!("{backdrop:?}")
+    }
+
+    /// One button press and release through the production evdev input.
+    fn key_press(code: u16) -> ShellAction {
+        let actions = pf_gamepad_actions(&[(EV_KEY, code, 1), (EV_KEY, code, 0)]);
+        assert_eq!(actions.len(), 1, "one press yields one action: {actions:?}");
+        actions[0].clone()
+    }
+
+    fn hat_press(tap: (u16, i32)) -> ShellAction {
+        let actions = pf_gamepad_actions(&hat_tap(tap.0, tap.1));
+        assert_eq!(actions.len(), 1, "one press yields one action: {actions:?}");
+        actions[0].clone()
+    }
+
+    fn assert_fresh_device_sheet_owns_the_hat(text_scale: u16) {
+        let (mut core, _preferences, _dir) = fresh_device_core(text_scale);
+        let rest = device_scene(&core);
+        let rows = rest
+            .root()
+            .children
+            .iter()
+            .filter(|node| {
+                node.id
+                    .as_str()
+                    .strip_prefix("comfort-")
+                    .is_some_and(|index| index.parse::<usize>().is_ok())
+            })
+            .count();
+        assert_eq!(
+            rows, 4,
+            "every first-run row is interactive on a fresh device"
+        );
+        assert_eq!(
+            focus_owner(&rest),
+            "comfort-0",
+            "the sheet opens with its Text size row focused, not Home's tile"
+        );
+        assert_eq!(hero_title(&rest).as_deref(), Some("Ridgeline"));
+        let home = first_run_backdrop(&rest);
+
+        let steps = [
+            (DOWN, "comfort-1"),
+            (DOWN, "comfort-2"),
+            (DOWN, "comfort-3"),
+            (DOWN, "continue"),
+            (DOWN, "continue"),
+            (UP, "comfort-3"),
+            (UP, "comfort-2"),
+            (UP, "comfort-1"),
+            (UP, "comfort-0"),
+            (UP, "comfort-0"),
+            (RIGHT, "comfort-1"),
+            (LEFT, "comfort-0"),
+        ];
+        for (step, (tap, owner)) in steps.into_iter().enumerate() {
+            assert_eq!(core.action(&hat_press(tap)), None);
+            let scene = device_scene(&core);
+            assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+            assert_eq!(focus_owner(&scene), owner, "step {step}: sheet focus");
+            assert_eq!(
+                hero_title(&scene).as_deref(),
+                Some("Ridgeline"),
+                "step {step}: Home's hero behind the sheet"
+            );
+            assert_eq!(
+                first_run_backdrop(&scene),
+                home,
+                "step {step}: nothing behind the sheet may change"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_device_first_run_sheet_owns_hat_focus_and_home_never_moves() {
+        assert_fresh_device_sheet_owns_the_hat(100);
+    }
+
+    #[test]
+    fn fresh_device_first_run_sheet_owns_hat_focus_and_home_never_moves_at_200_percent() {
+        assert_fresh_device_sheet_owns_the_hat(200);
+    }
+
+    fn assert_fresh_device_sheet_buttons(text_scale: u16) {
+        let (mut core, mut preferences, _dir) = fresh_device_core(text_scale);
+        let home = first_run_backdrop(&device_scene(&core));
+
+        // B does nothing: the sheet stays, focus stays, Home stays.
+        let back = key_press(BTN_SOUTH);
+        assert_eq!(back, ShellAction::Back);
+        assert_eq!(core.action(&back), None);
+        let scene = device_scene(&core);
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(focus_owner(&scene), "comfort-0");
+        assert_eq!(first_run_backdrop(&scene), home);
+
+        // A on Text size cycles 100 -> 150 -> 200 -> 100 through the real preference store.
+        let cycle: [u16; 3] = if text_scale == 100 {
+            [150, 200, 100]
+        } else {
+            [100, 150, 200]
+        };
+        for next in cycle {
+            let activate = key_press(BTN_EAST);
+            assert_eq!(activate, ShellAction::Activate);
+            let Some(Effect::ChangePreference(change)) = core.action(&activate) else {
+                panic!("A on the Text size row changes it");
+            };
+            assert_eq!(change.key.0, "textScale");
+            preferences.submit_change(change).unwrap();
+            core.drive_preferences(&mut preferences).unwrap();
+            assert_eq!(core.text_scale(), next);
+            let scene = device_scene(&core);
+            assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+            assert_eq!(focus_owner(&scene), "comfort-0");
+            first_run_backdrop(&scene);
+        }
+
+        // Start completes first run and returns to Home's own focus.
+        let start = key_press(BTN_START);
+        assert_eq!(start, ShellAction::Custom("Start".into()));
+        assert_eq!(core.action(&start), Some(Effect::CompleteFirstRun));
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        let home_scene = device_scene(&core);
+        assert_eq!(focus_owner(&home_scene), "item-ridgeline");
+        assert_eq!(hero_title(&home_scene).as_deref(), Some("Ridgeline"));
+
+        // A on the primary action completes too, after the hat walks down to it.
+        let (mut core, _preferences, _dir) = fresh_device_core(text_scale);
+        for _ in 0..4 {
+            core.action(&hat_press(DOWN));
+        }
+        assert_eq!(focus_owner(&device_scene(&core)), "continue");
+        assert_eq!(
+            core.action(&key_press(BTN_EAST)),
+            Some(Effect::CompleteFirstRun)
+        );
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+        assert_eq!(focus_owner(&device_scene(&core)), "item-ridgeline");
+    }
+
+    #[test]
+    fn fresh_device_first_run_a_cycles_text_size_b_is_inert_start_and_continue_complete() {
+        assert_fresh_device_sheet_buttons(100);
+    }
+
+    #[test]
+    fn fresh_device_first_run_a_cycles_text_size_b_is_inert_start_and_continue_complete_at_200_percent()
+     {
+        assert_fresh_device_sheet_buttons(200);
+    }
+
+    #[test]
+    fn crash_modal_backdrop_is_inert_and_frozen_across_hat_moves() {
+        // The other shell-owned overlay drawn over a route snapshot: its Home must not bleed
+        // the modal's focus either (the power dialog replaces the Quick panel instead of
+        // covering a route, so it has no backdrop to bleed into).
+        let mut core = hat_core();
+        let Some(Effect::Launch(_)) = core.action(&ShellAction::Activate) else {
+            panic!("the fixture's first Home tile launches");
+        };
+        core.launch_result(&LaunchResult::Accepted {
+            session_id: "hat-session".into(),
+        });
+        core.session_event(&SessionEvent::Observed(ObservedSessionState::Running));
+        core.session_event(&SessionEvent::Terminal(TerminalReceipt::Crash {
+            session_id: "hat-session".into(),
+            summary: "exit status 9".into(),
+        }));
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Crash);
+        let backdrop = |scene: &pf_scene::Scene| {
+            let nodes = backdrop_below(scene, "return-summary-backdrop-dim");
+            assert!(!nodes.iter().any(any_focused));
+            format!("{nodes:?}")
+        };
+        let rest = device_scene(&core);
+        let home = backdrop(&rest);
+        let rest_owner = focus_owner(&rest);
+        core.action(&hat_press(RIGHT));
+        let moved = device_scene(&core);
+        assert_ne!(
+            focus_owner(&moved),
+            rest_owner,
+            "the modal's own buttons take the move"
+        );
+        assert_eq!(backdrop(&moved), home);
+        core.action(&hat_press(LEFT));
+        let back = device_scene(&core);
+        assert_eq!(focus_owner(&back), rest_owner);
+        assert_eq!(backdrop(&back), home);
+    }
+
+    // --- Input pump under slow frames and SYN_DROPPED (tsp-f3fm.227) -----------------------
+
+    /// Writes raw records (no implicit `SYN_REPORT`) to a file and opens the production source.
+    fn raw_source(records: &[(u16, u16, i32)]) -> (EvdevActionSource, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pf-gamepad");
+        let bytes: Vec<u8> = records
+            .iter()
+            .flat_map(|&(event_type, code, value)| raw_input_event(event_type, code, value))
+            .collect();
+        fs::write(&path, bytes).unwrap();
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
+        (source, dir)
+    }
+
+    /// Every action the pump yields until the recorded stream ends.
+    fn drain_actions(input: &mut EvdevInteractiveInput<'_>) -> Vec<ShellAction> {
+        let mut actions = Vec::new();
+        while let Ok(poll) =
+            input.next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+        {
+            if let DecodedActionPoll::Event { action, .. } = poll {
+                actions.push(action);
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn hat_tap_read_across_a_slow_frame_is_exactly_one_move() {
+        // An 80 ms tap: the release is already queued when the shell finishes presenting the
+        // press. ca22de0e read one record per frame, so a 600 ms frame read as a 600 ms hold
+        // and replayed three repeats (B15: one DOWN moved the sheet from row 0 to the button).
+        let (mut source, _dir) = raw_source(&[
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 0),
+            (0, 0, 0),
+        ]);
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let first = loop {
+            if let DecodedActionPoll::Event { action, .. } = input
+                .next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+                .unwrap()
+            {
+                break action;
+            }
+        };
+        assert_eq!(first, ShellAction::Move(pf_scene::AxisMove::Down));
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(drain_actions(&mut input), Vec::<ShellAction>::new());
+    }
+
+    #[test]
+    fn hat_release_lost_to_syn_dropped_never_repeats() {
+        // The kernel dropped the release (client buffer overflow during a slow frame) and says
+        // so with SYN_DROPPED. ca22de0e ignored it, so DOWN stayed held and repeated forever.
+        let (mut source, _dir) = raw_source(&[
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, 0x00, 2051),
+            (0, 3, 0),
+            (EV_ABS, 0x00, 2049),
+            (0, 0, 0),
+        ]);
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let mut actions = Vec::new();
+        while actions.is_empty() {
+            if let DecodedActionPoll::Event { action, .. } = input
+                .next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+                .unwrap()
+            {
+                actions.push(action);
+            }
+        }
+        assert_eq!(actions, vec![ShellAction::Move(pf_scene::AxisMove::Down)]);
+        thread::sleep(EVDEV_REPEAT_DELAY + EVDEV_REPEAT_INTERVAL * 3);
+        assert_eq!(drain_actions(&mut input), Vec::<ShellAction>::new());
+        assert!(!input.repeat.is_active(), "no direction is left held");
+    }
+
+    #[test]
+    fn a_held_direction_never_builds_a_repeat_backlog() {
+        // A genuinely held direction across a slow frame yields one repeat at a time, so a
+        // later press is never queued behind a backlog of moves.
+        struct HeldDown {
+            pressed: bool,
+        }
+        impl EvdevEventSource for HeldDown {
+            fn next_input_event_timeout(
+                &mut self,
+                _timeout: Duration,
+            ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError> {
+                if self.pressed {
+                    return Ok(None);
+                }
+                self.pressed = true;
+                Ok(Some(EvdevInputEvent::Pressed {
+                    code: 108,
+                    action: Some(ShellAction::Move(pf_scene::AxisMove::Down)),
+                }))
+            }
+        }
+        let mut source = HeldDown { pressed: false };
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        assert!(matches!(
+            input
+                .next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+                .unwrap(),
+            DecodedActionPoll::Event { .. }
+        ));
+        thread::sleep(Duration::from_millis(1_000));
+        assert!(matches!(
+            input
+                .next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+                .unwrap(),
+            DecodedActionPoll::Event {
+                action: ShellAction::Move(pf_scene::AxisMove::Down),
+                ..
+            }
+        ));
+        assert!(
+            input.pending.is_empty(),
+            "a slow frame must not leave {} queued repeats",
+            input.pending.len()
         );
     }
 }

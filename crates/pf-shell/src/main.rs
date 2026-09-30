@@ -10651,9 +10651,26 @@ exec="./launch"
         assert_eq!(trajectory, vec![1, 2, 3, 2]);
     }
 
-    #[test]
-    fn hat_dpad_moves_focus_down_the_settings_rooms() {
+    /// Loads durable preferences with `textScale` stored at `text_scale` percent, the way a
+    /// device that already changed it boots (tsp-3rd3.17 B11: the owner's presses persisted 200%).
+    fn load_text_scale(core: &mut ShellCore, text_scale: u16) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        preferences
+            .submit_change(PreferenceChange {
+                key: PreferenceKey("textScale".into()),
+                value: PreferenceValue::Text(format!("{text_scale}%")),
+                authority: ChangeAuthority("user".into()),
+            })
+            .unwrap();
+        // First run already completed; the first-run tests reopen the sheet explicitly.
+        core.load_preferences(&preferences, true).unwrap();
+        assert_eq!(core.text_scale(), text_scale);
+    }
+
+    fn assert_hat_moves_settings_rooms(text_scale: u16) {
         let enter_settings = |core: &mut ShellCore| {
+            load_text_scale(core, text_scale);
             core.action(&ShellAction::Custom("Room.next".into()));
             core.action(&ShellAction::Custom("Room.next".into()));
             assert_eq!(core.route(), pf_shell_core::Route::Settings);
@@ -10664,11 +10681,18 @@ exec="./launch"
     }
 
     #[test]
-    fn hat_dpad_moves_focus_on_the_first_run_sheet() {
+    fn hat_dpad_moves_focus_down_the_settings_rooms() {
+        assert_hat_moves_settings_rooms(100);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_down_the_settings_rooms_at_200_percent() {
+        assert_hat_moves_settings_rooms(200);
+    }
+
+    fn assert_hat_moves_first_run_focus(text_scale: u16) {
         let first_run = |core: &mut ShellCore| {
-            let dir = tempfile::tempdir().unwrap();
-            let preferences = DurablePreferences::open(dir.path()).unwrap();
-            core.load_preferences(&preferences, false).unwrap();
+            load_text_scale(core, text_scale);
             core.reset_first_run();
             assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
             assert_eq!(core.focus(), 0, "the sheet opens on the Text size row");
@@ -10685,6 +10709,17 @@ exec="./launch"
         };
         assert_ne!(change.key.0, "textScale");
         assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(core.text_scale(), text_scale);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_on_the_first_run_sheet() {
+        assert_hat_moves_first_run_focus(100);
+    }
+
+    #[test]
+    fn hat_dpad_moves_focus_on_the_first_run_sheet_at_200_percent() {
+        assert_hat_moves_first_run_focus(200);
     }
 
     #[test]

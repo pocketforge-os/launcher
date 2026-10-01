@@ -396,7 +396,8 @@ impl EvdevActionSource {
             .iter()
             .copied()
             .filter(|code| {
-                self.control_by_code.contains_key(code) && !self.held_keys.contains(code)
+                (self.control_by_code.contains_key(code) || self.by_code.contains_key(code))
+                    && !self.held_keys.contains(code)
             })
             .collect();
         for code in pressed {
@@ -1726,6 +1727,32 @@ mod tests {
             vec![
                 EvdevInputEvent::ActiveSourceChanged,
                 moved(KEY_UP, AxisMove::Up),
+            ]
+        );
+    }
+
+    #[test]
+    fn syn_dropped_resyncs_source_owned_shoulders_but_not_unowned_keys() {
+        let decoded = decode_raw_with(
+            &[DROPPED, SYN],
+            with_state(Ok(ControlStateSnapshot {
+                hat_x: 0,
+                hat_y: 0,
+                keys: BTreeSet::from([0x136, 0x137, 0x13f]),
+            })),
+        );
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                EvdevInputEvent::Pressed {
+                    code: 0x136,
+                    action: Some(ShellAction::Custom("Room.previous".into())),
+                },
+                EvdevInputEvent::Pressed {
+                    code: 0x137,
+                    action: Some(ShellAction::Custom("Room.next".into())),
+                },
             ]
         );
     }

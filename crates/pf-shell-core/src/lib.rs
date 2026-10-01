@@ -2365,8 +2365,16 @@ impl ShellCore {
                 self.refresh_library_items();
                 self.focus = self.focus.min(self.library_items.len().saturating_add(4));
             }
-            ShellAction::Custom(name) if name == "Room.next" => self.next_room(),
-            ShellAction::Custom(name) if name == "Room.previous" => self.previous_room(),
+            ShellAction::Custom(name)
+                if name == "Room.next" && self.room_navigation_available() =>
+            {
+                self.next_room();
+            }
+            ShellAction::Custom(name)
+                if name == "Room.previous" && self.room_navigation_available() =>
+            {
+                self.previous_room();
+            }
             ShellAction::Custom(name) if name == "Quick" => {
                 if self.route == Route::Details {
                     if let Some(item) = self.focused_item_index() {
@@ -2928,6 +2936,12 @@ impl ShellCore {
             Route::Home => self.go(Route::Settings),
             _ => {}
         }
+    }
+    fn room_navigation_available(&self) -> bool {
+        matches!(
+            self.presentation,
+            Presentation::Booting | Presentation::Ready
+        ) && matches!(self.route, Route::Home | Route::Library | Route::Settings)
     }
     fn route_index(&self) -> usize {
         Self::route_slot(self.route)

@@ -1178,43 +1178,43 @@ mod tests {
         );
     }
 
+    fn raw_key_action(code: u16) -> Option<ShellAction> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events");
+        File::create(&path)
+            .unwrap()
+            .write_all(&input_event(EV_KEY, code, 1))
+            .unwrap();
+        let (mut source, _) = EvdevActionSource::open(path, CONTRACT).unwrap();
+        let deadline = Deadline(MonotonicTime::ZERO);
+        assert_eq!(
+            source.next_action(deadline).unwrap(),
+            ActionPoll::Event(ActionEvent::ActiveSourceChanged(Some(InputSourceId(
+                "pocketforge-sim-gamepad".into()
+            ))))
+        );
+        match source.next_action(deadline).unwrap() {
+            ActionPoll::Event(ActionEvent::Action(action)) => Some(action),
+            ActionPoll::DeadlineReached => None,
+            other => panic!("unexpected raw-key result for {code}: {other:?}"),
+        }
+    }
+
+    fn assert_room_cycle(
+        core: &mut pf_shell_core::ShellCore,
+        action: &ShellAction,
+        expected: [pf_shell_core::Route; 4],
+    ) {
+        assert_eq!(core.route(), expected[0]);
+        for route in &expected[1..] {
+            assert_eq!(core.action(action), None);
+            assert_eq!(core.route(), *route);
+        }
+    }
+
     #[test]
     fn fresh_boot_shoulders_switch_every_root_and_never_escape_owned_surfaces() {
         use pf_shell_core::Route::{Home, Library, Settings};
-
-        fn raw_key_action(code: u16) -> Option<ShellAction> {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("events");
-            File::create(&path)
-                .unwrap()
-                .write_all(&input_event(EV_KEY, code, 1))
-                .unwrap();
-            let (mut source, _) = EvdevActionSource::open(path, CONTRACT).unwrap();
-            let deadline = Deadline(MonotonicTime::ZERO);
-            assert_eq!(
-                source.next_action(deadline).unwrap(),
-                ActionPoll::Event(ActionEvent::ActiveSourceChanged(Some(InputSourceId(
-                    "pocketforge-sim-gamepad".into()
-                ))))
-            );
-            match source.next_action(deadline).unwrap() {
-                ActionPoll::Event(ActionEvent::Action(action)) => Some(action),
-                ActionPoll::DeadlineReached => None,
-                other => panic!("unexpected raw-key result for {code}: {other:?}"),
-            }
-        }
-
-        fn assert_cycle(
-            core: &mut pf_shell_core::ShellCore,
-            action: &ShellAction,
-            expected: [pf_shell_core::Route; 4],
-        ) {
-            assert_eq!(core.route(), expected[0]);
-            for route in &expected[1..] {
-                assert_eq!(core.action(action), None);
-                assert_eq!(core.route(), *route);
-            }
-        }
 
         let previous = raw_key_action(0x136).expect("BTN_TL must map to Room.previous");
         let next = raw_key_action(0x137).expect("BTN_TR must map to Room.next");
@@ -1253,7 +1253,7 @@ mod tests {
             while fresh.route() != expected[0] {
                 fresh.action(&next);
             }
-            assert_cycle(&mut fresh, &next, expected);
+            assert_room_cycle(&mut fresh, &next, expected);
         }
         for expected in [
             [Home, Settings, Library, Home],
@@ -1263,7 +1263,7 @@ mod tests {
             while fresh.route() != expected[0] {
                 fresh.action(&next);
             }
-            assert_cycle(&mut fresh, &previous, expected);
+            assert_room_cycle(&mut fresh, &previous, expected);
         }
 
         while fresh.route() != Home {

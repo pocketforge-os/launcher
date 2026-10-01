@@ -10893,6 +10893,8 @@ exec="./launch"
 
     const BTN_SOUTH: u16 = 304;
     const BTN_EAST: u16 = 305;
+    const BTN_TL: u16 = 0x136;
+    const BTN_TR: u16 = 0x137;
     const BTN_START: u16 = 315;
 
     const DEVICE_METRICS: SurfaceMetrics = SurfaceMetrics {
@@ -11131,6 +11133,82 @@ exec="./launch"
     fn fresh_device_first_run_a_cycles_text_size_b_is_inert_start_and_continue_complete_at_200_percent()
      {
         assert_fresh_device_sheet_buttons(200);
+    }
+
+    #[test]
+    fn fresh_device_shoulders_cycle_every_root_only_after_start() {
+        use pf_shell_core::Route::{Home, Library, Settings};
+
+        let (mut core, _preferences, _dir) = fresh_device_core(100);
+        let previous = key_press(BTN_TL);
+        let next = key_press(BTN_TR);
+        assert_eq!(previous, ShellAction::Custom("Room.previous".into()));
+        assert_eq!(next, ShellAction::Custom("Room.next".into()));
+
+        let first_run = device_scene(&core);
+        let frozen_backdrop = first_run_backdrop(&first_run);
+        assert_eq!(core.action(&next), None);
+        assert_eq!(core.action(&previous), None);
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(core.route(), pf_shell_core::Route::Home);
+        assert_eq!(first_run_backdrop(&device_scene(&core)), frozen_backdrop);
+
+        assert_eq!(
+            core.action(&key_press(BTN_START)),
+            Some(Effect::CompleteFirstRun)
+        );
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::Ready);
+
+        let focus_for = |core: &ShellCore, route| {
+            assert_eq!(core.route(), route);
+            match route {
+                Home => "item-ridgeline",
+                Library => "library-search",
+                Settings => "settings-nav-accessibility",
+                _ => unreachable!("only top-level roots are in a shoulder cycle"),
+            }
+        };
+        let assert_cycle =
+            |core: &mut ShellCore, action: &ShellAction, expected: [pf_shell_core::Route; 4]| {
+                assert_eq!(
+                    focus_owner(&device_scene(core)),
+                    focus_for(core, expected[0])
+                );
+                for route in &expected[1..] {
+                    assert_eq!(core.action(action), None);
+                    assert_eq!(focus_owner(&device_scene(core)), focus_for(core, *route));
+                }
+            };
+
+        for expected in [
+            [Home, Library, Settings, Home],
+            [Library, Settings, Home, Library],
+            [Settings, Home, Library, Settings],
+        ] {
+            while core.route() != expected[0] {
+                core.action(&next);
+            }
+            assert_cycle(&mut core, &next, expected);
+        }
+        for expected in [
+            [Home, Settings, Library, Home],
+            [Library, Home, Settings, Library],
+            [Settings, Library, Home, Settings],
+        ] {
+            while core.route() != expected[0] {
+                core.action(&next);
+            }
+            assert_cycle(&mut core, &previous, expected);
+        }
+
+        while core.route() != Library {
+            core.action(&next);
+        }
+        core.action(&ShellAction::Activate);
+        assert_eq!(core.route(), pf_shell_core::Route::Search);
+        assert_eq!(core.action(&next), None);
+        assert_eq!(core.action(&previous), None);
+        assert_eq!(core.route(), pf_shell_core::Route::Search);
     }
 
     #[test]

@@ -200,6 +200,7 @@ impl EvdevActionSource {
                 by_code.insert(*code, action);
             }
         }
+        add_room_shoulder_actions(&mut by_code);
         let file = File::open(path)?;
         let is_character_device = file.metadata()?.file_type().is_char_device();
         let state_query: Option<Box<dyn ControlStateQuery>> = if evdev_grab_enabled(
@@ -395,7 +396,8 @@ impl EvdevActionSource {
             .iter()
             .copied()
             .filter(|code| {
-                self.control_by_code.contains_key(code) && !self.held_keys.contains(code)
+                (self.control_by_code.contains_key(code) || self.by_code.contains_key(code))
+                    && !self.held_keys.contains(code)
             })
             .collect();
         for code in pressed {
@@ -474,6 +476,7 @@ impl EvdevActionSource {
                 self.by_code.insert(code, action);
             }
         }
+        add_room_shoulder_actions(&mut self.by_code);
     }
 }
 
@@ -901,6 +904,19 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
     })
 }
 
+fn add_room_shoulder_actions(by_code: &mut BTreeMap<u16, ShellAction>) {
+    // Source-owned device descriptors define the digital shoulders as BTN_TL/BTN_TR.
+    // They are shell chrome controls, not focus directions or user-remappable app input.
+    by_code.insert(
+        linux_key_code("BTN_TL").expect("known Linux input code"),
+        ShellAction::Custom("Room.previous".into()),
+    );
+    by_code.insert(
+        linux_key_code("BTN_TR").expect("known Linux input code"),
+        ShellAction::Custom("Room.next".into()),
+    );
+}
+
 fn linux_key_code(name: &str) -> Option<u16> {
     Some(match name {
         "BTN_EAST" => 305,
@@ -910,6 +926,8 @@ fn linux_key_code(name: &str) -> Option<u16> {
         "BTN_MODE" => 316,
         "BTN_SELECT" => 314,
         "BTN_START" => 315,
+        "BTN_TL" => 0x136,
+        "BTN_TR" => 0x137,
         "KEY_UP" => 103,
         "KEY_DOWN" => 108,
         "KEY_LEFT" => 105,
@@ -1159,6 +1177,130 @@ mod tests {
             source.next_action(deadline).unwrap(),
             ActionPoll::Event(ActionEvent::Action(ShellAction::Move(AxisMove::Right)))
         );
+    }
+
+    fn raw_key_action(code: u16) -> Option<ShellAction> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events");
+        File::create(&path)
+            .unwrap()
+            .write_all(&input_event(EV_KEY, code, 1))
+            .unwrap();
+        let (mut source, _) = EvdevActionSource::open(path, CONTRACT).unwrap();
+        let deadline = Deadline(MonotonicTime::ZERO);
+        assert_eq!(
+            source.next_action(deadline).unwrap(),
+            ActionPoll::Event(ActionEvent::ActiveSourceChanged(Some(InputSourceId(
+                "pocketforge-sim-gamepad".into()
+            ))))
+        );
+        match source.next_action(deadline).unwrap() {
+            ActionPoll::Event(ActionEvent::Action(action)) => Some(action),
+            ActionPoll::DeadlineReached => None,
+            other => panic!("unexpected raw-key result for {code}: {other:?}"),
+        }
+    }
+
+    fn assert_room_cycle(
+        core: &mut pf_shell_core::ShellCore,
+        action: &ShellAction,
+        expected: [pf_shell_core::Route; 4],
+    ) {
+        assert_eq!(core.route(), expected[0]);
+        for route in &expected[1..] {
+            assert_eq!(core.action(action), None);
+            assert_eq!(core.route(), *route);
+        }
+    }
+
+    #[test]
+    fn fresh_boot_shoulders_switch_every_root_and_never_escape_owned_surfaces() {
+        use pf_shell_core::Route::{Home, Library, Settings};
+
+        let previous = raw_key_action(0x136).expect("BTN_TL must map to Room.previous");
+        let next = raw_key_action(0x137).expect("BTN_TR must map to Room.next");
+        let start = raw_key_action(315).expect("BTN_START must remain mapped");
+        assert_eq!(previous, ShellAction::Custom("Room.previous".into()));
+        assert_eq!(next, ShellAction::Custom("Room.next".into()));
+        assert_eq!(start, ShellAction::Custom("Start".into()));
+        assert_eq!(
+            raw_key_action(0x13f),
+            None,
+            "an unowned evdev key is the negative control"
+        );
+
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut fresh = pf_shell_core::ShellCore::boot(&snapshot, &pf_theme::flagship(), false);
+        fresh.authority_snapshot(false);
+        fresh.reset_first_run();
+        assert_eq!(fresh.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(fresh.route(), pf_shell_core::Route::Home);
+        assert_eq!(fresh.action(&next), None);
+        assert_eq!(fresh.action(&previous), None);
+        assert_eq!(fresh.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(fresh.route(), pf_shell_core::Route::Home);
+        assert_eq!(
+            fresh.action(&start),
+            Some(pf_shell_core::Effect::CompleteFirstRun)
+        );
+        assert_eq!(fresh.presentation(), &pf_shell_core::Presentation::Ready);
+
+        for expected in [
+            [Home, Library, Settings, Home],
+            [Library, Settings, Home, Library],
+            [Settings, Home, Library, Settings],
+        ] {
+            while fresh.route() != expected[0] {
+                fresh.action(&next);
+            }
+            assert_room_cycle(&mut fresh, &next, expected);
+        }
+        for expected in [
+            [Home, Settings, Library, Home],
+            [Library, Home, Settings, Library],
+            [Settings, Library, Home, Settings],
+        ] {
+            while fresh.route() != expected[0] {
+                fresh.action(&next);
+            }
+            assert_room_cycle(&mut fresh, &previous, expected);
+        }
+
+        while fresh.route() != Home {
+            fresh.action(&next);
+        }
+        fresh.action(&ShellAction::Move(AxisMove::Right));
+        let home_focus = fresh.focus();
+        fresh.action(&next);
+        fresh.action(&ShellAction::Move(AxisMove::Down));
+        let library_focus = fresh.focus();
+        fresh.action(&next);
+        fresh.action(&ShellAction::Move(AxisMove::Down));
+        let settings_focus = fresh.focus();
+        fresh.action(&next);
+        assert_eq!(fresh.focus(), home_focus, "Home restores route-local focus");
+        fresh.action(&next);
+        assert_eq!(
+            fresh.focus(),
+            library_focus,
+            "Library restores route-local focus"
+        );
+        fresh.action(&next);
+        assert_eq!(
+            fresh.focus(),
+            settings_focus,
+            "Settings restores route-local focus"
+        );
+
+        while fresh.route() != Library {
+            fresh.action(&next);
+        }
+        fresh.action(&ShellAction::Activate);
+        assert_eq!(fresh.route(), pf_shell_core::Route::Details);
+        assert_eq!(fresh.action(&next), None);
+        assert_eq!(fresh.action(&previous), None);
+        assert_eq!(fresh.route(), pf_shell_core::Route::Details);
     }
 
     #[test]
@@ -1585,6 +1727,32 @@ mod tests {
             vec![
                 EvdevInputEvent::ActiveSourceChanged,
                 moved(KEY_UP, AxisMove::Up),
+            ]
+        );
+    }
+
+    #[test]
+    fn syn_dropped_resyncs_source_owned_shoulders_but_not_unowned_keys() {
+        let decoded = decode_raw_with(
+            &[DROPPED, SYN],
+            with_state(Ok(ControlStateSnapshot {
+                hat_x: 0,
+                hat_y: 0,
+                keys: BTreeSet::from([0x136, 0x137, 0x13f]),
+            })),
+        );
+        assert_eq!(
+            decoded,
+            vec![
+                EvdevInputEvent::ActiveSourceChanged,
+                EvdevInputEvent::Pressed {
+                    code: 0x136,
+                    action: Some(ShellAction::Custom("Room.previous".into())),
+                },
+                EvdevInputEvent::Pressed {
+                    code: 0x137,
+                    action: Some(ShellAction::Custom("Room.next".into())),
+                },
             ]
         );
     }

@@ -10454,6 +10454,13 @@ exec="./launch"
         polls: Vec<PollRecord>,
     }
 
+    struct ScriptedRun {
+        core: ShellCore,
+        presents: Vec<[u8; 32]>,
+        polls: Vec<PollRecord>,
+        present_intervals: Vec<(u64, u64)>,
+    }
+
     impl InteractiveInput<RecordingHost> for ScriptedInput {
         fn next_action(
             &mut self,
@@ -10497,15 +10504,15 @@ exec="./launch"
         authority: &FakeAuthority,
         steps: Vec<Step>,
     ) -> (ShellCore, Vec<[u8; 32]>, Vec<PollRecord>) {
-        let (core, presents, polls, _) = run_loop_scripted_with_trace(authority, steps, None);
-        (core, presents, polls)
+        let run = run_loop_scripted_with_trace(authority, steps, None);
+        (run.core, run.presents, run.polls)
     }
 
     fn run_loop_scripted_with_trace(
         authority: &FakeAuthority,
         steps: Vec<Step>,
         trace_path: Option<&Path>,
-    ) -> (ShellCore, Vec<[u8; 32]>, Vec<PollRecord>, Vec<(u64, u64)>) {
+    ) -> ScriptedRun {
         let dir = tempfile::tempdir().unwrap();
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
@@ -10563,24 +10570,31 @@ exec="./launch"
         )
         .unwrap();
         drop(trace);
-        (core, host.presents, input.polls, host.present_intervals)
+        ScriptedRun {
+            core,
+            presents: host.presents,
+            polls: input.polls,
+            present_intervals: host.present_intervals,
+        }
     }
 
     #[test]
     fn successful_launch_trace_brackets_the_first_real_action_present() {
+        use pf_session_authority::RpcEvent;
+
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("latency.jsonl");
-        use pf_session_authority::RpcEvent;
         let authority = FakeAuthority::serve(
             vec![(3, 1, RpcEvent::Starting), (3, 2, RpcEvent::Running)],
             Vec::new(),
         );
 
-        let (_, _, _, presents) = run_loop_scripted_with_trace(
+        let run = run_loop_scripted_with_trace(
             &authority,
             vec![Step::Press(ShellAction::Activate)],
             Some(&trace_path),
         );
+        let presents = run.present_intervals;
         let action = fs::read_to_string(trace_path)
             .unwrap()
             .lines()

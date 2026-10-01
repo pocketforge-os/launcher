@@ -76,11 +76,21 @@ static CATALOG_RELOAD_REQUESTED: LazyLock<Arc<AtomicBool>> =
 struct LatencyTrace {
     writer: BufWriter<fs::File>,
     epoch: Instant,
+    epoch_mono_ns: u64,
     seq: u64,
+}
+
+#[derive(Clone, Copy)]
+struct LatencyStages {
+    action_handled: u64,
+    render_submit: Option<u64>,
+    present_return: Option<u64>,
 }
 
 impl LatencyTrace {
     fn open(path: &Path, host: &str) -> Result<Self, String> {
+        let epoch_mono_ns = monotonic_ns()?;
+        let epoch = Instant::now();
         let file = fs::File::create(path)
             .map_err(|error| format!("latency trace {}: {error}", path.display()))?;
         let mut writer = BufWriter::new(file);
@@ -89,7 +99,10 @@ impl LatencyTrace {
             "{}",
             serde_json::json!({
                 "event": "header",
-                "clock_source": "process_relative_monotonic_at_decode",
+                "schema": "pf-shell-latency-v2",
+                "clock_source": "CLOCK_MONOTONIC",
+                "clock_unit": "ns",
+                "epoch_mono_ns": epoch_mono_ns,
                 "host": host,
                 "pid": std::process::id(),
             })
@@ -100,7 +113,8 @@ impl LatencyTrace {
             .map_err(|error| format!("latency trace: {error}"))?;
         Ok(Self {
             writer,
-            epoch: Instant::now(),
+            epoch,
+            epoch_mono_ns,
             seq: 0,
         })
     }
@@ -115,19 +129,28 @@ impl LatencyTrace {
         ingress: u64,
         presented: bool,
         revision: u64,
+        stages: LatencyStages,
     ) -> Result<(), String> {
         self.seq += 1;
         let present = presented.then(|| self.now_us());
         let latency = present.map(|timestamp| timestamp.saturating_sub(ingress));
+        let ingress_mono_ns = self
+            .epoch_mono_ns
+            .saturating_add(ingress.saturating_mul(1_000));
         writeln!(
             self.writer,
             "{}",
             serde_json::json!({
+                "event": "action",
                 "seq": self.seq,
                 "action": format!("{action:?}"),
                 "t_ingress_us": ingress,
                 "t_present_us": present,
                 "latency_us": latency,
+                "t_launcher_decode_ns": ingress_mono_ns,
+                "t_action_handled_ns": stages.action_handled,
+                "t_render_submit_ns": stages.render_submit,
+                "t_present_return_ns": stages.present_return,
                 "presented": presented,
                 "revision": revision,
             })
@@ -149,6 +172,17 @@ impl LatencyTrace {
             .flush()
             .map_err(|error| format!("latency trace: {error}"))
     }
+}
+
+fn monotonic_ns() -> Result<u64, String> {
+    let timestamp = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let seconds = u64::try_from(timestamp.tv_sec)
+        .map_err(|_| "latency trace clock returned a negative second".to_owned())?;
+    let nanoseconds = u64::try_from(timestamp.tv_nsec)
+        .map_err(|_| "latency trace clock returned a negative nanosecond".to_owned())?;
+    Ok(seconds
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nanoseconds))
 }
 
 fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
@@ -2023,21 +2057,44 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
             None => {}
         }
+        let action_handled_ns = latency_trace
+            .as_ref()
+            .map(|_| monotonic_ns())
+            .transpose()?
+            .unwrap_or_default();
         let changed = before != redraw_state(core)
             && trace_scene_before.as_ref().is_none_or(|before_scene| {
                 *before_scene != format!("{:?}", core.scene(host.metrics(), &activate))
             });
+        let mut render_submit_ns = None;
+        let mut present_return_ns = None;
         if changed {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
+            if latency_trace.is_some() {
+                render_submit_ns = Some(monotonic_ns()?);
+            }
             if present_interactive(host, core, &activate)? {
                 frames.increment();
                 presented_revision = core.revision();
                 presented = true;
             }
+            if latency_trace.is_some() {
+                present_return_ns = Some(monotonic_ns()?);
+            }
         }
         if let (Some(trace), Some(ingress_us)) = (latency_trace.as_mut(), ingress_us) {
-            trace.action(&action, ingress_us, presented, core.revision())?;
+            trace.action(
+                &action,
+                ingress_us,
+                presented,
+                core.revision(),
+                LatencyStages {
+                    action_handled: action_handled_ns,
+                    render_submit: render_submit_ns,
+                    present_return: present_return_ns,
+                },
+            )?;
         }
         acknowledge_presented_frames(
             &mut presentation_acknowledger,
@@ -9743,6 +9800,16 @@ exec="./launch"
         );
     }
 
+    fn assert_latency_stages_ordered(row: &serde_json::Value) {
+        let stages = [
+            row["t_launcher_decode_ns"].as_u64().unwrap(),
+            row["t_action_handled_ns"].as_u64().unwrap(),
+            row["t_render_submit_ns"].as_u64().unwrap(),
+            row["t_present_return_ns"].as_u64().unwrap(),
+        ];
+        assert!(stages.windows(2).all(|pair| pair[0] <= pair[1]), "{row}");
+    }
+
     #[test]
     fn interactive_actions_propagate_decode_timestamps_and_include_return_delay() {
         let dir = tempfile::tempdir().unwrap();
@@ -9820,6 +9887,10 @@ exec="./launch"
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
+        assert_eq!(rows[0]["schema"], "pf-shell-latency-v2");
+        assert_eq!(rows[0]["clock_source"], "CLOCK_MONOTONIC");
+        assert_eq!(rows[0]["clock_unit"], "ns");
+        assert!(rows[0]["epoch_mono_ns"].as_u64().is_some());
         assert_eq!(rows[1]["seq"], 1);
         assert_eq!(rows[2]["seq"], 2);
         assert_eq!(rows[3]["seq"], 3);
@@ -9827,6 +9898,10 @@ exec="./launch"
         assert_eq!(rows[1]["presented"], true);
         assert!(rows[1]["latency_us"].as_u64().unwrap() > 0);
         assert!(rows[2]["latency_us"].as_u64().unwrap() >= 20_000);
+        rows.iter()
+            .skip(1)
+            .filter(|row| row["presented"] == true)
+            .for_each(assert_latency_stages_ordered);
         let filtered = rows
             .iter()
             .skip(1)
@@ -9834,6 +9909,8 @@ exec="./launch"
             .unwrap();
         assert!(filtered["latency_us"].is_null());
         assert!(filtered["t_present_us"].is_null());
+        assert!(filtered["t_render_submit_ns"].is_null());
+        assert!(filtered["t_present_return_ns"].is_null());
     }
 
     // ---- tsp-f3fm.219 L1/L2: a restored shell always presents and acknowledges ----
@@ -11201,6 +11278,56 @@ exec="./launch"
             }
         }
         actions
+    }
+
+    #[test]
+    fn four_back_to_back_hat_taps_are_four_actions_and_four_focus_moves() {
+        let tap = [
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 0),
+            (0, 0, 0),
+        ];
+        let records = tap.repeat(4);
+        let (mut source, _dir) = raw_source(&records);
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let actions = drain_actions(&mut input);
+        assert_eq!(
+            actions,
+            vec![ShellAction::Move(pf_scene::AxisMove::Down); 4],
+            "the repeat cap must not coalesce physical press-release-press taps"
+        );
+
+        let (mut core, _preferences, _dir) = fresh_device_core(100);
+        for action in actions {
+            assert_eq!(core.action(&action), None);
+        }
+        assert_eq!(
+            focus_owner(&device_scene(&core)),
+            "continue",
+            "four physical taps must move across all four first-run rows"
+        );
+
+        // Negative control: four identical held samples are not four taps. Hat state
+        // de-duplication yields one press until the single release arrives.
+        let (mut source, _dir) = raw_source(&[
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 1),
+            (0, 0, 0),
+            (EV_ABS, ABS_HAT0Y, 0),
+            (0, 0, 0),
+        ]);
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        assert_eq!(
+            drain_actions(&mut input),
+            vec![ShellAction::Move(pf_scene::AxisMove::Down)],
+            "the positive control must count transitions, not raw ABS samples"
+        );
     }
 
     #[test]

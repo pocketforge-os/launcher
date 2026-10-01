@@ -1935,6 +1935,9 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             server.note_action();
         }
         let mut presented = false;
+        let mut action_handled_ns = None;
+        let mut render_submit_ns = None;
+        let mut present_return_ns = None;
         match core.action(&action) {
             Some(Effect::SafeReturn) => {
                 request_safe_return_if_active(core, &session);
@@ -1944,7 +1947,17 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 Ok(result) => {
                     core.session_backend_reachable();
                     core.launch_result(&result);
-                    if present_interactive(host, core, &activate)? {
+                    if latency_trace.is_some() {
+                        action_handled_ns = Some(monotonic_ns()?);
+                    }
+                    if present_action_frame(
+                        host,
+                        core,
+                        &activate,
+                        latency_trace.is_some(),
+                        &mut render_submit_ns,
+                        &mut present_return_ns,
+                    )? {
                         frames.increment();
                         presented_revision = core.revision();
                         presented = true;
@@ -2057,30 +2070,27 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
             None => {}
         }
-        let action_handled_ns = latency_trace
-            .as_ref()
-            .map(|_| monotonic_ns())
-            .transpose()?
-            .unwrap_or_default();
+        if action_handled_ns.is_none() && latency_trace.is_some() {
+            action_handled_ns = Some(monotonic_ns()?);
+        }
         let changed = before != redraw_state(core)
             && trace_scene_before.as_ref().is_none_or(|before_scene| {
                 *before_scene != format!("{:?}", core.scene(host.metrics(), &activate))
             });
-        let mut render_submit_ns = None;
-        let mut present_return_ns = None;
         if changed {
             // Rasterizer damage tracking makes unchanged parts of the retained
             // scene a no-op at the fbdev boundary.
-            if latency_trace.is_some() {
-                render_submit_ns = Some(monotonic_ns()?);
-            }
-            if present_interactive(host, core, &activate)? {
+            if present_action_frame(
+                host,
+                core,
+                &activate,
+                latency_trace.is_some(),
+                &mut render_submit_ns,
+                &mut present_return_ns,
+            )? {
                 frames.increment();
                 presented_revision = core.revision();
                 presented = true;
-            }
-            if latency_trace.is_some() {
-                present_return_ns = Some(monotonic_ns()?);
             }
         }
         if let (Some(trace), Some(ingress_us)) = (latency_trace.as_mut(), ingress_us) {
@@ -2090,7 +2100,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 presented,
                 core.revision(),
                 LatencyStages {
-                    action_handled: action_handled_ns,
+                    action_handled: action_handled_ns.unwrap_or_default(),
                     render_submit: render_submit_ns,
                     present_return: present_return_ns,
                 },
@@ -4380,6 +4390,24 @@ fn present_interactive(
     };
     present_scene(host, core, prompt, &scene)?;
     Ok(true)
+}
+
+fn present_action_frame(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+    trace_enabled: bool,
+    render_submit: &mut Option<u64>,
+    present_return: &mut Option<u64>,
+) -> Result<bool, String> {
+    let capture = trace_enabled && render_submit.is_none();
+    let submitted = capture.then(monotonic_ns).transpose()?;
+    let presented = present_interactive(host, core, prompt)?;
+    if capture && presented {
+        *render_submit = submitted;
+        *present_return = Some(monotonic_ns()?);
+    }
+    Ok(presented)
 }
 
 fn present_scene(
@@ -10372,6 +10400,7 @@ exec="./launch"
     struct RecordingHost {
         inner: OffscreenHost,
         presents: Vec<[u8; 32]>,
+        present_intervals: Vec<(u64, u64)>,
     }
 
     impl FrameHost for RecordingHost {
@@ -10382,10 +10411,13 @@ exec="./launch"
             self.inner.set_theme_base(base);
         }
         fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            let started = monotonic_ns().unwrap();
             let result = self.inner.present(scene);
+            let returned = monotonic_ns().unwrap();
             if let Some(bytes) = self.inner.bytes() {
                 self.presents.push(Sha256::digest(bytes).into());
             }
+            self.present_intervals.push((started, returned));
             result
         }
     }
@@ -10427,7 +10459,7 @@ exec="./launch"
             &mut self,
             host: &mut RecordingHost,
             _deadline: Deadline,
-            _latency_trace: Option<&LatencyTrace>,
+            latency_trace: Option<&LatencyTrace>,
         ) -> Result<DecodedActionPoll, String> {
             self.polls.push(PollRecord {
                 presents: host.presents.len(),
@@ -10447,7 +10479,7 @@ exec="./launch"
                 }
                 Some(Step::Press(action)) => DecodedActionPoll::Event {
                     action,
-                    ingress_us: None,
+                    ingress_us: latency_trace.map(LatencyTrace::now_us),
                 },
             })
         }
@@ -10465,6 +10497,15 @@ exec="./launch"
         authority: &FakeAuthority,
         steps: Vec<Step>,
     ) -> (ShellCore, Vec<[u8; 32]>, Vec<PollRecord>) {
+        let (core, presents, polls, _) = run_loop_scripted_with_trace(authority, steps, None);
+        (core, presents, polls)
+    }
+
+    fn run_loop_scripted_with_trace(
+        authority: &FakeAuthority,
+        steps: Vec<Step>,
+        trace_path: Option<&Path>,
+    ) -> (ShellCore, Vec<[u8; 32]>, Vec<PollRecord>, Vec<(u64, u64)>) {
         let dir = tempfile::tempdir().unwrap();
         let snapshot: CatalogSnapshot =
             serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
@@ -10481,6 +10522,7 @@ exec="./launch"
         let mut host = RecordingHost {
             inner: OffscreenHost::new(offscreen_metrics()),
             presents: Vec::new(),
+            present_intervals: Vec::new(),
         };
         let mut input = ScriptedInput {
             steps: steps.into(),
@@ -10494,6 +10536,10 @@ exec="./launch"
         // Preload the status the loop's periodic refresh reads, so that refresh never changes
         // state: every present these tests count is then caused by the session or the input.
         core.load_device_status(&status);
+        let mut trace = trace_path
+            .map(|path| LatencyTrace::open(path, "offscreen-test"))
+            .transpose()
+            .unwrap();
         run_interactive(
             &mut host,
             &mut input,
@@ -10513,10 +10559,57 @@ exec="./launch"
             JsonRemapStore::at(dir.path().join("remaps.json")),
             &mut None,
             "scripted",
-            &mut None,
+            &mut trace,
         )
         .unwrap();
-        (core, host.presents, input.polls)
+        drop(trace);
+        (core, host.presents, input.polls, host.present_intervals)
+    }
+
+    #[test]
+    fn successful_launch_trace_brackets_the_first_real_action_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("latency.jsonl");
+        use pf_session_authority::RpcEvent;
+        let authority = FakeAuthority::serve(
+            vec![(3, 1, RpcEvent::Starting), (3, 2, RpcEvent::Running)],
+            Vec::new(),
+        );
+
+        let (_, _, _, presents) = run_loop_scripted_with_trace(
+            &authority,
+            vec![Step::Press(ShellAction::Activate)],
+            Some(&trace_path),
+        );
+        let action = fs::read_to_string(trace_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["action"] == "Activate")
+            .expect("launch action trace");
+        assert_eq!(action["presented"], true);
+        assert_eq!(
+            presents.len(),
+            2,
+            "startup and launch must present once each"
+        );
+        let submit = action["t_render_submit_ns"].as_u64().unwrap();
+        let returned = action["t_present_return_ns"].as_u64().unwrap();
+        let startup = presents.first().unwrap();
+        let launch = presents.last().unwrap();
+
+        assert!(
+            startup.1 <= submit,
+            "startup present is not the action present"
+        );
+        assert!(
+            submit <= launch.0,
+            "submit stamp followed the launch present"
+        );
+        assert!(
+            launch.1 <= returned,
+            "return stamp preceded the launch return"
+        );
     }
 
     /// The device restoration after Menu (P5): the restarted shell finds session-1 ended with

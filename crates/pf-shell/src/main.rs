@@ -1694,7 +1694,7 @@ struct WaylandInteractiveInput {
 trait WaylandInputHost {
     fn is_closed(&self) -> bool;
     fn repeat_info(&self) -> Option<RepeatInfo>;
-    fn poll_key_event(&mut self) -> Option<KeyEvent>;
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String>;
 }
 
 #[cfg(feature = "wayland")]
@@ -1704,6 +1704,7 @@ struct CapturingWaylandHost {
     session_environment: Option<PathBuf>,
     session: Option<CompositorSession>,
     text_scale: f32,
+    theme_base: Option<pf_render::ThemeBase>,
 }
 
 #[cfg(feature = "wayland")]
@@ -1715,6 +1716,7 @@ impl CapturingWaylandHost {
             session_environment: None,
             session: None,
             text_scale: 1.0,
+            theme_base: None,
         }
     }
 
@@ -1729,7 +1731,33 @@ impl CapturingWaylandHost {
             session_environment: Some(session_environment),
             session: Some(session),
             text_scale: 1.0,
+            theme_base: None,
         }
+    }
+
+    fn reconnect_compositor(&mut self) -> Result<(), String> {
+        let environment = self
+            .session_environment
+            .as_deref()
+            .ok_or_else(|| "compositor reconnect is missing its session environment".to_owned())?;
+        let previous = self
+            .session
+            .as_ref()
+            .ok_or_else(|| "compositor reconnect is missing its session publication".to_owned())?;
+        let next = CompositorSession::reload(environment, previous)?;
+        self.inner
+            .reconnect_with_socket_and_transform(&next.wayland_display, BufferTransform::Rotate90)
+            .map_err(|error| error.to_string())?;
+        self.session = Some(next);
+        self.capture = OffscreenHost::new(self.inner.metrics());
+        self.capture
+            .set_text_scale(self.text_scale)
+            .map_err(|error| format!("render: {error:?}"))?;
+        if let Some(base) = self.theme_base {
+            self.inner.set_theme_base(base);
+            self.capture.set_theme_base(base);
+        }
+        Ok(())
     }
 }
 
@@ -1739,6 +1767,7 @@ impl FrameHost for CapturingWaylandHost {
         self.inner.metrics()
     }
     fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+        self.theme_base = Some(base);
         self.inner.set_theme_base(base);
         self.capture.set_theme_base(base);
     }
@@ -1746,24 +1775,8 @@ impl FrameHost for CapturingWaylandHost {
         let ack = match self.inner.present(scene) {
             Ok(ack) => ack,
             Err(PresentFailure::SurfaceLost) if self.session.is_some() => {
-                let environment = self
-                    .session_environment
-                    .as_deref()
-                    .expect("compositor session has an environment path");
-                let previous = self.session.as_ref().expect("compositor session");
-                let next = CompositorSession::reload(environment, previous)
+                self.reconnect_compositor()
                     .map_err(PresentFailure::Backend)?;
-                self.inner
-                    .reconnect_with_socket_and_transform(
-                        &next.wayland_display,
-                        BufferTransform::Rotate90,
-                    )
-                    .map_err(|error| PresentFailure::Backend(error.to_string()))?;
-                self.session = Some(next);
-                self.capture = OffscreenHost::new(self.inner.metrics());
-                self.capture
-                    .set_text_scale(self.text_scale)
-                    .map_err(|error| PresentFailure::Backend(format!("render: {error:?}")))?;
                 self.inner.present(scene)?
             }
             Err(error) => return Err(error),
@@ -1801,8 +1814,17 @@ impl WaylandInputHost for CapturingWaylandHost {
     fn repeat_info(&self) -> Option<RepeatInfo> {
         self.inner.repeat_info()
     }
-    fn poll_key_event(&mut self) -> Option<KeyEvent> {
-        self.inner.poll_key_event()
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+        match self.inner.poll_key_event_checked() {
+            Ok(event) => Ok(event),
+            Err(_error) if self.session.is_some() => {
+                self.reconnect_compositor()?;
+                self.inner
+                    .poll_key_event_checked()
+                    .map_err(|error| format!("keyboard after compositor reconnect: {error}"))
+            }
+            Err(error) => Err(format!("keyboard: {error}")),
+        }
     }
 }
 
@@ -1826,8 +1848,8 @@ impl WaylandInputHost for WaylandHost {
         self.repeat_info()
     }
 
-    fn poll_key_event(&mut self) -> Option<KeyEvent> {
-        self.poll_key_event()
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+        WaylandHost::poll_key_event_checked(self).map_err(|error| format!("keyboard: {error}"))
     }
 }
 
@@ -1871,7 +1893,7 @@ impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
             Duration::ZERO
         };
         let now = self.started.elapsed();
-        while let Some(event) = host.poll_key_event() {
+        while let Some(event) = host.poll_key_event()? {
             let action = effective_keyboard_action(&self.map, event.key, event.keysym);
             let repeat_action = (repeat_info.rate > 0 && repeat_info.delay_ms >= 0)
                 .then(|| action.clone())
@@ -7759,6 +7781,7 @@ mod durable_tests {
         closed: bool,
         events: VecDeque<KeyEvent>,
         repeat_info: RepeatInfo,
+        poll_error: Option<String>,
     }
 
     #[cfg(feature = "wayland")]
@@ -7771,8 +7794,11 @@ mod durable_tests {
             Some(self.repeat_info)
         }
 
-        fn poll_key_event(&mut self) -> Option<KeyEvent> {
-            self.events.pop_front()
+        fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+            if let Some(error) = self.poll_error.take() {
+                return Err(error);
+            }
+            Ok(self.events.pop_front())
         }
     }
 
@@ -8076,6 +8102,7 @@ mod durable_tests {
                 rate: 10,
                 delay_ms: 300,
             },
+            poll_error: None,
         };
 
         assert_eq!(
@@ -8104,6 +8131,28 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         });
         assert!(!present_interactive(&mut frame_host, &mut core, "A Open").unwrap());
+    }
+
+    #[cfg(feature = "wayland")]
+    #[test]
+    fn wayland_keyboard_disconnect_is_not_treated_as_idle() {
+        let mut input = WaylandInteractiveInput::new(effective_map());
+        let mut host = TestWaylandHost {
+            closed: false,
+            events: VecDeque::new(),
+            repeat_info: RepeatInfo {
+                rate: 10,
+                delay_ms: 300,
+            },
+            poll_error: Some("keyboard read: connection reset".into()),
+        };
+
+        assert_eq!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
+                .unwrap_err(),
+            "keyboard read: connection reset"
+        );
     }
 
     #[cfg(feature = "wayland")]
@@ -8142,6 +8191,7 @@ mod durable_tests {
             closed: false,
             events: VecDeque::from([key_event(1, 0xff52, KeyState::Pressed, Key::Up)]),
             repeat_info: info,
+            poll_error: None,
         };
 
         assert!(matches!(

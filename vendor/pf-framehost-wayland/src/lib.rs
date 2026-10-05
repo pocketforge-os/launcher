@@ -552,6 +552,7 @@ pub struct WaylandHost {
     next_buffer_id: u64,
     socket_path: Option<std::path::PathBuf>,
     buffer_transform: BufferTransform,
+    theme_base: ThemeBase,
 }
 
 impl WaylandHost {
@@ -641,6 +642,7 @@ impl WaylandHost {
             next_buffer_id: 1,
             socket_path,
             buffer_transform,
+            theme_base: ThemeBase::Dusk,
         })
     }
 
@@ -660,6 +662,7 @@ impl WaylandHost {
         replacement
             .set_text_scale(self.text_scale)
             .expect("the stored text scale was previously validated");
+        replacement.set_theme_base(self.theme_base);
         #[cfg(feature = "keyboard")]
         {
             transfer_pressed_key_releases(&mut self.state, &mut replacement.state);
@@ -688,6 +691,7 @@ impl WaylandHost {
         replacement
             .set_text_scale(self.text_scale)
             .expect("the stored text scale was previously validated");
+        replacement.set_theme_base(self.theme_base);
         #[cfg(feature = "keyboard")]
         transfer_pressed_key_releases(&mut self.state, &mut replacement.state);
         *self = replacement;
@@ -714,8 +718,18 @@ impl WaylandHost {
     /// A keyboard leave/disconnect delivers synthetic releases for all held keys.
     #[cfg(feature = "keyboard")]
     pub fn poll_key_event(&mut self) -> Option<KeyEvent> {
-        self.pump_events_nonblocking();
-        self.state.poll_key_event()
+        self.poll_key_event_checked().ok().flatten()
+    }
+
+    /// Return the next keyboard transition and report a dead Wayland connection.
+    ///
+    /// The compatibility [`Self::poll_key_event`] API intentionally keeps its old
+    /// best-effort shape. Interactive clients that own reconnect policy must use this
+    /// checked form so an idle connection loss cannot be mistaken for an idle keyboard.
+    #[cfg(feature = "keyboard")]
+    pub fn poll_key_event_checked(&mut self) -> Result<Option<KeyEvent>, WaylandHostError> {
+        self.pump_events_nonblocking()?;
+        Ok(self.state.poll_key_event())
     }
 
     /// Return the most recently advertised compositor repeat settings.
@@ -725,13 +739,15 @@ impl WaylandHost {
     }
 
     #[cfg(feature = "keyboard")]
-    fn pump_events_nonblocking(&mut self) {
-        if self.queue.dispatch_pending(&mut self.state).is_err() {
-            return;
-        }
+    fn pump_events_nonblocking(&mut self) -> Result<(), WaylandHostError> {
+        self.queue
+            .dispatch_pending(&mut self.state)
+            .map_err(|error| WaylandHostError::Protocol(format!("keyboard dispatch: {error}")))?;
         let Some(guard) = self.connection.prepare_read() else {
-            let _ = self.queue.dispatch_pending(&mut self.state);
-            return;
+            self.queue.dispatch_pending(&mut self.state).map_err(|error| {
+                WaylandHostError::Protocol(format!("keyboard dispatch: {error}"))
+            })?;
+            return Ok(());
         };
         let backend = self.connection.backend();
         let mut poll_fd = libc::pollfd {
@@ -741,9 +757,15 @@ impl WaylandHost {
         };
         // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
         let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) } > 0;
-        if ready && guard.read().is_ok() {
-            let _ = self.queue.dispatch_pending(&mut self.state);
+        if ready {
+            guard
+                .read()
+                .map_err(|error| WaylandHostError::Protocol(format!("keyboard read: {error}")))?;
+            self.queue
+                .dispatch_pending(&mut self.state)
+                .map_err(|error| WaylandHostError::Protocol(format!("keyboard dispatch: {error}")))?;
         }
+        Ok(())
     }
 
     /// Synchronize with the compositor, applying configure/close/buffer-release events.
@@ -883,6 +905,7 @@ impl FrameHost for WaylandHost {
 
     fn set_theme_base(&mut self, base: ThemeBase) {
         set_renderer_theme_base(&mut self.renderer, base);
+        self.theme_base = base;
     }
 
     fn present(&mut self, scene: &Scene) -> PresentResult {

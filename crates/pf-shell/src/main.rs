@@ -9,10 +9,12 @@ use pf_catalog::{
 };
 use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
-use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
+use pf_framehost_wayland::{BufferTransform, Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 #[cfg(feature = "desktop-sim")]
 use pf_ports::Clock;
+#[cfg(feature = "wayland")]
+use pf_ports::PresentFailure;
 use pf_ports::{
     AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Deadline,
     EffectivePreference, FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort,
@@ -59,6 +61,10 @@ use std::{
 };
 
 mod automation;
+#[cfg(feature = "wayland")]
+mod compositor_session;
+#[cfg(feature = "wayland")]
+use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
@@ -196,7 +202,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
+const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
 #[cfg(feature = "desktop-sim")]
 const DESKTOP_SIM_AUTHORITY_HELP: &str =
     "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
@@ -874,7 +880,7 @@ fn main() -> Result<(), String> {
     }
     let interactive_mode = args
         .iter()
-        .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
+        .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland" | "--compositor"));
     let fixture_mode = args.iter().any(|a| {
         matches!(
             a.as_str(),
@@ -1091,6 +1097,45 @@ fn main() -> Result<(), String> {
             JsonRemapStore::at(remap_path),
             &mut automation,
             "evdev",
+            &mut latency_trace,
+        );
+    }
+    #[cfg(feature = "wayland")]
+    if args.iter().any(|a| a == "--compositor") {
+        let environment = value(&args, "--session-environment").unwrap_or(DEFAULT_ENVIRONMENT);
+        let environment_path = PathBuf::from(environment);
+        let session = CompositorSession::load(&environment_path)?;
+        let host = WaylandHost::connect_with_socket_and_transform(
+            &session.wayland_display,
+            1280,
+            720,
+            BufferTransform::Rotate90,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut host = CapturingWaylandHost::new_compositor(host, environment_path, session);
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        let mut automation = automation_server(&args)?;
+        let mut input = WaylandInteractiveInput::new(glyphs.clone());
+        let mut latency_trace = latency_trace("compositor")?;
+        return run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer,
+            preferences,
+            power,
+            glyphs,
+            catalog.expect("compositor catalog"),
+            &art_policy,
+            Path::new(session_socket),
+            network,
+            time,
+            transfer,
+            device_status,
+            &state_dir,
+            JsonRemapStore::at(remap_path),
+            &mut automation,
+            "wayland",
             &mut latency_trace,
         );
     }
@@ -1651,13 +1696,18 @@ struct WaylandInteractiveInput {
 trait WaylandInputHost {
     fn is_closed(&self) -> bool;
     fn repeat_info(&self) -> Option<RepeatInfo>;
-    fn poll_key_event(&mut self) -> Option<KeyEvent>;
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String>;
 }
 
 #[cfg(feature = "wayland")]
 struct CapturingWaylandHost {
     inner: WaylandHost,
     capture: OffscreenHost,
+    session_environment: Option<PathBuf>,
+    session: Option<CompositorSession>,
+    text_scale: f32,
+    theme_base: Option<pf_render::ThemeBase>,
+    reconnect_redraw_pending: bool,
 }
 
 #[cfg(feature = "wayland")]
@@ -1666,7 +1716,54 @@ impl CapturingWaylandHost {
         Self {
             capture: OffscreenHost::new(inner.metrics()),
             inner,
+            session_environment: None,
+            session: None,
+            text_scale: 1.0,
+            theme_base: None,
+            reconnect_redraw_pending: false,
         }
+    }
+
+    fn new_compositor(
+        inner: WaylandHost,
+        session_environment: PathBuf,
+        session: CompositorSession,
+    ) -> Self {
+        Self {
+            capture: OffscreenHost::new(inner.metrics()),
+            inner,
+            session_environment: Some(session_environment),
+            session: Some(session),
+            text_scale: 1.0,
+            theme_base: None,
+            reconnect_redraw_pending: false,
+        }
+    }
+
+    fn reconnect_compositor(&mut self) -> Result<(), String> {
+        let environment = self
+            .session_environment
+            .as_deref()
+            .ok_or_else(|| "compositor reconnect is missing its session environment".to_owned())?;
+        let previous = self
+            .session
+            .as_ref()
+            .ok_or_else(|| "compositor reconnect is missing its session publication".to_owned())?;
+        let next = CompositorSession::reload(environment, previous)?;
+        self.inner
+            .reconnect_with_socket_and_transform(&next.wayland_display, BufferTransform::Rotate90)
+            .map_err(|error| error.to_string())?;
+        self.session = Some(next);
+        self.capture = OffscreenHost::new(self.inner.metrics());
+        self.capture
+            .set_text_scale(self.text_scale)
+            .map_err(|error| format!("render: {error:?}"))?;
+        if let Some(base) = self.theme_base {
+            self.inner.set_theme_base(base);
+            self.capture.set_theme_base(base);
+        }
+        self.reconnect_redraw_pending = true;
+        Ok(())
     }
 }
 
@@ -1676,12 +1773,22 @@ impl FrameHost for CapturingWaylandHost {
         self.inner.metrics()
     }
     fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+        self.theme_base = Some(base);
         self.inner.set_theme_base(base);
         self.capture.set_theme_base(base);
     }
     fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
-        let ack = self.inner.present(scene)?;
+        let ack = match self.inner.present(scene) {
+            Ok(ack) => ack,
+            Err(PresentFailure::SurfaceLost) if self.session.is_some() => {
+                self.reconnect_compositor()
+                    .map_err(PresentFailure::Backend)?;
+                self.inner.present(scene)?
+            }
+            Err(error) => return Err(error),
+        };
         self.capture.present(scene)?;
+        self.reconnect_redraw_pending = false;
         Ok(ack)
     }
 }
@@ -1694,13 +1801,18 @@ impl RenderedFrameHost for CapturingWaylandHost {
             .map_err(|e| format!("render: {e:?}"))?;
         self.capture
             .set_text_scale(factor)
-            .map_err(|e| format!("render: {e:?}"))
+            .map_err(|e| format!("render: {e:?}"))?;
+        self.text_scale = factor;
+        Ok(())
     }
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.capture.frame().map(|f| f.notes.as_slice())
     }
     fn raster_frame(&self) -> Option<&RasterFrame> {
         self.capture.frame()
+    }
+    fn reconnect_redraw_pending(&self) -> bool {
+        self.reconnect_redraw_pending
     }
 }
 
@@ -1712,8 +1824,17 @@ impl WaylandInputHost for CapturingWaylandHost {
     fn repeat_info(&self) -> Option<RepeatInfo> {
         self.inner.repeat_info()
     }
-    fn poll_key_event(&mut self) -> Option<KeyEvent> {
-        self.inner.poll_key_event()
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+        match self.inner.poll_key_event_checked() {
+            Ok(event) => Ok(event),
+            Err(_error) if self.session.is_some() => {
+                self.reconnect_compositor()?;
+                self.inner
+                    .poll_key_event_checked()
+                    .map_err(|error| format!("keyboard after compositor reconnect: {error}"))
+            }
+            Err(error) => Err(format!("keyboard: {error}")),
+        }
     }
 }
 
@@ -1737,8 +1858,8 @@ impl WaylandInputHost for WaylandHost {
         self.repeat_info()
     }
 
-    fn poll_key_event(&mut self) -> Option<KeyEvent> {
-        self.poll_key_event()
+    fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+        WaylandHost::poll_key_event_checked(self).map_err(|error| format!("keyboard: {error}"))
     }
 }
 
@@ -1782,7 +1903,7 @@ impl<H: WaylandInputHost> InteractiveInput<H> for WaylandInteractiveInput {
             Duration::ZERO
         };
         let now = self.started.elapsed();
-        while let Some(event) = host.poll_key_event() {
+        while let Some(event) = host.poll_key_event()? {
             let action = effective_keyboard_action(&self.map, event.key, event.keysym);
             let repeat_action = (repeat_info.rate > 0 && repeat_info.delay_ms >= 0)
                 .then(|| action.clone())
@@ -1904,6 +2025,13 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             core.load_device_status(device_status);
             next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
         }
+        present_pending_reconnect_redraw(
+            host,
+            core,
+            &activate,
+            &mut frames,
+            &mut presented_revision,
+        )?;
         let DecodedActionPoll::Event { action, ingress_us } = poll else {
             if matches!(poll, DecodedActionPoll::Closed) {
                 return Ok(());
@@ -4317,6 +4445,9 @@ trait RenderedFrameHost: FrameHost {
     fn set_text_scale(&mut self, factor: f32) -> Result<(), String>;
     fn render_notes(&self) -> Option<&[RenderNote]>;
     fn raster_frame(&self) -> Option<&RasterFrame>;
+    fn reconnect_redraw_pending(&self) -> bool {
+        false
+    }
 }
 
 impl RenderedFrameHost for OffscreenHost {
@@ -4389,6 +4520,24 @@ fn present_interactive(
         return Ok(false);
     };
     present_scene(host, core, prompt, &scene)?;
+    Ok(true)
+}
+
+fn present_pending_reconnect_redraw(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+) -> Result<bool, String> {
+    if !host.reconnect_redraw_pending() {
+        return Ok(false);
+    }
+    if !present_interactive(host, core, prompt)? {
+        return Ok(false);
+    }
+    frames.increment();
+    *presented_revision = core.revision();
     Ok(true)
 }
 
@@ -4500,7 +4649,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 14] = [
+    const VALUE_FLAGS: [&str; 15] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -4511,6 +4660,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--out",
         "--platform-capabilities",
         "--rotate",
+        "--session-environment",
         "--session-socket",
         "--state-dir",
         "--surface",
@@ -4546,11 +4696,37 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         return Err("usage error: --rotate requires --fbdev".into());
     }
     #[cfg(not(feature = "wayland"))]
-    if args.iter().any(|arg| arg == "--wayland") {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--wayland" | "--compositor"))
+    {
         return Err(
-            "--wayland requires a build with the 'wayland' feature (cargo build --features wayland)"
+            "--wayland and --compositor require a build with the 'wayland' feature (cargo build --features wayland)"
                 .into(),
         );
+    }
+    let interactive_modes = args
+        .iter()
+        .filter(|arg| matches!(arg.as_str(), "--fbdev" | "--wayland" | "--compositor"))
+        .count();
+    if interactive_modes > 1 {
+        return Err(
+            "usage error: --fbdev, --wayland, and --compositor are mutually exclusive".into(),
+        );
+    }
+    if value(args, "--session-environment").is_some()
+        && !args.iter().any(|arg| arg == "--compositor")
+    {
+        return Err("usage error: --session-environment requires --compositor".into());
+    }
+    if args.iter().any(|arg| arg == "--compositor") {
+        for forbidden in ["--device", "--input", "--rotate", "--sim-frame"] {
+            if args.iter().any(|arg| arg == forbidden) {
+                return Err(format!(
+                    "usage error: --compositor cannot use {forbidden}; compositor owns presentation and input"
+                ));
+            }
+        }
     }
     if args.iter().any(|arg| arg == "--fbdev")
         && args.iter().any(|arg| arg == "--settings-evidence")
@@ -4572,9 +4748,11 @@ fn validate_automation_gate(args: &[String], gate: Option<&str>) -> Result<(), S
     if value(args, "--automation-socket").is_some()
         && !args
             .iter()
-            .any(|arg| matches!(arg.as_str(), "--wayland" | "--fbdev"))
+            .any(|arg| matches!(arg.as_str(), "--wayland" | "--fbdev" | "--compositor"))
     {
-        return Err("usage error: --automation-socket requires --wayland or --fbdev".into());
+        return Err(
+            "usage error: --automation-socket requires --wayland, --compositor, or --fbdev".into(),
+        );
     }
     Ok(())
 }
@@ -6444,6 +6622,101 @@ mod durable_tests {
         }
     }
 
+    struct PendingRedrawHost {
+        inner: OffscreenHost,
+        pending: bool,
+        presents: usize,
+    }
+
+    impl FrameHost for PendingRedrawHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.inner.metrics()
+        }
+
+        fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+            self.inner.set_theme_base(base);
+        }
+
+        fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            let result = self.inner.present(scene);
+            if result.is_ok() {
+                self.pending = false;
+            }
+            self.presents += 1;
+            result
+        }
+    }
+
+    impl RenderedFrameHost for PendingRedrawHost {
+        fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+            RenderedFrameHost::set_text_scale(&mut self.inner, factor)
+        }
+
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            self.inner.render_notes()
+        }
+
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            self.inner.raster_frame()
+        }
+
+        fn reconnect_redraw_pending(&self) -> bool {
+            self.pending
+        }
+    }
+
+    #[test]
+    fn reconnect_redraw_presents_a_nonblank_initial_frame_without_input_or_damage() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = PendingRedrawHost {
+            inner: OffscreenHost::new(SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Insets::default(),
+                orientation: Orientation::Landscape,
+            }),
+            pending: true,
+            presents: 0,
+        };
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+
+        assert!(
+            present_pending_reconnect_redraw(
+                &mut host,
+                &mut core,
+                "A Open",
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(host.presents, 1);
+        assert!(!host.pending);
+        assert!(
+            host.inner
+                .bytes()
+                .expect("reconnect redraw should produce pixels")
+                .iter()
+                .any(|byte| *byte != 0)
+        );
+        assert!(
+            !present_pending_reconnect_redraw(
+                &mut host,
+                &mut core,
+                "A Open",
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(host.presents, 1);
+    }
+
     #[test]
     fn renderer_receives_loaded_and_changed_text_scale() {
         let snapshot: CatalogSnapshot =
@@ -6654,7 +6927,7 @@ mod durable_tests {
             .iter()
             .filter(|node| node.id.as_str().starts_with("search-result-"))
             .collect::<Vec<_>>();
-        assert!(!rows.is_empty());
+        assert_ne!(rows.len(), 0);
         assert_eq!(rows.len(), region.children.len());
         assert!(
             root.children
@@ -7641,6 +7914,7 @@ mod durable_tests {
         closed: bool,
         events: VecDeque<KeyEvent>,
         repeat_info: RepeatInfo,
+        poll_error: Option<String>,
     }
 
     #[cfg(feature = "wayland")]
@@ -7653,8 +7927,11 @@ mod durable_tests {
             Some(self.repeat_info)
         }
 
-        fn poll_key_event(&mut self) -> Option<KeyEvent> {
-            self.events.pop_front()
+        fn poll_key_event(&mut self) -> Result<Option<KeyEvent>, String> {
+            if let Some(error) = self.poll_error.take() {
+                return Err(error);
+            }
+            Ok(self.events.pop_front())
         }
     }
 
@@ -7802,10 +8079,9 @@ mod durable_tests {
             Duration::from_millis(300),
         );
         let interval = Duration::from_millis(100);
-        assert!(
-            scheduler
-                .due(Duration::from_millis(299), interval)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(299), interval),
+            [] as [pf_ports::ShellAction; 0]
         );
         // A late check yields one repeat, not the three missed intervals (tsp-f3fm.227).
         assert_eq!(
@@ -7819,7 +8095,10 @@ mod durable_tests {
             Duration::from_millis(501),
             Duration::from_millis(300),
         );
-        assert!(scheduler.due(Duration::from_secs(1), interval).is_empty());
+        assert_eq!(
+            scheduler.due(Duration::from_secs(1), interval),
+            [] as [pf_ports::ShellAction; 0]
+        );
     }
 
     #[test]
@@ -7840,10 +8119,9 @@ mod durable_tests {
             EVDEV_REPEAT_DELAY,
         );
 
-        assert!(
-            scheduler
-                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL),
+            []
         );
         // A check that arrives late (160 ms past the delay) yields ONE repeat, never a replay
         // of the missed intervals (tsp-f3fm.227); the cadence then resumes from that check.
@@ -7851,10 +8129,9 @@ mod durable_tests {
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
             vec![ShellAction::Move(pf_scene::AxisMove::Up)]
         );
-        assert!(
-            scheduler
-                .due(Duration::from_millis(639), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(639), EVDEV_REPEAT_INTERVAL),
+            []
         );
         assert_eq!(
             scheduler.due(Duration::from_millis(640), EVDEV_REPEAT_INTERVAL),
@@ -7868,10 +8145,9 @@ mod durable_tests {
             Duration::from_millis(561),
             EVDEV_REPEAT_DELAY,
         );
-        assert!(
-            scheduler
-                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL),
+            []
         );
 
         scheduler.transition(
@@ -7882,10 +8158,9 @@ mod durable_tests {
             EVDEV_REPEAT_DELAY,
         );
         scheduler.clear();
-        assert!(
-            scheduler
-                .due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL),
+            []
         );
     }
 
@@ -7958,6 +8233,7 @@ mod durable_tests {
                 rate: 10,
                 delay_ms: 300,
             },
+            poll_error: None,
         };
 
         assert_eq!(
@@ -7986,6 +8262,28 @@ mod durable_tests {
             orientation: Orientation::Landscape,
         });
         assert!(!present_interactive(&mut frame_host, &mut core, "A Open").unwrap());
+    }
+
+    #[cfg(feature = "wayland")]
+    #[test]
+    fn wayland_keyboard_disconnect_is_not_treated_as_idle() {
+        let mut input = WaylandInteractiveInput::new(effective_map());
+        let mut host = TestWaylandHost {
+            closed: false,
+            events: VecDeque::new(),
+            repeat_info: RepeatInfo {
+                rate: 10,
+                delay_ms: 300,
+            },
+            poll_error: Some("keyboard read: connection reset".into()),
+        };
+
+        assert_eq!(
+            input
+                .next_action(&mut host, Deadline(MonotonicTime::ZERO), None)
+                .unwrap_err(),
+            "keyboard read: connection reset"
+        );
     }
 
     #[cfg(feature = "wayland")]
@@ -8024,6 +8322,7 @@ mod durable_tests {
             closed: false,
             events: VecDeque::from([key_event(1, 0xff52, KeyState::Pressed, Key::Up)]),
             repeat_info: info,
+            poll_error: None,
         };
 
         assert!(matches!(
@@ -8049,11 +8348,11 @@ mod durable_tests {
                 .unwrap(),
             DecodedActionPoll::DeadlineReached
         );
-        assert!(
+        assert_eq!(
             input
                 .repeat
-                .due(Duration::from_secs(2), Duration::from_millis(100))
-                .is_empty()
+                .due(Duration::from_secs(2), Duration::from_millis(100)),
+            []
         );
     }
 
@@ -8062,11 +8361,9 @@ mod durable_tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
         let missing_provider = installed_app_provider(&missing, dir.path().join("favorites.json"));
-        assert!(
-            catalog_snapshot(&missing_provider, &missing)
-                .unwrap()
-                .items
-                .is_empty()
+        assert_eq!(
+            catalog_snapshot(&missing_provider, &missing).unwrap().items,
+            []
         );
 
         let not_a_directory = dir.path().join("catalog-file");
@@ -8570,6 +8867,39 @@ exec="./launch"
         assert!(error.contains("--settings-evidence"));
     }
 
+    #[cfg(feature = "wayland")]
+    #[test]
+    fn compositor_rejects_legacy_ownership_and_fixture_paths() {
+        for forbidden in ["--device", "--input", "--rotate", "--sim-frame"] {
+            let args = vec!["--compositor".into(), forbidden.into()];
+            let error = validate_args(&args).unwrap_err();
+            assert!(error.contains(forbidden), "{forbidden}: {error}");
+        }
+    }
+
+    #[cfg(feature = "wayland")]
+    #[test]
+    fn compositor_session_override_is_scoped_to_compositor_mode() {
+        let args = vec!["--session-environment".into(), "/tmp/environment".into()];
+        let error = validate_args(&args).unwrap_err();
+        assert!(error.contains("requires --compositor"));
+
+        let args = vec![
+            "--compositor".into(),
+            "--session-environment".into(),
+            "/tmp/environment".into(),
+        ];
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "wayland")]
+    fn compositor_and_legacy_display_modes_are_exclusive() {
+        let args = vec!["--compositor".into(), "--fbdev".into()];
+        let error = validate_args(&args).unwrap_err();
+        assert!(error.contains("mutually exclusive"));
+    }
+
     #[test]
     fn interactive_device_fixtures_are_explicit_and_validate() {
         assert!(!use_device_fixtures(&[], false));
@@ -8865,7 +9195,7 @@ exec="./launch"
     fn wayland_flag_requires_wayland_feature() {
         let error = validate_args(&["--wayland".into()]).unwrap_err();
 
-        assert!(error.contains("requires a build with the 'wayland' feature"));
+        assert!(error.contains("require a build with the 'wayland' feature"));
     }
 
     impl FavoriteCatalog for AlwaysConflictingFavorites {
@@ -9282,7 +9612,7 @@ exec="./launch"
             core.art_treatment("ridgeline"),
             Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
         ));
-        assert!(host.frame().unwrap().notes.is_empty());
+        assert_eq!(host.frame().unwrap().notes, []);
     }
 
     #[test]
@@ -9590,7 +9920,7 @@ exec="./launch"
         assert!(
             validate_automation_gate(&noninteractive, Some("1"))
                 .unwrap_err()
-                .contains("requires --wayland or --fbdev")
+                .contains("requires --wayland, --compositor, or --fbdev")
         );
     }
 
@@ -11042,27 +11372,24 @@ exec="./launch"
         let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
         let mut scheduler = KeyRepeatScheduler::default();
         feed(&mut source, &mut scheduler, Duration::ZERO);
-        assert!(
-            scheduler
-                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL),
+            []
         );
         // Late checks yield one repeat each, never a burst of the missed intervals.
         assert_eq!(
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
             vec![ShellAction::Move(pf_scene::AxisMove::Down)]
         );
-        assert!(
-            scheduler
-                .due(Duration::from_millis(600), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(600), EVDEV_REPEAT_INTERVAL),
+            []
         );
         feed(&mut source, &mut scheduler, Duration::from_millis(561));
         assert!(!scheduler.is_active(), "centre releases the held direction");
-        assert!(
-            scheduler
-                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL),
+            []
         );
     }
 

@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(n.bounds.height, 7.0);
         assert!(!n.focused);
         assert!(n.selected);
-        assert!(n.type_role.is_empty());
+        assert_eq!(n.type_role, "");
     }
 
     #[test]

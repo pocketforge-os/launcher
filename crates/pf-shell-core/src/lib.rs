@@ -10845,7 +10845,7 @@ mod tests {
             })
             .copied()
             .collect::<Vec<_>>();
-        assert!(!comfort_rows.is_empty());
+        assert_ne!(comfort_rows.len(), 0);
         assert!(comfort_rows.iter().all(|row| {
             row.style_token == STATE_REST_SURFACE_TOKEN
                 && row.corner_radius == RADIUS_M
@@ -13569,8 +13569,8 @@ mod tests {
         );
         let prompts = node_by_id(populated.root(), "prompts").unwrap();
         assert_eq!(prompts.role, Role::Group);
-        assert!(prompts.accessible_label.is_empty());
-        assert!(!prompts.children.is_empty());
+        assert_eq!(prompts.accessible_label, "");
+        assert_ne!(prompts.children, []);
 
         core.set_search_query("no match");
         let empty = core.scene(metrics, "A Open     PF Safe Return").unwrap();
@@ -17463,7 +17463,7 @@ mod tests {
             .enumerate()
             .filter(|(_, node)| has_library_title(node))
             .collect::<Vec<_>>();
-        assert!(!label_roots.is_empty());
+        assert_ne!(label_roots, []);
         assert!(label_roots.iter().all(|(index, _)| *index < fade_index));
         assert!(fade_index < prompts_index);
         assert!(
@@ -17482,13 +17482,13 @@ mod tests {
         for (_, card) in &label_roots {
             collect_text(card, &mut label_ink);
         }
-        assert!(!footer_ink.is_empty());
+        assert_ne!(footer_ink.len(), 0);
         let title_ink = label_ink
             .iter()
             .filter(|node| node.id.as_str().starts_with("library-title-"))
             .collect::<Vec<_>>();
         assert_eq!(title_ink.len(), label_roots.len());
-        assert!(!title_ink.is_empty());
+        assert_ne!(title_ink.len(), 0);
     }
 
     #[test]
@@ -19180,7 +19180,7 @@ mod tests {
         assert_eq!(prompt_labels(&settings), ["B", "Back", "A", "Change"]);
         let prompts = node_by_id(settings.root(), "prompts").unwrap();
         assert_eq!(prompts.role, Role::Group);
-        assert!(prompts.accessible_label.is_empty());
+        assert_eq!(prompts.accessible_label, "");
     }
 
     #[test]
@@ -20241,7 +20241,7 @@ mod tests {
                 "{id} should degrade without capabilities"
             );
             assert_eq!(row.action, None);
-            assert!(!row.children.is_empty());
+            assert_ne!(row.children, []);
             for child in &row.children {
                 assert_eq!(
                     child.ink_token.as_deref(),

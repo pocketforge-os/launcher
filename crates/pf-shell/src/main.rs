@@ -6927,7 +6927,7 @@ mod durable_tests {
             .iter()
             .filter(|node| node.id.as_str().starts_with("search-result-"))
             .collect::<Vec<_>>();
-        assert!(!rows.is_empty());
+        assert_ne!(rows.len(), 0);
         assert_eq!(rows.len(), region.children.len());
         assert!(
             root.children
@@ -8117,10 +8117,9 @@ mod durable_tests {
             EVDEV_REPEAT_DELAY,
         );
 
-        assert!(
-            scheduler
-                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL),
+            []
         );
         // A check that arrives late (160 ms past the delay) yields ONE repeat, never a replay
         // of the missed intervals (tsp-f3fm.227); the cadence then resumes from that check.
@@ -8128,10 +8127,9 @@ mod durable_tests {
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
             vec![ShellAction::Move(pf_scene::AxisMove::Up)]
         );
-        assert!(
-            scheduler
-                .due(Duration::from_millis(639), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(639), EVDEV_REPEAT_INTERVAL),
+            []
         );
         assert_eq!(
             scheduler.due(Duration::from_millis(640), EVDEV_REPEAT_INTERVAL),
@@ -8145,10 +8143,9 @@ mod durable_tests {
             Duration::from_millis(561),
             EVDEV_REPEAT_DELAY,
         );
-        assert!(
-            scheduler
-                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL),
+            []
         );
 
         scheduler.transition(
@@ -8159,10 +8156,9 @@ mod durable_tests {
             EVDEV_REPEAT_DELAY,
         );
         scheduler.clear();
-        assert!(
-            scheduler
-                .due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(3), EVDEV_REPEAT_INTERVAL),
+            []
         );
     }
 
@@ -8350,11 +8346,11 @@ mod durable_tests {
                 .unwrap(),
             DecodedActionPoll::DeadlineReached
         );
-        assert!(
+        assert_eq!(
             input
                 .repeat
-                .due(Duration::from_secs(2), Duration::from_millis(100))
-                .is_empty()
+                .due(Duration::from_secs(2), Duration::from_millis(100)),
+            []
         );
     }
 
@@ -8363,11 +8359,9 @@ mod durable_tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
         let missing_provider = installed_app_provider(&missing, dir.path().join("favorites.json"));
-        assert!(
-            catalog_snapshot(&missing_provider, &missing)
-                .unwrap()
-                .items
-                .is_empty()
+        assert_eq!(
+            catalog_snapshot(&missing_provider, &missing).unwrap().items,
+            []
         );
 
         let not_a_directory = dir.path().join("catalog-file");
@@ -9613,7 +9607,7 @@ exec="./launch"
             core.art_treatment("ridgeline"),
             Some(pf_shell_core::ArtTreatment::EditionPlate { .. })
         ));
-        assert!(host.frame().unwrap().notes.is_empty());
+        assert_eq!(host.frame().unwrap().notes, []);
     }
 
     #[test]
@@ -11373,27 +11367,24 @@ exec="./launch"
         let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
         let mut scheduler = KeyRepeatScheduler::default();
         feed(&mut source, &mut scheduler, Duration::ZERO);
-        assert!(
-            scheduler
-                .due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(399), EVDEV_REPEAT_INTERVAL),
+            []
         );
         // Late checks yield one repeat each, never a burst of the missed intervals.
         assert_eq!(
             scheduler.due(Duration::from_millis(560), EVDEV_REPEAT_INTERVAL),
             vec![ShellAction::Move(pf_scene::AxisMove::Down)]
         );
-        assert!(
-            scheduler
-                .due(Duration::from_millis(600), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(600), EVDEV_REPEAT_INTERVAL),
+            []
         );
         feed(&mut source, &mut scheduler, Duration::from_millis(561));
         assert!(!scheduler.is_active(), "centre releases the held direction");
-        assert!(
-            scheduler
-                .due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_secs(2), EVDEV_REPEAT_INTERVAL),
+            []
         );
     }
 

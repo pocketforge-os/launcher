@@ -13,16 +13,18 @@ use pf_framehost_wayland::{BufferTransform, Key, KeyEvent, KeyState, RepeatInfo,
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 #[cfg(feature = "desktop-sim")]
 use pf_ports::Clock;
+#[cfg(feature = "wayland")]
+use pf_ports::PresentFailure;
 use pf_ports::{
     AppliedNetworkEnabled, AppliedTransferState, AppliedValue, ChangeAuthority, Deadline,
     EffectivePreference, FakeNetworkPort, FakePowerPort, FakePreferencePort, FakeTimePort,
     FakeTransferPort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime, NetworkError,
     NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
     PowerError, PowerPort, PowerRequestResult, PreferenceChange, PreferenceChangeResult,
-    PreferenceError, PreferenceKey, PreferencePoll, PreferencePort, PreferenceValue,
-    PresentFailure, SessionError, SessionEvent, SessionPoll, SessionPort, ShellAction, Support,
-    TerminalReceipt, TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort,
-    TransferService, TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
+    PreferenceError, PreferenceKey, PreferencePoll, PreferencePort, PreferenceValue, SessionError,
+    SessionEvent, SessionPoll, SessionPort, ShellAction, Support, TerminalReceipt,
+    TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort, TransferService,
+    TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -1705,6 +1707,7 @@ struct CapturingWaylandHost {
     session: Option<CompositorSession>,
     text_scale: f32,
     theme_base: Option<pf_render::ThemeBase>,
+    reconnect_redraw_pending: bool,
 }
 
 #[cfg(feature = "wayland")]
@@ -1717,6 +1720,7 @@ impl CapturingWaylandHost {
             session: None,
             text_scale: 1.0,
             theme_base: None,
+            reconnect_redraw_pending: false,
         }
     }
 
@@ -1732,6 +1736,7 @@ impl CapturingWaylandHost {
             session: Some(session),
             text_scale: 1.0,
             theme_base: None,
+            reconnect_redraw_pending: false,
         }
     }
 
@@ -1757,6 +1762,7 @@ impl CapturingWaylandHost {
             self.inner.set_theme_base(base);
             self.capture.set_theme_base(base);
         }
+        self.reconnect_redraw_pending = true;
         Ok(())
     }
 }
@@ -1782,6 +1788,7 @@ impl FrameHost for CapturingWaylandHost {
             Err(error) => return Err(error),
         };
         self.capture.present(scene)?;
+        self.reconnect_redraw_pending = false;
         Ok(ack)
     }
 }
@@ -1803,6 +1810,9 @@ impl RenderedFrameHost for CapturingWaylandHost {
     }
     fn raster_frame(&self) -> Option<&RasterFrame> {
         self.capture.frame()
+    }
+    fn reconnect_redraw_pending(&self) -> bool {
+        self.reconnect_redraw_pending
     }
 }
 
@@ -2015,6 +2025,13 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             core.load_device_status(device_status);
             next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
         }
+        present_pending_reconnect_redraw(
+            host,
+            core,
+            &activate,
+            &mut frames,
+            &mut presented_revision,
+        )?;
         let DecodedActionPoll::Event { action, ingress_us } = poll else {
             if matches!(poll, DecodedActionPoll::Closed) {
                 return Ok(());
@@ -4428,6 +4445,9 @@ trait RenderedFrameHost: FrameHost {
     fn set_text_scale(&mut self, factor: f32) -> Result<(), String>;
     fn render_notes(&self) -> Option<&[RenderNote]>;
     fn raster_frame(&self) -> Option<&RasterFrame>;
+    fn reconnect_redraw_pending(&self) -> bool {
+        false
+    }
 }
 
 impl RenderedFrameHost for OffscreenHost {
@@ -4500,6 +4520,24 @@ fn present_interactive(
         return Ok(false);
     };
     present_scene(host, core, prompt, &scene)?;
+    Ok(true)
+}
+
+fn present_pending_reconnect_redraw(
+    host: &mut impl RenderedFrameHost,
+    core: &mut ShellCore,
+    prompt: &str,
+    frames: &mut automation::FrameCounter,
+    presented_revision: &mut u64,
+) -> Result<bool, String> {
+    if !host.reconnect_redraw_pending() {
+        return Ok(false);
+    }
+    if !present_interactive(host, core, prompt)? {
+        return Ok(false);
+    }
+    frames.increment();
+    *presented_revision = core.revision();
     Ok(true)
 }
 
@@ -6582,6 +6620,101 @@ mod durable_tests {
         fn raster_frame(&self) -> Option<&RasterFrame> {
             None
         }
+    }
+
+    struct PendingRedrawHost {
+        inner: OffscreenHost,
+        pending: bool,
+        presents: usize,
+    }
+
+    impl FrameHost for PendingRedrawHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.inner.metrics()
+        }
+
+        fn set_theme_base(&mut self, base: pf_render::ThemeBase) {
+            self.inner.set_theme_base(base);
+        }
+
+        fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            let result = self.inner.present(scene);
+            if result.is_ok() {
+                self.pending = false;
+            }
+            self.presents += 1;
+            result
+        }
+    }
+
+    impl RenderedFrameHost for PendingRedrawHost {
+        fn set_text_scale(&mut self, factor: f32) -> Result<(), String> {
+            RenderedFrameHost::set_text_scale(&mut self.inner, factor)
+        }
+
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            self.inner.render_notes()
+        }
+
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            self.inner.raster_frame()
+        }
+
+        fn reconnect_redraw_pending(&self) -> bool {
+            self.pending
+        }
+    }
+
+    #[test]
+    fn reconnect_redraw_presents_a_nonblank_initial_frame_without_input_or_damage() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = PendingRedrawHost {
+            inner: OffscreenHost::new(SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Insets::default(),
+                orientation: Orientation::Landscape,
+            }),
+            pending: true,
+            presents: 0,
+        };
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+
+        assert!(
+            present_pending_reconnect_redraw(
+                &mut host,
+                &mut core,
+                "A Open",
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(host.presents, 1);
+        assert!(!host.pending);
+        assert!(
+            host.inner
+                .bytes()
+                .expect("reconnect redraw should produce pixels")
+                .iter()
+                .any(|byte| *byte != 0)
+        );
+        assert!(
+            !present_pending_reconnect_redraw(
+                &mut host,
+                &mut core,
+                "A Open",
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(host.presents, 1);
     }
 
     #[test]

@@ -316,7 +316,7 @@ fn unknown_app_field_is_refused_by_shared_manifest_parser() {
     let s = provider(&root, &t.path().join("favorites"))
         .snapshot()
         .unwrap();
-    assert!(s.items.is_empty());
+    assert_eq!(s.items, []);
     assert!(
         matches!(&s.provider_results[0],ProviderItemResult::Invalid{error,..} if error.kind==ManifestErrorKind::Validation)
     );
@@ -435,7 +435,7 @@ fn invalid_app_id_is_refused_by_shared_manifest_parser() {
     let snapshot =
         scan_a133(&poolsuite_manifest().replace("org.pocketforge.poolsuite", "org..poolsuite"));
 
-    assert!(snapshot.items.is_empty());
+    assert_eq!(snapshot.items, []);
     assert!(matches!(
         &snapshot.provider_results[0],
         ProviderItemResult::Invalid { error, .. }

@@ -8079,10 +8079,9 @@ mod durable_tests {
             Duration::from_millis(300),
         );
         let interval = Duration::from_millis(100);
-        assert!(
-            scheduler
-                .due(Duration::from_millis(299), interval)
-                .is_empty()
+        assert_eq!(
+            scheduler.due(Duration::from_millis(299), interval),
+            [] as [pf_ports::ShellAction; 0]
         );
         // A late check yields one repeat, not the three missed intervals (tsp-f3fm.227).
         assert_eq!(
@@ -8096,7 +8095,10 @@ mod durable_tests {
             Duration::from_millis(501),
             Duration::from_millis(300),
         );
-        assert!(scheduler.due(Duration::from_secs(1), interval).is_empty());
+        assert_eq!(
+            scheduler.due(Duration::from_secs(1), interval),
+            [] as [pf_ports::ShellAction; 0]
+        );
     }
 
     #[test]

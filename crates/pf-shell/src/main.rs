@@ -8865,6 +8865,7 @@ exec="./launch"
         assert!(error.contains("--settings-evidence"));
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn compositor_rejects_legacy_ownership_and_fixture_paths() {
         for forbidden in ["--device", "--input", "--rotate", "--sim-frame"] {
@@ -8874,6 +8875,7 @@ exec="./launch"
         }
     }
 
+    #[cfg(feature = "wayland")]
     #[test]
     fn compositor_session_override_is_scoped_to_compositor_mode() {
         let args = vec!["--session-environment".into(), "/tmp/environment".into()];
@@ -8889,6 +8891,7 @@ exec="./launch"
     }
 
     #[test]
+    #[cfg(feature = "wayland")]
     fn compositor_and_legacy_display_modes_are_exclusive() {
         let args = vec!["--compositor".into(), "--fbdev".into()];
         let error = validate_args(&args).unwrap_err();
@@ -9190,7 +9193,7 @@ exec="./launch"
     fn wayland_flag_requires_wayland_feature() {
         let error = validate_args(&["--wayland".into()]).unwrap_err();
 
-        assert!(error.contains("requires a build with the 'wayland' feature"));
+        assert!(error.contains("require a build with the 'wayland' feature"));
     }
 
     impl FavoriteCatalog for AlwaysConflictingFavorites {

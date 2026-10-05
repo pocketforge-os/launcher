@@ -9,7 +9,7 @@ use pf_catalog::{
 };
 use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
-use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
+use pf_framehost_wayland::{BufferTransform, Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 #[cfg(feature = "desktop-sim")]
 use pf_ports::Clock;
@@ -19,10 +19,10 @@ use pf_ports::{
     FakeTransferPort, FrameHost, IdlePolicy, LaunchResult, MonotonicTime, NetworkError,
     NetworkPort, NetworkState, NtpState, ObservedSessionState, PowerAction, PowerCapability,
     PowerError, PowerPort, PowerRequestResult, PreferenceChange, PreferenceChangeResult,
-    PreferenceError, PreferenceKey, PreferencePoll, PreferencePort, PreferenceValue, SessionError,
-    SessionEvent, SessionPoll, SessionPort, ShellAction, Support, TerminalReceipt,
-    TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort, TransferService,
-    TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
+    PreferenceError, PreferenceKey, PreferencePoll, PreferencePort, PreferenceValue,
+    PresentFailure, SessionError, SessionEvent, SessionPoll, SessionPort, ShellAction, Support,
+    TerminalReceipt, TimeCapabilities, TimeError, TimePort, TimeState, TransferError, TransferPort,
+    TransferService, TransferServiceState, WifiCredential, WifiNetwork, WifiSecurity,
 };
 use pf_prefs::PrefsStore;
 use pf_prefs_port::PrefsPreferencePort;
@@ -59,6 +59,10 @@ use std::{
 };
 
 mod automation;
+#[cfg(feature = "wayland")]
+mod compositor_session;
+#[cfg(feature = "wayland")]
+use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
@@ -196,7 +200,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
+const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
 #[cfg(feature = "desktop-sim")]
 const DESKTOP_SIM_AUTHORITY_HELP: &str =
     "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
@@ -874,7 +878,7 @@ fn main() -> Result<(), String> {
     }
     let interactive_mode = args
         .iter()
-        .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland"));
+        .any(|a| matches!(a.as_str(), "--fbdev" | "--wayland" | "--compositor"));
     let fixture_mode = args.iter().any(|a| {
         matches!(
             a.as_str(),
@@ -1091,6 +1095,45 @@ fn main() -> Result<(), String> {
             JsonRemapStore::at(remap_path),
             &mut automation,
             "evdev",
+            &mut latency_trace,
+        );
+    }
+    #[cfg(feature = "wayland")]
+    if args.iter().any(|a| a == "--compositor") {
+        let environment = value(&args, "--session-environment").unwrap_or(DEFAULT_ENVIRONMENT);
+        let environment_path = PathBuf::from(environment);
+        let session = CompositorSession::load(&environment_path)?;
+        let host = WaylandHost::connect_with_socket_and_transform(
+            &session.wayland_display,
+            1280,
+            720,
+            BufferTransform::Rotate90,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut host = CapturingWaylandHost::new_compositor(host, environment_path, session);
+        let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
+        let mut automation = automation_server(&args)?;
+        let mut input = WaylandInteractiveInput::new(glyphs.clone());
+        let mut latency_trace = latency_trace("compositor")?;
+        return run_interactive(
+            &mut host,
+            &mut input,
+            &mut core,
+            footer,
+            preferences,
+            power,
+            glyphs,
+            catalog.expect("compositor catalog"),
+            &art_policy,
+            Path::new(session_socket),
+            network,
+            time,
+            transfer,
+            device_status,
+            &state_dir,
+            JsonRemapStore::at(remap_path),
+            &mut automation,
+            "wayland",
             &mut latency_trace,
         );
     }
@@ -1658,6 +1701,9 @@ trait WaylandInputHost {
 struct CapturingWaylandHost {
     inner: WaylandHost,
     capture: OffscreenHost,
+    session_environment: Option<PathBuf>,
+    session: Option<CompositorSession>,
+    text_scale: f32,
 }
 
 #[cfg(feature = "wayland")]
@@ -1666,6 +1712,23 @@ impl CapturingWaylandHost {
         Self {
             capture: OffscreenHost::new(inner.metrics()),
             inner,
+            session_environment: None,
+            session: None,
+            text_scale: 1.0,
+        }
+    }
+
+    fn new_compositor(
+        inner: WaylandHost,
+        session_environment: PathBuf,
+        session: CompositorSession,
+    ) -> Self {
+        Self {
+            capture: OffscreenHost::new(inner.metrics()),
+            inner,
+            session_environment: Some(session_environment),
+            session: Some(session),
+            text_scale: 1.0,
         }
     }
 }
@@ -1680,7 +1743,31 @@ impl FrameHost for CapturingWaylandHost {
         self.capture.set_theme_base(base);
     }
     fn present(&mut self, scene: &pf_scene::Scene) -> pf_ports::PresentResult {
-        let ack = self.inner.present(scene)?;
+        let ack = match self.inner.present(scene) {
+            Ok(ack) => ack,
+            Err(PresentFailure::SurfaceLost) if self.session.is_some() => {
+                let environment = self
+                    .session_environment
+                    .as_deref()
+                    .expect("compositor session has an environment path");
+                let previous = self.session.as_ref().expect("compositor session");
+                let next = CompositorSession::reload(environment, previous)
+                    .map_err(PresentFailure::Backend)?;
+                self.inner
+                    .reconnect_with_socket_and_transform(
+                        &next.wayland_display,
+                        BufferTransform::Rotate90,
+                    )
+                    .map_err(|error| PresentFailure::Backend(error.to_string()))?;
+                self.session = Some(next);
+                self.capture = OffscreenHost::new(self.inner.metrics());
+                self.capture
+                    .set_text_scale(self.text_scale)
+                    .map_err(|error| PresentFailure::Backend(format!("render: {error:?}")))?;
+                self.inner.present(scene)?
+            }
+            Err(error) => return Err(error),
+        };
         self.capture.present(scene)?;
         Ok(ack)
     }
@@ -1694,7 +1781,9 @@ impl RenderedFrameHost for CapturingWaylandHost {
             .map_err(|e| format!("render: {e:?}"))?;
         self.capture
             .set_text_scale(factor)
-            .map_err(|e| format!("render: {e:?}"))
+            .map_err(|e| format!("render: {e:?}"))?;
+        self.text_scale = factor;
+        Ok(())
     }
     fn render_notes(&self) -> Option<&[RenderNote]> {
         self.capture.frame().map(|f| f.notes.as_slice())
@@ -4500,7 +4589,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 14] = [
+    const VALUE_FLAGS: [&str; 15] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -4511,6 +4600,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--out",
         "--platform-capabilities",
         "--rotate",
+        "--session-environment",
         "--session-socket",
         "--state-dir",
         "--surface",
@@ -4546,11 +4636,37 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         return Err("usage error: --rotate requires --fbdev".into());
     }
     #[cfg(not(feature = "wayland"))]
-    if args.iter().any(|arg| arg == "--wayland") {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--wayland" | "--compositor"))
+    {
         return Err(
-            "--wayland requires a build with the 'wayland' feature (cargo build --features wayland)"
+            "--wayland and --compositor require a build with the 'wayland' feature (cargo build --features wayland)"
                 .into(),
         );
+    }
+    let interactive_modes = args
+        .iter()
+        .filter(|arg| matches!(arg.as_str(), "--fbdev" | "--wayland" | "--compositor"))
+        .count();
+    if interactive_modes > 1 {
+        return Err(
+            "usage error: --fbdev, --wayland, and --compositor are mutually exclusive".into(),
+        );
+    }
+    if value(args, "--session-environment").is_some()
+        && !args.iter().any(|arg| arg == "--compositor")
+    {
+        return Err("usage error: --session-environment requires --compositor".into());
+    }
+    if args.iter().any(|arg| arg == "--compositor") {
+        for forbidden in ["--device", "--input", "--rotate", "--sim-frame"] {
+            if args.iter().any(|arg| arg == forbidden) {
+                return Err(format!(
+                    "usage error: --compositor cannot use {forbidden}; compositor owns presentation and input"
+                ));
+            }
+        }
     }
     if args.iter().any(|arg| arg == "--fbdev")
         && args.iter().any(|arg| arg == "--settings-evidence")
@@ -4572,9 +4688,11 @@ fn validate_automation_gate(args: &[String], gate: Option<&str>) -> Result<(), S
     if value(args, "--automation-socket").is_some()
         && !args
             .iter()
-            .any(|arg| matches!(arg.as_str(), "--wayland" | "--fbdev"))
+            .any(|arg| matches!(arg.as_str(), "--wayland" | "--fbdev" | "--compositor"))
     {
-        return Err("usage error: --automation-socket requires --wayland or --fbdev".into());
+        return Err(
+            "usage error: --automation-socket requires --wayland, --compositor, or --fbdev".into(),
+        );
     }
     Ok(())
 }
@@ -8571,6 +8689,36 @@ exec="./launch"
     }
 
     #[test]
+    fn compositor_rejects_legacy_ownership_and_fixture_paths() {
+        for forbidden in ["--device", "--input", "--rotate", "--sim-frame"] {
+            let args = vec!["--compositor".into(), forbidden.into()];
+            let error = validate_args(&args).unwrap_err();
+            assert!(error.contains(forbidden), "{forbidden}: {error}");
+        }
+    }
+
+    #[test]
+    fn compositor_session_override_is_scoped_to_compositor_mode() {
+        let args = vec!["--session-environment".into(), "/tmp/environment".into()];
+        let error = validate_args(&args).unwrap_err();
+        assert!(error.contains("requires --compositor"));
+
+        let args = vec![
+            "--compositor".into(),
+            "--session-environment".into(),
+            "/tmp/environment".into(),
+        ];
+        assert!(validate_args(&args).is_ok());
+    }
+
+    #[test]
+    fn compositor_and_legacy_display_modes_are_exclusive() {
+        let args = vec!["--compositor".into(), "--fbdev".into()];
+        let error = validate_args(&args).unwrap_err();
+        assert!(error.contains("mutually exclusive"));
+    }
+
+    #[test]
     fn interactive_device_fixtures_are_explicit_and_validate() {
         assert!(!use_device_fixtures(&[], false));
         let args = vec!["--device-fixtures".into()];
@@ -9590,7 +9738,7 @@ exec="./launch"
         assert!(
             validate_automation_gate(&noninteractive, Some("1"))
                 .unwrap_err()
-                .contains("requires --wayland or --fbdev")
+                .contains("requires --wayland, --compositor, or --fbdev")
         );
     }
 

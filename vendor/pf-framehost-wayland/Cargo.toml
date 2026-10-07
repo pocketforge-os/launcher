@@ -42,6 +42,11 @@ path = "examples/headless_fixture.rs"
 name = "reconnect_fixture"
 path = "examples/reconnect_fixture.rs"
 
+[[test]]
+name = "compositor_contract"
+path = "tests/compositor_contract.rs"
+required-features = ["keyboard"]
+
 [dependencies]
 libc = "=0.2.186"
 tempfile = "3"
@@ -67,3 +72,10 @@ features = ["client"]
 version = "=0.8.0"
 features = ["wayland"]
 optional = true
+
+[dev-dependencies]
+wayland-server = "=0.31.10"
+
+[dev-dependencies.wayland-protocols]
+version = "=0.32.9"
+features = ["server"]

@@ -1711,6 +1711,18 @@ struct CapturingWaylandHost {
 }
 
 #[cfg(feature = "wayland")]
+fn restore_wayland_theme_after_reconnect(
+    inner: &mut impl FrameHost,
+    capture: &mut impl FrameHost,
+    theme_base: Option<pf_render::ThemeBase>,
+) {
+    if let Some(base) = theme_base {
+        inner.set_theme_base(base);
+        capture.set_theme_base(base);
+    }
+}
+
+#[cfg(feature = "wayland")]
 impl CapturingWaylandHost {
     fn new(inner: WaylandHost) -> Self {
         Self {
@@ -1758,10 +1770,7 @@ impl CapturingWaylandHost {
         self.capture
             .set_text_scale(self.text_scale)
             .map_err(|error| format!("render: {error:?}"))?;
-        if let Some(base) = self.theme_base {
-            self.inner.set_theme_base(base);
-            self.capture.set_theme_base(base);
-        }
+        restore_wayland_theme_after_reconnect(&mut self.inner, &mut self.capture, self.theme_base);
         self.reconnect_redraw_pending = true;
         Ok(())
     }
@@ -6663,6 +6672,55 @@ mod durable_tests {
         fn reconnect_redraw_pending(&self) -> bool {
             self.pending
         }
+    }
+
+    #[cfg(feature = "wayland")]
+    #[test]
+    fn wayland_reconnect_restores_non_default_theme_before_redraw() {
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Insets::default(),
+            orientation: Orientation::Landscape,
+        };
+        let palette_probe = || {
+            let root = pf_scene::Node::new(
+                pf_scene::NodeId::new("reconnect-palette-probe").unwrap(),
+                pf_scene::Role::Text,
+                "Palette",
+                pf_scene::Bounds::new(16.0, 16.0, 160.0, 48.0),
+                "--color-surface-canvas",
+            );
+            pf_scene::Scene::new(
+                root,
+                pf_scene::NodeId::new("reconnect-palette-probe").unwrap(),
+            )
+            .unwrap()
+        };
+        let render = |host: &mut OffscreenHost| {
+            host.present(&palette_probe()).unwrap();
+            host.bytes().unwrap().to_vec()
+        };
+        let mut dusk = OffscreenHost::new(metrics);
+        let dusk_pixels = render(&mut dusk);
+
+        for base in [pf_theme::Base::Day, pf_theme::Base::HighContrast] {
+            let mut inner = OffscreenHost::new(metrics);
+            let mut capture = OffscreenHost::new(metrics);
+
+            restore_wayland_theme_after_reconnect(&mut inner, &mut capture, Some(base));
+
+            let inner_pixels = render(&mut inner);
+            assert_eq!(inner_pixels, render(&mut capture));
+            assert_ne!(inner_pixels, dusk_pixels);
+        }
+
+        let mut inner = OffscreenHost::new(metrics);
+        let mut capture = OffscreenHost::new(metrics);
+        restore_wayland_theme_after_reconnect(&mut inner, &mut capture, None);
+        assert_eq!(render(&mut inner), dusk_pixels);
+        assert_eq!(render(&mut capture), dusk_pixels);
     }
 
     #[test]

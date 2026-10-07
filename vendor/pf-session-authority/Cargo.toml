@@ -34,6 +34,10 @@ name = "pf-session-authorityd"
 path = "src/bin/pf-session-authorityd.rs"
 
 [[test]]
+name = "daemon_initial_state"
+path = "tests/daemon_initial_state.rs"
+
+[[test]]
 name = "daemon_slow_client"
 path = "tests/daemon_slow_client.rs"
 

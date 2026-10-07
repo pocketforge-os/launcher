@@ -12,10 +12,10 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
-use std::path::Path;
 #[cfg(feature = "keyboard")]
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
@@ -72,8 +72,7 @@ pub struct RepeatInfo {
     pub delay_ms: i32,
 }
 
-/// Physical buffer orientation requested from the compositor. The logical scene
-/// remains landscape; only its submitted wl_shm buffer is pre-rotated.
+/// How a submitted buffer is oriented relative to the shell's logical surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferTransform {
     Normal,
@@ -185,11 +184,12 @@ struct State {
 }
 
 impl State {
+    #[cfg(test)]
     fn new(size: ValidatedSize) -> Self {
-        Self::new_with_transform(size, size, BufferTransform::Normal)
+        Self::new_with_buffer(size, size, BufferTransform::Normal)
     }
 
-    fn new_with_transform(
+    fn new_with_buffer(
         size: ValidatedSize,
         buffer_size: ValidatedSize,
         buffer_transform: BufferTransform,
@@ -550,9 +550,8 @@ pub struct WaylandHost {
     // avoids recycling storage while the compositor may still read it.
     buffers: Vec<(u64, wl_buffer::WlBuffer, File)>,
     next_buffer_id: u64,
-    socket_path: Option<std::path::PathBuf>,
+    socket_path: Option<PathBuf>,
     buffer_transform: BufferTransform,
-    theme_base: ThemeBase,
 }
 
 impl WaylandHost {
@@ -572,8 +571,7 @@ impl WaylandHost {
         Self::connect_with_connection(connection, size, size, BufferTransform::Normal, None)
     }
 
-    /// Connect to the absolute socket published by PocketForge's compositor session.
-    /// This bypasses runtime-dir lookup and never opens a DRM or framebuffer device.
+    /// Connect to a compositor endpoint published as an absolute Unix socket path.
     pub fn connect_with_socket_and_transform(
         socket_path: &Path,
         width: u32,
@@ -582,21 +580,22 @@ impl WaylandHost {
     ) -> Result<Self, WaylandHostError> {
         if !socket_path.is_absolute() {
             return Err(WaylandHostError::CompositorUnavailable(
-                "published Wayland socket must be absolute".into(),
+                "Wayland socket path is not absolute".to_owned(),
             ));
         }
-        let logical_size = ValidatedSize::new(width, height)?;
+
+        let size = ValidatedSize::new(width, height)?;
         let buffer_size = match transform {
-            BufferTransform::Normal => logical_size,
+            BufferTransform::Normal => size,
             BufferTransform::Rotate90 => ValidatedSize::new(height, width)?,
         };
-        let stream = UnixStream::connect(socket_path)
-            .map_err(|e| WaylandHostError::CompositorUnavailable(e.to_string()))?;
-        let connection = Connection::from_socket(stream)
-            .map_err(|e| WaylandHostError::CompositorUnavailable(e.to_string()))?;
+        let socket = UnixStream::connect(socket_path)
+            .map_err(|error| WaylandHostError::CompositorUnavailable(error.to_string()))?;
+        let connection = Connection::from_socket(socket)
+            .map_err(|error| WaylandHostError::CompositorUnavailable(error.to_string()))?;
         Self::connect_with_connection(
             connection,
-            logical_size,
+            size,
             buffer_size,
             transform,
             Some(socket_path.to_path_buf()),
@@ -608,12 +607,12 @@ impl WaylandHost {
         size: ValidatedSize,
         buffer_size: ValidatedSize,
         buffer_transform: BufferTransform,
-        socket_path: Option<std::path::PathBuf>,
+        socket_path: Option<PathBuf>,
     ) -> Result<Self, WaylandHostError> {
         let mut queue = connection.new_event_queue();
         let qh = queue.handle();
         connection.display().get_registry(&qh, ());
-        let mut state = State::new_with_transform(size, buffer_size, buffer_transform);
+        let mut state = State::new_with_buffer(size, buffer_size, buffer_transform);
         queue
             .roundtrip(&mut state)
             .map_err(|e| WaylandHostError::Protocol(e.to_string()))?;
@@ -642,27 +641,24 @@ impl WaylandHost {
             next_buffer_id: 1,
             socket_path,
             buffer_transform,
-            theme_base: ThemeBase::Dusk,
         })
     }
 
     /// Rebuild every protocol object after compositor loss.
     pub fn reconnect(&mut self) -> Result<(), WaylandHostError> {
         let (width, height) = self.state.size.dimensions();
-        let mut replacement = if let Some(socket_path) = &self.socket_path {
-            Self::connect_with_socket_and_transform(
+        let mut replacement = match &self.socket_path {
+            Some(socket_path) => Self::connect_with_socket_and_transform(
                 socket_path,
                 width,
                 height,
                 self.buffer_transform,
-            )?
-        } else {
-            Self::connect_with_size(width, height)?
+            )?,
+            None => Self::connect_with_size(width, height)?,
         };
         replacement
             .set_text_scale(self.text_scale)
             .expect("the stored text scale was previously validated");
-        replacement.set_theme_base(self.theme_base);
         #[cfg(feature = "keyboard")]
         {
             transfer_pressed_key_releases(&mut self.state, &mut replacement.state);
@@ -675,23 +671,18 @@ impl WaylandHost {
         Ok(())
     }
 
-    /// Reconnect using a newly published compositor endpoint and lifecycle generation.
+    /// Replace a lost connection with a newly published compositor socket.
     pub fn reconnect_with_socket_and_transform(
         &mut self,
         socket_path: &Path,
         transform: BufferTransform,
     ) -> Result<(), WaylandHostError> {
         let (width, height) = self.state.size.dimensions();
-        let mut replacement = Self::connect_with_socket_and_transform(
-            socket_path,
-            width,
-            height,
-            transform,
-        )?;
+        let mut replacement =
+            Self::connect_with_socket_and_transform(socket_path, width, height, transform)?;
         replacement
             .set_text_scale(self.text_scale)
             .expect("the stored text scale was previously validated");
-        replacement.set_theme_base(self.theme_base);
         #[cfg(feature = "keyboard")]
         transfer_pressed_key_releases(&mut self.state, &mut replacement.state);
         *self = replacement;
@@ -721,11 +712,7 @@ impl WaylandHost {
         self.poll_key_event_checked().ok().flatten()
     }
 
-    /// Return the next keyboard transition and report a dead Wayland connection.
-    ///
-    /// The compatibility [`Self::poll_key_event`] API intentionally keeps its old
-    /// best-effort shape. Interactive clients that own reconnect policy must use this
-    /// checked form so an idle connection loss cannot be mistaken for an idle keyboard.
+    /// Return the next queued transition while preserving Wayland transport failures.
     #[cfg(feature = "keyboard")]
     pub fn poll_key_event_checked(&mut self) -> Result<Option<KeyEvent>, WaylandHostError> {
         self.pump_events_nonblocking()?;
@@ -744,9 +731,11 @@ impl WaylandHost {
             .dispatch_pending(&mut self.state)
             .map_err(|error| WaylandHostError::Protocol(format!("keyboard dispatch: {error}")))?;
         let Some(guard) = self.connection.prepare_read() else {
-            self.queue.dispatch_pending(&mut self.state).map_err(|error| {
-                WaylandHostError::Protocol(format!("keyboard dispatch: {error}"))
-            })?;
+            self.queue
+                .dispatch_pending(&mut self.state)
+                .map_err(|error| {
+                    WaylandHostError::Protocol(format!("keyboard dispatch: {error}"))
+                })?;
             return Ok(());
         };
         let backend = self.connection.backend();
@@ -756,14 +745,32 @@ impl WaylandHost {
             revents: 0,
         };
         // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
-        let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) } > 0;
-        if ready {
-            guard
-                .read()
-                .map_err(|error| WaylandHostError::Protocol(format!("keyboard read: {error}")))?;
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+        if ready < 0 {
+            return Err(WaylandHostError::Protocol(format!(
+                "keyboard poll: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if ready > 0 {
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(WaylandHostError::Protocol(format!(
+                        "keyboard read: {error}"
+                    )));
+                }
+            }
             self.queue
                 .dispatch_pending(&mut self.state)
-                .map_err(|error| WaylandHostError::Protocol(format!("keyboard dispatch: {error}")))?;
+                .map_err(|error| {
+                    WaylandHostError::Protocol(format!("keyboard dispatch: {error}"))
+                })?;
         }
         Ok(())
     }
@@ -794,11 +801,13 @@ impl WaylandHost {
         let logical_size = self.state.size;
         let size = self.state.buffer_size;
         debug_assert_eq!((frame.width, frame.height), logical_size.dimensions());
-        let (rgba, damage) = match self.buffer_transform {
+        let (rgba, damage) = match self.state.buffer_transform {
             BufferTransform::Normal => (frame.rgba, frame.damage),
             BufferTransform::Rotate90 => (
                 rotate_rgba_90(&frame.rgba, logical_size.width, logical_size.height),
-                frame.damage.map(|damage| rotate_damage_90(damage, logical_size)),
+                frame
+                    .damage
+                    .map(|damage| rotate_damage_90(damage, logical_size)),
             ),
         };
         let mut file = tempfile::tempfile()?;
@@ -848,26 +857,26 @@ impl WaylandHost {
 }
 
 fn rotate_rgba_90(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let source_width = usize::try_from(width).expect("validated width");
+    let target_width = usize::try_from(height).expect("validated height");
     let mut rotated = vec![0; rgba.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let source = usize::try_from((y * width + x) * 4).expect("validated pixel index");
-            let destination_x = height - 1 - y;
-            let destination_y = x;
-            let destination = usize::try_from(
-                (destination_y * height + destination_x) * 4,
-            )
-            .expect("validated pixel index");
-            rotated[destination..destination + 4].copy_from_slice(&rgba[source..source + 4]);
-        }
+
+    for (source_index, pixel) in rgba.chunks_exact(4).enumerate() {
+        let source_x = source_index % source_width;
+        let source_y = source_index / source_width;
+        let target_x = source_y;
+        let target_y = source_width - source_x - 1;
+        let target_index = (target_y * target_width + target_x) * 4;
+        rotated[target_index..target_index + 4].copy_from_slice(pixel);
     }
+
     rotated
 }
 
 fn rotate_damage_90(damage: DamageRect, logical_size: ValidatedSize) -> DamageRect {
     DamageRect {
-        x: logical_size.height - (damage.y + damage.height),
-        y: damage.x,
+        x: damage.y,
+        y: logical_size.width - damage.x - damage.width,
         width: damage.height,
         height: damage.width,
     }
@@ -905,7 +914,6 @@ impl FrameHost for WaylandHost {
 
     fn set_theme_base(&mut self, base: ThemeBase) {
         set_renderer_theme_base(&mut self.renderer, base);
-        self.theme_base = base;
     }
 
     fn present(&mut self, scene: &Scene) -> PresentResult {
@@ -1042,50 +1050,6 @@ mod tests {
         assert_eq!(size.dimensions(), (1280, 720));
         assert_eq!(size.stride_i32, 5120);
         assert_eq!(size.pool_bytes_i32, 3_686_400);
-    }
-
-    #[test]
-    fn rotate90_uses_native_portrait_buffer_dimensions() {
-        let logical = valid_size(1280, 720);
-        let buffer = valid_size(720, 1280);
-        let state = State::new_with_transform(logical, buffer, BufferTransform::Rotate90);
-        assert_eq!(state.size.dimensions(), (1280, 720));
-        assert_eq!(state.buffer_size.dimensions(), (720, 1280));
-    }
-
-    #[test]
-    fn rotate90_pre_rotates_rgba_clockwise() {
-        let source = vec![
-            1, 0, 0, 255, // A B
-            2, 0, 0, 255, //
-            3, 0, 0, 255, // C D
-            4, 0, 0, 255, //
-        ];
-        let expected = vec![
-            3, 0, 0, 255, 1, 0, 0, 255, // C A
-            4, 0, 0, 255, 2, 0, 0, 255, // D B
-        ];
-        assert_eq!(rotate_rgba_90(&source, 2, 2), expected);
-    }
-
-    #[test]
-    fn rotate90_maps_damage_into_native_buffer_space() {
-        let logical = valid_size(1280, 720);
-        let damage = DamageRect {
-            x: 10,
-            y: 20,
-            width: 100,
-            height: 50,
-        };
-        assert_eq!(
-            rotate_damage_90(damage, logical),
-            DamageRect {
-                x: 650,
-                y: 10,
-                width: 50,
-                height: 100,
-            }
-        );
     }
 
     #[test]

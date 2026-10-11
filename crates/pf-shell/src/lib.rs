@@ -703,6 +703,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "start".into()],
             max_interval_ms: None,
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Select + Start",
     );
@@ -712,6 +714,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["guide".into()],
             max_interval_ms: None,
             min_duration_ms: Some(1000),
+            axis: None,
+            direction: None,
         },
         "Hold PF · the button below the d-pad (about 1s)",
     );
@@ -721,6 +725,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "start".into()],
             max_interval_ms: Some(600),
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Select + Start, press twice",
     );
@@ -730,6 +736,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["guide".into()],
             max_interval_ms: Some(600),
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Double-tap PF · the button below the d-pad",
     );
@@ -739,6 +747,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "l1".into(), "r1".into()],
             max_interval_ms: None,
             min_duration_ms: Some(1000),
+            axis: None,
+            direction: None,
         },
         "Hold Select + L1 + R1 · deliberately hard to press",
     );

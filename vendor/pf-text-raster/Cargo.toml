@@ -34,7 +34,16 @@ default-fonts = []
 name = "pf_text_raster"
 path = "src/lib.rs"
 
+[[example]]
+name = "pss-probe"
+path = "examples/pss-probe.rs"
+
+[[test]]
+name = "mmap-fonts"
+path = "tests/mmap-fonts.rs"
+
 [dependencies]
+memmap2 = "0.9"
 tiny-skia = "0.12"
 
 [dependencies.cosmic-text-tracking]

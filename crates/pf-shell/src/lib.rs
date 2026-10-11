@@ -703,6 +703,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "start".into()],
             max_interval_ms: None,
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Select + Start",
     );
@@ -712,6 +714,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["guide".into()],
             max_interval_ms: None,
             min_duration_ms: Some(1000),
+            axis: None,
+            direction: None,
         },
         "Hold PF · the button below the d-pad (about 1s)",
     );
@@ -721,6 +725,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "start".into()],
             max_interval_ms: Some(600),
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Select + Start, press twice",
     );
@@ -730,6 +736,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["guide".into()],
             max_interval_ms: Some(600),
             min_duration_ms: None,
+            axis: None,
+            direction: None,
         },
         "Double-tap PF · the button below the d-pad",
     );
@@ -739,6 +747,8 @@ pub fn safe_return_options(contract: &DeviceContract) -> Vec<(Binding, String)> 
             controls: vec!["select".into(), "l1".into(), "r1".into()],
             max_interval_ms: None,
             min_duration_ms: Some(1000),
+            axis: None,
+            direction: None,
         },
         "Hold Select + L1 + R1 · deliberately hard to press",
     );
@@ -847,7 +857,7 @@ pub fn control_bindings(map: &EffectiveMap) -> Vec<ControlBinding> {
         .filter(|mapping| semantic_action(&mapping.action).is_some())
         .map(|mapping| ControlBinding {
             context: mapping.context.clone(),
-            action: if mapping.context == "library" && mapping.action == "Search.submit" {
+            action: if mapping.action == "Search.submit" {
                 "Filter.next".into()
             } else {
                 mapping.action.clone()
@@ -945,6 +955,22 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     const CONTRACT: &str = include_str!("../fixtures/device.json");
+
+    #[test]
+    fn device_fixture_uses_canonical_action_contexts() {
+        DeviceContract::parse_json(CONTRACT).expect("shipped device fixture must validate");
+
+        let mut misplaced: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+        misplaced["effective_map"][0]["context"] = "global".into();
+        let error = DeviceContract::parse_json(&serde_json::to_string(&misplaced).unwrap())
+            .expect_err("Activate outside the shell context must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown semantic action Activate in context global"),
+            "unexpected validation error: {error}"
+        );
+    }
 
     fn thread_cpu_ticks() -> u64 {
         let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
@@ -1334,7 +1360,7 @@ mod tests {
         let before = prompt(&map, &ShellAction::Activate);
         let mut remap = GamepadRemap::new(map);
         remap
-            .preview("global", "Activate", Binding::single("north"))
+            .preview("shell", "Activate", Binding::single("north"))
             .unwrap();
         assert_eq!(
             remap.gamepad_action(&ShellAction::Back).unwrap(),
@@ -1350,7 +1376,7 @@ mod tests {
         let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let mut remap = GamepadRemap::new(map);
         remap
-            .preview("global", "Activate", Binding::single("north"))
+            .preview("shell", "Activate", Binding::single("north"))
             .unwrap();
         assert_eq!(
             remap.gamepad_action(&ShellAction::Activate).unwrap(),

@@ -7677,7 +7677,10 @@ mod durable_tests {
                         pf_session_authority::RpcResponse::History { entries: vec![] }
                     }
                     ("events", pf_session_authority::RpcRequest::Events { .. }) => {
-                        pf_session_authority::RpcResponse::Events { events: vec![] }
+                        pf_session_authority::RpcResponse::Events {
+                            events: vec![],
+                            contract: pf_session_authority::SESSION_RPC_CONTRACT_V1,
+                        }
                     }
                     (_, request) => panic!("unexpected {expected} request: {request:?}"),
                 };
@@ -9900,7 +9903,7 @@ exec="./launch"
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
-            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .preview("shell", "Activate", pf_input_map::Binding::single("north"))
             .unwrap();
         remap.gamepad_action(&ShellAction::Activate).unwrap();
         drop(remap);
@@ -9942,7 +9945,7 @@ exec="./launch"
 
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
-            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .preview("shell", "Activate", pf_input_map::Binding::single("north"))
             .unwrap();
         remap.gamepad_action(&ShellAction::Activate).unwrap();
         let committed = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
@@ -10425,6 +10428,7 @@ exec="./launch"
                                     .map(|(_, sequence, event)| (*sequence, event.clone()))
                                     .chain(released)
                                     .collect(),
+                                contract: pf_session_authority::SESSION_RPC_CONTRACT_V1,
                             }
                         }
                         RpcRequest::Acknowledge { sequence, .. } => {

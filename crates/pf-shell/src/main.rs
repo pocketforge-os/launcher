@@ -9903,7 +9903,7 @@ exec="./launch"
         let map = load_durable_map_or_shipped(contract.clone(), &path).unwrap();
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
-            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .preview("shell", "Activate", pf_input_map::Binding::single("north"))
             .unwrap();
         remap.gamepad_action(&ShellAction::Activate).unwrap();
         drop(remap);
@@ -9945,7 +9945,7 @@ exec="./launch"
 
         let mut remap = GamepadRemap::with_store(map, JsonRemapStore::at(&path));
         remap
-            .preview("global", "Activate", pf_input_map::Binding::single("north"))
+            .preview("shell", "Activate", pf_input_map::Binding::single("north"))
             .unwrap();
         remap.gamepad_action(&ShellAction::Activate).unwrap();
         let committed = load_durable_map_or_shipped(contract.clone(), &path).unwrap();

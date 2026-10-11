@@ -544,8 +544,8 @@ fn library_geometry(surface_width: f32) -> LibraryGeometry {
 }
 
 fn action_label(action: &str) -> String {
-    if action == "SafeReturn" {
-        return "Safe Return".into();
+    if action == "SystemMenu" {
+        return "System Menu".into();
     }
     action.strip_prefix("Move.").map_or_else(
         || action.to_owned(),
@@ -2111,7 +2111,7 @@ impl ShellCore {
 
     pub fn action(&mut self, action: &ShellAction) -> Option<Effect> {
         self.bump_revision();
-        if matches!(action, ShellAction::Custom(name) if name == "SafeReturn") {
+        if matches!(action, ShellAction::Custom(name) if name == "SystemMenu") {
             return Some(Effect::SafeReturn);
         }
         if !self.has_shell_frame() {
@@ -3120,8 +3120,8 @@ impl ShellCore {
                     ),
                     disabled(
                         "controls-safe-return",
-                        "Safe Return button",
-                        Some("Returns safely from any game"),
+                        "System Menu button",
+                        Some("Opens system controls; Return stays reachable as the fallback"),
                         Some(&self.safe_return_binding),
                     ),
                     disabled(
@@ -10818,7 +10818,7 @@ mod tests {
                     safe_insets: Default::default(),
                     orientation: pf_scene::Orientation::Landscape,
                 },
-                "SELECT Search · X Quick · A Open · PF Safe Return",
+                "SELECT Search · X Quick · A Open · PF System Menu",
             )
             .unwrap();
         let mut nodes = Vec::new();
@@ -11090,7 +11090,7 @@ mod tests {
             let value = node_by_id(row, "settings-row-controls-safe-return-control").unwrap();
             assert_eq!(
                 row.accessible_label,
-                "Safe Return button · Returns safely from any game · PF · the button below the d-pad"
+                "System Menu button · Opens system controls; Return stays reachable as the fallback · PF · the button below the d-pad"
             );
             assert!(value.accessible_label.ends_with('…'));
             assert!(!row.accessible_label.ends_with('…'));
@@ -11925,7 +11925,7 @@ mod tests {
         assert_eq!(c.focused_item_index(), Some(0));
     }
     #[test]
-    fn all_presentations_route_safe_return() {
+    fn system_menu_falls_back_to_return_in_all_presentations() {
         let mut c = core();
         for p in [
             Presentation::Ready,
@@ -11938,7 +11938,7 @@ mod tests {
         ] {
             c.presentation = p;
             assert_eq!(
-                c.action(&ShellAction::Custom("SafeReturn".into())),
+                c.action(&ShellAction::Custom("SystemMenu".into())),
                 Some(Effect::SafeReturn)
             );
         }
@@ -13327,7 +13327,7 @@ mod tests {
                     safe_insets: Default::default(),
                     orientation: pf_scene::Orientation::Landscape,
                 },
-                "A Open     PF Safe Return",
+                "A Open     PF System Menu",
             )
             .unwrap();
         let row = node_by_id(scene.root(), "search-result-long-search-result").unwrap();
@@ -13364,7 +13364,7 @@ mod tests {
                         safe_insets: Default::default(),
                         orientation: pf_scene::Orientation::Landscape,
                     },
-                    "A Open     PF Safe Return",
+                    "A Open     PF System Menu",
                 )
                 .unwrap();
             let row = node_by_id(scene.root(), "search-result-search-result").unwrap();
@@ -13398,7 +13398,7 @@ mod tests {
                     safe_insets: Default::default(),
                     orientation: pf_scene::Orientation::Landscape,
                 },
-                "A Open     PF Safe Return",
+                "A Open     PF System Menu",
             )
             .unwrap();
         let row = node_by_id(scene.root(), "search-result-long-search-result").unwrap();
@@ -13433,7 +13433,7 @@ mod tests {
                     safe_insets: Default::default(),
                     orientation: pf_scene::Orientation::Landscape,
                 },
-                "A Open     PF Safe Return",
+                "A Open     PF System Menu",
             )
             .unwrap();
         let title = node_by_id(scene.root(), "search-result-unicode-search-result-title").unwrap();
@@ -13468,7 +13468,7 @@ mod tests {
                     safe_insets: Default::default(),
                     orientation: pf_scene::Orientation::Landscape,
                 },
-                "A Open     PF Safe Return",
+                "A Open     PF System Menu",
             )
             .unwrap();
         let title =
@@ -13524,7 +13524,7 @@ mod tests {
         };
 
         core.go(Route::Search);
-        let osk_focused = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let osk_focused = core.scene(metrics, "A Open     PF System Menu").unwrap();
         let mut focused = Vec::new();
         focused_nodes(osk_focused.root(), &mut focused);
         assert_eq!(focused.len(), 1);
@@ -13539,7 +13539,7 @@ mod tests {
         core.action(&ShellAction::Move(AxisMove::Left));
         assert_eq!(core.search_key, None);
 
-        let populated = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let populated = core.scene(metrics, "A Open     PF System Menu").unwrap();
         let mut focused = Vec::new();
         focused_nodes(populated.root(), &mut focused);
         assert_eq!(focused.len(), 1);
@@ -13573,7 +13573,7 @@ mod tests {
         assert_ne!(prompts.children, []);
 
         core.set_search_query("no match");
-        let empty = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let empty = core.scene(metrics, "A Open     PF System Menu").unwrap();
         let mut focused = Vec::new();
         focused_nodes(empty.root(), &mut focused);
         assert_eq!(focused.len(), 1);
@@ -13596,7 +13596,7 @@ mod tests {
             safe_insets: Default::default(),
             orientation: pf_scene::Orientation::Landscape,
         };
-        let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let scene = core.scene(metrics, "A Open     PF System Menu").unwrap();
         let keyboard = node_by_id(scene.root(), "search-keyboard").unwrap();
         assert_eq!(keyboard.children.len(), SEARCH_KEYS.len());
         assert_eq!(scene.focused().map(NodeId::as_str), Some("search-key-0"));
@@ -16853,7 +16853,7 @@ mod tests {
             orientation: pf_scene::Orientation::Landscape,
         };
 
-        let home = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let home = core.scene(metrics, "A Open     PF System Menu").unwrap();
         assert_prompt_paint(&home, 4);
 
         core.go(Route::Library);
@@ -18824,7 +18824,7 @@ mod tests {
                 binding: "A".into(),
             }]
         };
-        let supplied_footer = "A  Open     PF  Safe Return";
+        let supplied_footer = "A  Open     PF  System Menu";
         let metrics = SurfaceMetrics {
             logical_width: 1280.0,
             logical_height: 720.0,
@@ -18870,7 +18870,7 @@ mod tests {
         core.items[3].favorite = true;
         core.set_control_bindings(bindings());
         let home = core.scene(metrics, supplied_footer).unwrap();
-        assert_eq!(prompt(&home), "A Open · PF  Safe Return");
+        assert_eq!(prompt(&home), "A Open · PF  System Menu");
         let prompts = node_by_id(home.root(), "prompts").unwrap();
         let footer_top = metrics.logical_height - PROMPTS_AREA_HEIGHT;
         assert!(prompts.bounds.x >= 0.0);
@@ -18895,7 +18895,7 @@ mod tests {
         core.focus = 1;
         assert_eq!(
             prompt(&core.scene(metrics, supplied_footer).unwrap()),
-            "A Open · PF  Safe Return"
+            "A Open · PF  System Menu"
         );
         assert_eq!(
             core.action(&ShellAction::Activate),
@@ -19186,7 +19186,7 @@ mod tests {
     #[test]
     fn prompt_chip_padding_pf_width_and_inter_item_gap_match_mockup() {
         let nodes = right_aligned_prompt_nodes(
-            "SELECT Search · Y Filter · PF Safe Return",
+            "SELECT Search · Y Filter · PF System Menu",
             1280.0,
             720.0,
             100,

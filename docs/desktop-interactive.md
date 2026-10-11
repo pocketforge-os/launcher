@@ -52,12 +52,14 @@ target/debug/pf-shell --wayland \
 
 The PocketForge home screen should appear in a Wayland window. Arrow keys move focus, Enter
 activates, Escape or Backspace goes back, Tab or `F` opens Quick/toggles the favorite action for
-the current context, and `S` is the safe-return binding. Closing the window quits `pf-shell`.
+the current context, and `S` represents the protected System Menu action. Closing the window quits
+`pf-shell`.
 
 Launching a catalog title does **not** run that title. Under `desktop-sim`, the authority creates
 an `authority/sessions/<session-id>.running` marker representing a stub foreground process. This
-preset exists only to exercise session lifecycle wiring. During an active session, press `S` to
-request graceful return. The stub session ends, the authority restores the shell, and the shell
+preset exists only to exercise session lifecycle wiring. The desktop simulator has no system-menu
+provider, so during an active session `S` exercises the required fallback and requests graceful
+return. The stub session ends, the authority restores the shell, and the shell
 returns to the foreground after consuming its `Returned` receipt. You can launch and return again
 while the supervisor remains running. Then close the window and stop the supervisor and authority
 with Ctrl-C. Remove the temporary directory after all three processes have exited:

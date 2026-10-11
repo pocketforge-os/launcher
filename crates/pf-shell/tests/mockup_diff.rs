@@ -57,8 +57,12 @@ const HEIGHT: u32 = 720;
 // tsp-op5a.404 corrects the global status chrome and active/inactive room hierarchy.
 // That raises Library, Detail, Settings, and High Contrast, while Home and the
 // captured-render Quick comparison take the two narrow, documented decreases below.
+// tsp-op5a.440.10 renames the protected guide prompt from Safe Return to System Menu.
+// The intentional text pixels move Home by 0.000001343; every structural/raster guard
+// and the other five mockup scores stay green. The exact decrease is documented in
+// RATCHET_WAIVERS.md and the floor remains truncated below the deterministic score.
 const SCREENS: [(&str, &str, f64); 6] = [
-    ("home", "boot-home.png", 0.939_787),
+    ("home", "boot-home.png", 0.939_785),
     ("library", "library.png", 0.977_743),
     ("detail", "details.png", 0.940_734),
     ("settings", "settings.png", 0.969_316),

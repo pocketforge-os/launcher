@@ -208,7 +208,7 @@ const DESKTOP_SIM_AUTHORITY_HELP: &str =
     "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
 #[cfg(not(feature = "desktop-sim"))]
 const DESKTOP_SIM_AUTHORITY_HELP: &str = "";
-const HELP_AFTER_DESKTOP_SIM_AUTHORITY: &str = "  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        Safe return\n";
+const HELP_AFTER_DESKTOP_SIM_AUTHORITY: &str = "  --desktop-sim-script      headless launch/return proof against session authority\n  --desktop-sim-supervise   observe desktop-sim marker lifecycle\n  --sim-frame               write one framebuffer fixture\n  --settings-evidence       write fixture PNGs\n\nEnvironment:\n  PF_POWER_SUPPLY_ROOT      override /sys/class/power_supply in interactive modes\n  PF_SHELL_AUTOMATION=1     enable --automation-socket\n  PF_SHELL_LATENCY_TRACE    write interactive action/presentation JSONL\n\nWayland keyboard (when --input is absent; only mapped actions are enabled):\n  Arrows   Move focus\n  [, PageUp / ], PageDown   Previous / next room\n  Enter    Activate\n  Space    Start / continue\n  Escape, Backspace  Back\n  Y        Library filter\n  /        Search\n  Tab      Quick panel\n  F        Quick / toggle favorite\n  S        System Menu (falls back to Return without a provider)\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlatformSupport {
@@ -345,7 +345,7 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         (Key::Char('/'), _) => ("Search.open", "Search.open"),
         (_, 0xff09) => ("Quick.open", "Quick"),
         (Key::Char('f' | 'F'), _) => ("Quick", "Quick"),
-        (Key::Char('s' | 'S'), _) => ("SafeReturn", "SafeReturn"),
+        (Key::Char('s' | 'S'), _) => ("SystemMenu", "SystemMenu"),
         _ => return None,
     };
     (action.starts_with("Room.")
@@ -366,7 +366,7 @@ fn effective_keyboard_action(map: &EffectiveMap, key: Key, keysym: u32) -> Optio
         "Search.open" => ShellAction::Custom("Search.open".into()),
         "Quick.open" => ShellAction::Custom("Quick.open".into()),
         "Quick" => ShellAction::Custom("Quick".into()),
-        "SafeReturn" => ShellAction::Custom("SafeReturn".into()),
+        "SystemMenu" => ShellAction::Custom("SystemMenu".into()),
         _ => unreachable!("keyboard action table is exhaustive"),
     })
 }
@@ -2856,8 +2856,8 @@ fn run_desktop_sim_script(
     observe_desktop_sim_running(socket)?;
     drive_socket_session(core, &mut session)?;
 
-    if core.action(&ShellAction::Custom("SafeReturn".into())) != Some(Effect::SafeReturn) {
-        return Err("scripted safe return action was unavailable".into());
+    if core.action(&ShellAction::Custom("SystemMenu".into())) != Some(Effect::SafeReturn) {
+        return Err("scripted system menu fallback was unavailable".into());
     }
     request_safe_return_if_active(core, &session);
     let return_deadline = Instant::now() + Duration::from_secs(3);
@@ -5076,7 +5076,7 @@ mod durable_tests {
     }
 
     #[test]
-    fn input_flows_cover_rooms_wraparound_quick_and_safe_return() {
+    fn input_flows_cover_rooms_wraparound_quick_and_system_menu_fallback() {
         use pf_scene::AxisMove::Down;
         for case in [
             Flow {
@@ -5113,7 +5113,7 @@ mod durable_tests {
 
         let mut driver = FlowDriver::new();
         assert_eq!(
-            driver.action(custom("SafeReturn")),
+            driver.action(custom("SystemMenu")),
             Some(Effect::SafeReturn)
         );
     }
@@ -7073,7 +7073,7 @@ mod durable_tests {
         core.set_search_query("e");
         assert_eq!(core.search_result_ids().len(), 24, "fixture-list drift");
 
-        let scene = core.scene(metrics, "A Open     PF Safe Return").unwrap();
+        let scene = core.scene(metrics, "A Open     PF System Menu").unwrap();
         let root = scene.root();
         assert_populated_search_query_and_hint(root);
         assert_populated_search_region_and_rows(root);
@@ -8058,7 +8058,7 @@ mod durable_tests {
             (
                 Key::Char('s'),
                 u32::from('s'),
-                ShellAction::Custom("SafeReturn".into()),
+                ShellAction::Custom("SystemMenu".into()),
             ),
         ];
         for (key, keysym, expected) in cases {
@@ -9621,7 +9621,7 @@ exec="./launch"
         assert!(!present_interactive(&mut host, &mut core, "A Open").unwrap());
         assert_eq!(host.frame().unwrap().rgba, last_frame);
         assert_eq!(
-            core.action(&ShellAction::Custom("SafeReturn".into())),
+            core.action(&ShellAction::Custom("SystemMenu".into())),
             Some(Effect::SafeReturn),
             "synthetic S must still reach the safe-return submission path"
         );

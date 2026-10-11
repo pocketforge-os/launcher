@@ -518,7 +518,7 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
         }
         _ => String::new(),
     };
-    let safe = match resolver.resolve(&ShellAction::Custom("SafeReturn".into())) {
+    let system_menu = match resolver.resolve(&ShellAction::Custom("SystemMenu".into())) {
         Ok(GlyphResult::Resolved(binding)) => {
             let glyph = if binding.printed_label.is_empty() {
                 if binding.source_fallback == "pf-guide" {
@@ -529,14 +529,14 @@ pub fn footer_prompt(resolver: &dyn GlyphResolver) -> String {
             } else {
                 binding.printed_label
             };
-            format!("{glyph}  Safe Return")
+            format!("{glyph}  System Menu")
         }
-        _ => "Select+Start  Safe Return".into(),
+        _ => "Select+Start  System Menu".into(),
     };
     if open.is_empty() {
-        safe
+        system_menu
     } else {
-        format!("{open}     {safe}")
+        format!("{open}     {system_menu}")
     }
 }
 
@@ -881,7 +881,7 @@ fn display_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        custom @ ("SafeReturn" | "Quick" | "Search.open" | "Search.submit" | "Start"
+        custom @ ("SystemMenu" | "Quick" | "Search.open" | "Search.submit" | "Start"
         | "Room.next" | "Room.previous") => ShellAction::Custom(custom.into()),
         _ => return None,
     })
@@ -895,7 +895,7 @@ fn semantic_action(name: &str) -> Option<ShellAction> {
         "Move.down" => ShellAction::Move(AxisMove::Down),
         "Move.left" => ShellAction::Move(AxisMove::Left),
         "Move.right" => ShellAction::Move(AxisMove::Right),
-        "SafeReturn" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
+        "SystemMenu" | "Search.open" | "Start" | "Room.next" | "Room.previous" => {
             ShellAction::Custom(name.into())
         }
         "Search.submit" => ShellAction::Custom("Filter.next".into()),
@@ -1063,7 +1063,7 @@ mod tests {
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let effective = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let footer = footer_prompt(&effective);
-        assert_eq!(footer, "A  Open     PF  Safe Return");
+        assert_eq!(footer, "A  Open     PF  System Menu");
         assert!(!footer.contains("Search"));
         assert!(!footer.contains("Quick"));
         assert_eq!(
@@ -1118,7 +1118,7 @@ mod tests {
         assert_eq!(
             source.next_action(deadline).unwrap(),
             ActionPoll::Event(ActionEvent::Action(ShellAction::Custom(
-                "SafeReturn".into()
+                "SystemMenu".into()
             )))
         );
     }
@@ -1417,7 +1417,7 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .any(|row| row.action == "SafeReturn" && row.binding == "PF")
+                .any(|row| row.action == "SystemMenu" && row.binding == "PF")
         );
     }
     #[test]

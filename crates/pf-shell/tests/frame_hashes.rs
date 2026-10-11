@@ -367,9 +367,11 @@ fn vertical_slice_frame_hashes_are_stable() {
         // tsp-3ukmb combines those landed footer/metadata changes with .404's global
         // status chrome and room hierarchy. The following six Home-backed/Quick frames
         // therefore repaint for both the landed footer and the intended chrome.
-        "8751edbe7eee9584f76cde59c1edc61ed8afe6563ed8839f29f6d88bcff80181  ",
-        "189619ea5751ecdf4c86122bf60b0dcf29852350d096d2ba638c738bb886a293  ",
-        "ca35d58e8296d3cd97d739a66db98d29cd125ba9f8e90809480bf4b80f6f0d4d  ",
+        // tsp-op5a.440.10 repaints the five Home-backed frames because the protected
+        // guide prompt now names System Menu instead of the retired Safe Return action.
+        "4f96aee1d2ecf893a69bfc72ee1e2a49dcd62a27fdca4543d6731d150abb4960  ",
+        "02bdb8726a02f416fab6870a1fd604c91160680eb5a819089b0cdb43a60ee2f6  ",
+        "b4423f4006b013df45317334a6af5be63d83eff21b7ac1722b5588f4eb88a453  ",
         // Receipt-driven safe-return and crash summary cards, respectively. tsp-op5a.427
         // rebaselines both after moving the inert Home footer below the summary dim.
         // tsp-op5a.428 rebaselines both terminal-summary frames because their dimmed
@@ -380,8 +382,8 @@ fn vertical_slice_frame_hashes_are_stable() {
         // preceding launch context or paints that app's stale Open-again affordance.
         // Every other frame remains byte-identical, including returned.png, whose
         // receipt is bound to the in-flight launch.
-        "73f377c11d9dca092b95d8715587bcbf9a568be283a7ec49110d492e06c283f2  ",
-        "da17960e033128ae9018bec5503f8596892d4184016fcaf12564203fd30fb6b3  ",
+        "c9a896a0461ad51761cc1a2ccb156fa05b3db831d2508e82641c3d15127bc818  ",
+        "1cf9e47911b6e979e7dd6fabc97e991b9c006dcb3b89fcd9596d70b63a79ecb0  ",
         "63c0c1b892e6354d0b9f64a37e34a718633e4b9199385e1c309ee501315c5fc6  ",
         // Plain Library now has its first grid item focused; the following route
         // explicitly returns focus to search and retains its prior digest.
@@ -411,9 +413,9 @@ fn vertical_slice_frame_hashes_are_stable() {
     ] {
         assert!(lines.contains(expected), "missing {expected} in {lines}");
     }
-    assert!(lines.lines().nth(1).unwrap().starts_with("189619ea"));
+    assert!(lines.lines().nth(1).unwrap().starts_with("02bdb872"));
     assert!(
-        lines.lines().nth(3).unwrap().starts_with("73f377c1"),
+        lines.lines().nth(3).unwrap().starts_with("c9a896a0"),
         "Returned must show the safe-return summary card"
     );
     assert_ne!(
@@ -499,6 +501,8 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     // on the covered Settings rail ("Accessibility") and none on the sheet, because the route
     // behind the sheet shared its focus and came first in pre-order. The backdrop is now an
     // inert frozen snapshot, so the ring sits on the sheet's Text size row.
+    // tsp-op5a.440.10 rebaselines Controls only for the protected System Menu label and
+    // its explicit fail-safe Return description.
     assert!(
         transcript.contains("a479703573325bb1b7546b72245e67198df84f412968ed544d0708a5788373be  ")
     );
@@ -506,7 +510,7 @@ fn settings_and_first_run_frame_hashes_are_stable() {
         transcript.contains("b2035e4ce8ebe27a989c25c9b2c2002442c371ca6455c31517e9c9ae2fc437c5  ")
     );
     assert!(
-        transcript.contains("8951abb2ed500c61ea6976f03fecfd09d4ffdf6667b384648f64e179b23fbd4e  ")
+        transcript.contains("21544b06f25c61b88a09f5766336ca0e4f8f599bc1cd8c81d34a185bf6dbf337  ")
     );
     assert!(
         transcript.contains("3d9ed040605f733d4ef7f732774393c0b4d251bc6d93dd8a2adee426e3e762d5  ")
@@ -544,8 +548,9 @@ fn degraded_authority_status_indicator_frame_hash_is_stable() {
     // styled-status-to-metadata spacing.
     // tsp-q0k8t combines that spacing with .407's corrected hint badge geometry.
     // tsp-3ukmb adds .404's corrected global status chrome to the same degraded Home.
+    // tsp-op5a.440.10 updates the protected guide prompt to System Menu.
     assert!(
-        transcript.contains("44d7890bf64d85d022994d351ff9a763861a89be6637f4e312732ffa434edcac  ")
+        transcript.contains("e36672c5b55e3630504a93dfc0dab91fdfa1b4d40a0619c22ef64a318fe9ea9b  ")
     );
 }
 

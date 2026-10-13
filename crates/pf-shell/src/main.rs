@@ -12057,4 +12057,742 @@ exec="./launch"
             );
         }
     }
+
+    use pf_framehost::{FbInfo, PixelFormat, RotationSource};
+    use pf_scene::{Bounds, NodeId, Scene};
+
+    /// Asymmetric single-node scene shared by the frame-host contract tests.
+    fn stub_scene() -> Scene {
+        let root = Node::new(
+            NodeId::new("stub-root").expect("stub node id"),
+            Role::Button,
+            "stub panel",
+            Bounds::new(7.0, 11.0, 173.0, 67.0),
+            "--state-rest-surface",
+        );
+        Scene::new(root, NodeId::new("stub-root").expect("stub node id")).expect("stub scene")
+    }
+
+    /// The exact XRGB8888 bytes a fresh rasterizer produces for `scene`, in
+    /// logical row-major order with no rotation applied.
+    fn stub_expected_xrgb(scene: &Scene, metrics: SurfaceMetrics) -> Vec<u8> {
+        let frame = Rasterizer::new()
+            .render(scene, metrics)
+            .expect("render stub scene");
+        let mut xrgb = Vec::with_capacity(frame.rgba.len());
+        for rgba in frame.rgba.chunks_exact(4) {
+            xrgb.extend_from_slice(&[rgba[2], rgba[1], rgba[0], 0xff]);
+        }
+        xrgb
+    }
+
+    fn stub_fb_info(width: u32, height: u32) -> FbInfo {
+        FbInfo {
+            width,
+            height,
+            virtual_height: height,
+            stride: width * 4,
+            format: PixelFormat::Xrgb8888,
+            yoffset: 0,
+        }
+    }
+
+    #[test]
+    fn fbdev_from_file_pins_logical_size_orientation_and_rotation() {
+        let portrait = FbdevHost::from_file(
+            tempfile::tempfile().expect("tempfile"),
+            stub_fb_info(720, 1280),
+        )
+        .expect("open portrait fbdev file");
+        assert_eq!(
+            (
+                portrait.metrics().logical_width,
+                portrait.metrics().logical_height
+            ),
+            (720.0, 1280.0),
+            "fbdev logical size must stay the framebuffer size"
+        );
+        assert_eq!(portrait.metrics().orientation, Orientation::Portrait);
+        assert_eq!(
+            portrait.presentation_rotation(),
+            (PresentRotation::Rotate0, RotationSource::Flag)
+        );
+
+        let landscape = FbdevHost::from_file(
+            tempfile::tempfile().expect("tempfile"),
+            stub_fb_info(1280, 720),
+        )
+        .expect("open landscape fbdev file");
+        assert_eq!(
+            (
+                landscape.metrics().logical_width,
+                landscape.metrics().logical_height
+            ),
+            (1280.0, 720.0)
+        );
+        assert_eq!(landscape.metrics().orientation, Orientation::Landscape);
+        assert_eq!(
+            landscape.presentation_rotation(),
+            (PresentRotation::Rotate0, RotationSource::Flag)
+        );
+    }
+
+    #[test]
+    fn fbdev_present_writes_unrotated_row_major_pixels() {
+        let directory = tempfile::TempDir::new().expect("tempdir");
+        let path = directory.path().join("fb0");
+        let info = stub_fb_info(64, 32);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .expect("create fbdev file");
+        file.set_len(u64::from(info.stride) * u64::from(info.height))
+            .expect("size fbdev file");
+        let mut host = FbdevHost::from_file(file, info).expect("open fbdev file");
+        let scene = stub_scene();
+        // A regular file cannot answer the trailing FBIOPAN_DISPLAY ioctl; every
+        // pixel row is written before that ioctl runs.
+        assert!(
+            host.present(&scene).is_err(),
+            "regular files must fail the pan ioctl"
+        );
+        let written = fs::read(&path).expect("read fbdev file");
+        assert_eq!(
+            written,
+            stub_expected_xrgb(&scene, host.metrics()),
+            "fbdev pixels must stay unrotated and row-major"
+        );
+    }
+
+    #[test]
+    fn fbdev_rotation_flag_table_is_pinned() {
+        assert_eq!(
+            PresentRotation::from_degrees("0"),
+            Some(PresentRotation::Rotate0)
+        );
+        assert_eq!(
+            PresentRotation::from_degrees("90"),
+            Some(PresentRotation::Rotate90)
+        );
+        assert_eq!(
+            PresentRotation::from_degrees("180"),
+            Some(PresentRotation::Rotate180)
+        );
+        assert_eq!(
+            PresentRotation::from_degrees("270"),
+            Some(PresentRotation::Rotate270)
+        );
+        assert_eq!(PresentRotation::from_degrees("45"), None);
+        assert_eq!(PresentRotation::from_degrees(""), None);
+        assert_eq!(PresentRotation::Rotate0.degrees(), 0);
+        assert_eq!(PresentRotation::Rotate90.degrees(), 90);
+        assert_eq!(PresentRotation::Rotate180.degrees(), 180);
+        assert_eq!(PresentRotation::Rotate270.degrees(), 270);
+    }
+
+    /// Hermetic stub compositor for the pf-shell Wayland contract tests. The
+    /// harness shape follows the runtime repository's compositor contract test
+    /// (vendored at `vendor/pf-framehost-wayland/tests/compositor_contract.rs`):
+    /// a real `wayland-server` display on a temporary Unix socket, driven from a
+    /// background thread. This stub additionally owns a `wl_output` with a
+    /// current mode, per-test initial `xdg_toplevel.configure` sizes, later
+    /// reconfigures, and an optional `wl_surface.preferred_buffer_transform`.
+    #[cfg(feature = "wayland")]
+    mod wayland_stub_compositor {
+        use super::*;
+        use pf_framehost_wayland::{BufferTransform, WaylandHost};
+        use std::fs::File;
+        use std::os::unix::fs::FileExt;
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::thread::{self, JoinHandle};
+        use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel, xdg_wm_base};
+        use wayland_server::protocol::{
+            wl_buffer, wl_compositor, wl_output, wl_shm, wl_shm_pool, wl_surface,
+        };
+        use wayland_server::{
+            Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource,
+        };
+
+        #[derive(Clone, Debug, Default)]
+        struct StubFrame {
+            width: i32,
+            height: i32,
+            stride: i32,
+            /// Raw `wl_output.transform` value from `set_buffer_transform`, if the
+            /// client sent one. `None` means the buffer transform stayed NORMAL.
+            transform: Option<u32>,
+            xrgb: Vec<u8>,
+        }
+
+        #[derive(Clone, Debug, Default)]
+        struct StubObservations {
+            min_size: Option<(i32, i32)>,
+            max_size: Option<(i32, i32)>,
+            acked_serials: Vec<u32>,
+            frames: Vec<StubFrame>,
+        }
+
+        #[derive(Clone, Debug)]
+        struct StubConfig {
+            initial_configure: (i32, i32),
+            /// Advertised `wl_output` current mode; `None` omits the global.
+            output_mode: Option<(i32, i32)>,
+            /// Send `wl_surface.preferred_buffer_transform(90)` to surfaces new
+            /// enough to receive it.
+            preferred_transform: bool,
+        }
+
+        #[derive(Default)]
+        struct StubControl {
+            pending_configure: Option<(i32, i32)>,
+        }
+
+        #[derive(Clone)]
+        struct StubPoolData {
+            file: Arc<File>,
+        }
+
+        #[derive(Clone)]
+        struct StubBufferData {
+            file: Arc<File>,
+            offset: i32,
+            width: i32,
+            height: i32,
+            stride: i32,
+        }
+
+        struct StubCompositorState {
+            observations: Arc<Mutex<StubObservations>>,
+            control: Arc<Mutex<StubControl>>,
+            config: StubConfig,
+            xdg_surface: Option<xdg_surface::XdgSurface>,
+            toplevel: Option<xdg_toplevel::XdgToplevel>,
+            attached: Option<wl_buffer::WlBuffer>,
+            transform: Option<u32>,
+            configured: bool,
+            configure_serial: u32,
+        }
+
+        impl StubCompositorState {
+            fn new(
+                observations: Arc<Mutex<StubObservations>>,
+                control: Arc<Mutex<StubControl>>,
+                config: StubConfig,
+            ) -> Self {
+                Self {
+                    observations,
+                    control,
+                    config,
+                    xdg_surface: None,
+                    toplevel: None,
+                    attached: None,
+                    transform: None,
+                    configured: false,
+                    configure_serial: 0,
+                }
+            }
+
+            fn observe(&self) -> std::sync::MutexGuard<'_, StubObservations> {
+                self.observations.lock().expect("observations lock")
+            }
+
+            fn configure_surface(&mut self, surface: &wl_surface::WlSurface) {
+                if self.configured {
+                    return;
+                }
+                let (Some(toplevel), Some(xdg_surface)) = (&self.toplevel, &self.xdg_surface)
+                else {
+                    return;
+                };
+                if self.config.preferred_transform && surface.version() >= 6 {
+                    surface.preferred_buffer_transform(wl_output::Transform::_90);
+                }
+                toplevel.configure(
+                    self.config.initial_configure.0,
+                    self.config.initial_configure.1,
+                    Vec::new(),
+                );
+                self.configure_serial = 1;
+                xdg_surface.configure(self.configure_serial);
+                self.configured = true;
+            }
+
+            fn apply_pending_reconfigure(&mut self) {
+                let Some((width, height)) = self
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .pending_configure
+                    .take()
+                else {
+                    return;
+                };
+                let (Some(toplevel), Some(xdg_surface)) = (&self.toplevel, &self.xdg_surface)
+                else {
+                    return;
+                };
+                toplevel.configure(width, height, Vec::new());
+                self.configure_serial += 1;
+                xdg_surface.configure(self.configure_serial);
+            }
+
+            fn record_frame(&mut self) {
+                let Some(buffer) = self.attached.take() else {
+                    return;
+                };
+                let data = buffer.data::<StubBufferData>().expect("stub buffer data");
+                let byte_count =
+                    usize::try_from(data.stride * data.height).expect("stub buffer size");
+                let mut xrgb = vec![0; byte_count];
+                data.file
+                    .read_exact_at(
+                        &mut xrgb,
+                        u64::try_from(data.offset).expect("stub buffer offset"),
+                    )
+                    .expect("read submitted wl_shm buffer");
+                self.observe().frames.push(StubFrame {
+                    width: data.width,
+                    height: data.height,
+                    stride: data.stride,
+                    transform: self.transform,
+                    xrgb,
+                });
+            }
+        }
+
+        macro_rules! stub_global {
+            ($interface:ty) => {
+                impl GlobalDispatch<$interface, ()> for StubCompositorState {
+                    fn bind(
+                        _state: &mut Self,
+                        _handle: &DisplayHandle,
+                        _client: &Client,
+                        resource: New<$interface>,
+                        _global_data: &(),
+                        data_init: &mut DataInit<'_, Self>,
+                    ) {
+                        data_init.init(resource, ());
+                    }
+                }
+            };
+        }
+
+        stub_global!(wl_compositor::WlCompositor);
+        stub_global!(wl_shm::WlShm);
+        stub_global!(xdg_wm_base::XdgWmBase);
+
+        impl GlobalDispatch<wl_output::WlOutput, ()> for StubCompositorState {
+            fn bind(
+                state: &mut Self,
+                _handle: &DisplayHandle,
+                _client: &Client,
+                resource: New<wl_output::WlOutput>,
+                _global_data: &(),
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                let output = data_init.init(resource, ());
+                let Some((width, height)) = state.config.output_mode else {
+                    return;
+                };
+                output.geometry(
+                    0,
+                    0,
+                    0,
+                    0,
+                    wl_output::Subpixel::Unknown,
+                    "pocketforge".to_owned(),
+                    "stub-panel".to_owned(),
+                    wl_output::Transform::Normal,
+                );
+                output.mode(wl_output::Mode::Current, width, height, 60_000);
+                output.scale(1);
+                output.done();
+            }
+        }
+
+        impl Dispatch<wl_compositor::WlCompositor, ()> for StubCompositorState {
+            fn request(
+                _state: &mut Self,
+                _client: &Client,
+                _resource: &wl_compositor::WlCompositor,
+                request: wl_compositor::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                if let wl_compositor::Request::CreateSurface { id } = request {
+                    data_init.init(id, ());
+                }
+            }
+        }
+
+        impl Dispatch<wl_surface::WlSurface, ()> for StubCompositorState {
+            fn request(
+                state: &mut Self,
+                _client: &Client,
+                surface: &wl_surface::WlSurface,
+                request: wl_surface::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                _data_init: &mut DataInit<'_, Self>,
+            ) {
+                match request {
+                    wl_surface::Request::Attach { buffer, .. } => state.attached = buffer,
+                    wl_surface::Request::SetBufferTransform { transform } => {
+                        state.transform = Some(u32::from(transform));
+                    }
+                    wl_surface::Request::Commit => {
+                        state.configure_surface(surface);
+                        state.record_frame();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<wl_shm::WlShm, ()> for StubCompositorState {
+            fn request(
+                _state: &mut Self,
+                _client: &Client,
+                _resource: &wl_shm::WlShm,
+                request: wl_shm::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                if let wl_shm::Request::CreatePool { id, fd, .. } = request {
+                    data_init.init(
+                        id,
+                        StubPoolData {
+                            file: Arc::new(File::from(fd)),
+                        },
+                    );
+                }
+            }
+        }
+
+        impl Dispatch<wl_shm_pool::WlShmPool, StubPoolData> for StubCompositorState {
+            fn request(
+                _state: &mut Self,
+                _client: &Client,
+                _resource: &wl_shm_pool::WlShmPool,
+                request: wl_shm_pool::Request,
+                data: &StubPoolData,
+                _handle: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                if let wl_shm_pool::Request::CreateBuffer {
+                    id,
+                    offset,
+                    width,
+                    height,
+                    stride,
+                    ..
+                } = request
+                {
+                    data_init.init(
+                        id,
+                        StubBufferData {
+                            file: data.file.clone(),
+                            offset,
+                            width,
+                            height,
+                            stride,
+                        },
+                    );
+                }
+            }
+        }
+
+        impl Dispatch<wl_buffer::WlBuffer, StubBufferData> for StubCompositorState {
+            fn request(
+                _state: &mut Self,
+                _client: &Client,
+                _resource: &wl_buffer::WlBuffer,
+                _request: wl_buffer::Request,
+                _data: &StubBufferData,
+                _handle: &DisplayHandle,
+                _data_init: &mut DataInit<'_, Self>,
+            ) {
+            }
+        }
+
+        impl Dispatch<wl_output::WlOutput, ()> for StubCompositorState {
+            fn request(
+                _state: &mut Self,
+                _client: &Client,
+                _resource: &wl_output::WlOutput,
+                _request: wl_output::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                _data_init: &mut DataInit<'_, Self>,
+            ) {
+            }
+        }
+
+        impl Dispatch<xdg_wm_base::XdgWmBase, ()> for StubCompositorState {
+            fn request(
+                state: &mut Self,
+                _client: &Client,
+                _resource: &xdg_wm_base::XdgWmBase,
+                request: xdg_wm_base::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                match request {
+                    xdg_wm_base::Request::GetXdgSurface { id, .. } => {
+                        state.xdg_surface = Some(data_init.init(id, ()));
+                    }
+                    xdg_wm_base::Request::Pong { .. } => {}
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<xdg_surface::XdgSurface, ()> for StubCompositorState {
+            fn request(
+                state: &mut Self,
+                _client: &Client,
+                _resource: &xdg_surface::XdgSurface,
+                request: xdg_surface::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                match request {
+                    xdg_surface::Request::GetToplevel { id } => {
+                        state.toplevel = Some(data_init.init(id, ()));
+                    }
+                    xdg_surface::Request::AckConfigure { serial } => {
+                        state.observe().acked_serials.push(serial);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<xdg_toplevel::XdgToplevel, ()> for StubCompositorState {
+            fn request(
+                state: &mut Self,
+                _client: &Client,
+                _resource: &xdg_toplevel::XdgToplevel,
+                request: xdg_toplevel::Request,
+                _data: &(),
+                _handle: &DisplayHandle,
+                _data_init: &mut DataInit<'_, Self>,
+            ) {
+                match request {
+                    xdg_toplevel::Request::SetMinSize { width, height } => {
+                        state.observe().min_size = Some((width, height));
+                    }
+                    xdg_toplevel::Request::SetMaxSize { width, height } => {
+                        state.observe().max_size = Some((width, height));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        struct StubCompositor {
+            socket_path: PathBuf,
+            observations: Arc<Mutex<StubObservations>>,
+            control: Arc<Mutex<StubControl>>,
+            running: Arc<AtomicBool>,
+            thread: Option<JoinHandle<()>>,
+        }
+
+        impl StubCompositor {
+            fn start(runtime: &tempfile::TempDir, name: &str, config: StubConfig) -> Self {
+                let socket_path = runtime.path().join(name);
+                let listener =
+                    UnixListener::bind(&socket_path).expect("bind stub compositor socket");
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking stub listener");
+                let observations = Arc::new(Mutex::new(StubObservations::default()));
+                let control = Arc::new(Mutex::new(StubControl::default()));
+                let running = Arc::new(AtomicBool::new(true));
+                let thread = {
+                    let observations = Arc::clone(&observations);
+                    let control = Arc::clone(&control);
+                    let running = Arc::clone(&running);
+                    thread::spawn(move || {
+                        let mut display =
+                            Display::<StubCompositorState>::new().expect("stub display");
+                        let handle = display.handle();
+                        handle
+                            .create_global::<StubCompositorState, wl_compositor::WlCompositor, _>(
+                                6,
+                                (),
+                            );
+                        handle.create_global::<StubCompositorState, wl_shm::WlShm, _>(1, ());
+                        handle
+                            .create_global::<StubCompositorState, xdg_wm_base::XdgWmBase, _>(1, ());
+                        if config.output_mode.is_some() {
+                            handle.create_global::<StubCompositorState, wl_output::WlOutput, _>(
+                                4,
+                                (),
+                            );
+                        }
+                        let mut state = StubCompositorState::new(observations, control, config);
+                        while running.load(Ordering::Acquire) {
+                            match listener.accept() {
+                                Ok((stream, _)) => {
+                                    display
+                                        .handle()
+                                        .insert_client(stream, Arc::new(()))
+                                        .expect("insert stub client");
+                                }
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                                Err(error) => panic!("stub accept failed: {error}"),
+                            }
+                            display
+                                .dispatch_clients(&mut state)
+                                .expect("dispatch stub clients");
+                            state.apply_pending_reconfigure();
+                            display.flush_clients().expect("flush stub clients");
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    })
+                };
+                Self {
+                    socket_path,
+                    observations,
+                    control,
+                    running,
+                    thread: Some(thread),
+                }
+            }
+
+            fn snapshot(&self) -> StubObservations {
+                self.observations.lock().expect("observations lock").clone()
+            }
+
+            fn wait_for_frames(&self, count: usize) -> StubObservations {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let snapshot = self.snapshot();
+                    if snapshot.frames.len() >= count {
+                        return snapshot;
+                    }
+                    assert!(Instant::now() < deadline, "stub frame timeout");
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+
+            fn send_configure(&self, width: i32, height: i32) {
+                self.control.lock().expect("control lock").pending_configure =
+                    Some((width, height));
+            }
+
+            fn shutdown(&mut self) {
+                self.running.store(false, Ordering::Release);
+                if let Some(thread) = self.thread.take() {
+                    thread.join().expect("join stub compositor");
+                }
+            }
+        }
+
+        impl Drop for StubCompositor {
+            fn drop(&mut self) {
+                self.shutdown();
+            }
+        }
+
+        /// The compositor-session contract: the shell adopts the logical size the
+        /// compositor configures, unrotated. Positive control against
+        /// `wayland_pinned_host_mode_ignores_configure_and_keeps_device_size`.
+        #[test]
+        fn wayland_compositor_mode_adopts_portrait_configure_size() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-portrait",
+                StubConfig {
+                    initial_configure: (720, 1280),
+                    output_mode: None,
+                    preferred_transform: false,
+                },
+            );
+            let host = WaylandHost::connect_with_socket_and_transform(
+                &stub.socket_path,
+                1280,
+                720,
+                BufferTransform::Normal,
+            )
+            .expect("connect stub compositor");
+            let metrics = host.metrics();
+            assert_eq!(
+                (
+                    metrics.logical_width,
+                    metrics.logical_height,
+                    metrics.orientation
+                ),
+                (720.0, 1280.0, Orientation::Portrait),
+                "compositor mode must adopt the xdg_toplevel configure size"
+            );
+        }
+
+        /// Negative control: the pinned `--wayland` host mode stays
+        /// device-faithful and ignores compositor configure sizes.
+        #[test]
+        fn wayland_pinned_host_mode_ignores_configure_and_keeps_device_size() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-pinned",
+                StubConfig {
+                    initial_configure: (720, 1280),
+                    output_mode: None,
+                    preferred_transform: false,
+                },
+            );
+            let mut host = WaylandHost::connect_with_socket_and_transform(
+                &stub.socket_path,
+                1280,
+                720,
+                BufferTransform::Normal,
+            )
+            .expect("connect stub compositor");
+            let metrics = host.metrics();
+            assert_eq!(
+                (metrics.logical_width, metrics.logical_height),
+                (1280.0, 720.0),
+                "pinned mode must keep its device-faithful size"
+            );
+            let scene = stub_scene();
+            host.present(&scene).expect("present pinned frame");
+            let snapshot = stub.wait_for_frames(1);
+            let frame = &snapshot.frames[0];
+            assert_eq!((frame.width, frame.height, frame.stride), (1280, 720, 5120));
+            assert_eq!(
+                frame.transform, None,
+                "Normal buffer transform sends no set_buffer_transform"
+            );
+            assert_eq!(snapshot.min_size, Some((1280, 720)));
+            assert_eq!(snapshot.max_size, Some((1280, 720)));
+            assert_eq!(
+                frame.xrgb,
+                stub_expected_xrgb(&scene, metrics),
+                "pinned Normal mode submits unrotated logical pixels"
+            );
+
+            // A later configure must NOT resize the pinned host.
+            stub.send_configure(640, 480);
+            host.present(&scene).expect("pinned re-present succeeds");
+            let resized = stub.wait_for_frames(2);
+            let frame = &resized.frames[1];
+            assert_eq!(
+                (frame.width, frame.height),
+                (1280, 720),
+                "pinned mode ignores later configure sizes"
+            );
+            assert_eq!(host.metrics().logical_width, 1280.0);
+        }
+    }
 }

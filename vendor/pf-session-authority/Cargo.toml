@@ -41,9 +41,16 @@ path = "tests/daemon_initial_state.rs"
 name = "daemon_slow_client"
 path = "tests/daemon_slow_client.rs"
 
+[dependencies.libc]
+version = "0.2"
+
 [dependencies.pf-app-manifest]
 version = "0.0.1"
 path = "../pf-app-manifest"
+
+[dependencies.pf-peer-identity]
+version = "0.0.1"
+path = "../pf-peer-identity"
 
 [dependencies.pf-ports]
 version = "0.0.1"

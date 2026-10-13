@@ -37,6 +37,10 @@ wayland = ["dep:pf-framehost-wayland", "pf-framehost-wayland/keyboard"]
 # Keep the vendored runtime closure complete for pf-session-authority's dev-dependency.
 pf-app-launch.workspace = true
 tempfile = "3.21.0"
+# Hermetic stub compositor for the pf-shell wayland_* contract tests; pins match
+# the runtime crate's own compositor_contract test harness.
+wayland-server = "=0.31.10"
+wayland-protocols = { version = "=0.32.9", features = ["server"] }
 
 [lints]
 workspace = true

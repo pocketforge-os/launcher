@@ -13,11 +13,19 @@ an unchanged publication is treated as stale and fails closed, while a changed
 publication is the only input accepted for reconnect. Missing, malformed, or
 relative-socket publications fail before a Wayland connection is attempted.
 
-The logical shell surface is 1280x720 landscape. In compositor mode the client
-submits a 720x1280 `wl_shm` buffer, applies `wl_surface.set_buffer_transform`
-with the 90-degree transform, rotates the rendered pixels, and maps damage into
-the native portrait buffer. The existing `--wayland` path remains normal
-landscape Wayland, and `--fbdev` remains the legacy framebuffer path.
+In compositor mode the client does not own orientation or a fixed size: the
+compositor owns physical-to-logical rotation. The logical surface size comes
+from the `xdg_toplevel` configure event; only when the compositor configures
+0x0 (the protocol's "client chooses") does the client fall back to the current
+`wl_output` mode, and a 0x0 configure with no output fails closed. Buffers are
+submitted at the logical size, untransformed: no client-side
+`set_buffer_transform`, no pixel rotation. If the compositor suggests a
+`wl_surface.preferred_buffer_transform`, the client records it in a log line
+and does not act on it. A later configure with a new size is a resize: the
+shell re-lays out and redraws at the new logical size. The existing `--wayland`
+path remains a pinned device-faithful landscape client (configure events never
+resize it), and `--fbdev` remains the legacy framebuffer path with its own
+`--rotate` handling.
 
 Compositor mode rejects `--device`, `--input`, `--rotate`, and `--sim-frame`.
 Thus this client path never opens `/dev/dri`, DRM master, `/dev/fb0`, or raw

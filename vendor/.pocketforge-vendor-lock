@@ -1,3 +1,3 @@
-cargo_lock_sha256=da607f43dbbdf379ce1a208c45e56f8ad375aac8389bf0edf6f30679074d03d3
+cargo_lock_sha256=b1768dff7e446b32088f6b500776931693fe5349b95e37cbba99ba5ab572ca7d
 cargo_version=cargo 1.98.1 (797e8a9bc 2026-08-05)
-vendored_packages=139
+vendored_packages=140

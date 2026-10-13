@@ -4547,8 +4547,9 @@ fn present(
 
 /// Presentation attempts allowed when the compositor resizes the surface while
 /// a present is in flight. Each attempt re-lays out at the newest metrics, so a
-/// resize burst settles in one extra frame per configure; the bound keeps a
-/// pathological configure storm from spinning inside a single present call.
+/// resize burst settles in one extra frame per configure; if every attempt is
+/// raced by another resize the presentation fails closed, because success must
+/// never cover a frame laid out for metrics the compositor already replaced.
 const PRESENT_RESIZE_ATTEMPTS: usize = 4;
 
 fn present_interactive(
@@ -4560,7 +4561,7 @@ fn present_interactive(
     // configure) inside present, after this scene was laid out. If the surface
     // resized during that dispatch, the frame just committed carries a stale
     // layout, so rebuild it at the new metrics and present again.
-    for attempt in 1..=PRESENT_RESIZE_ATTEMPTS {
+    for _attempt in 1..=PRESENT_RESIZE_ATTEMPTS {
         let metrics = host.metrics();
         let Some(scene) = core.scene(metrics, prompt) else {
             // While a session is active, the foreground app owns presentation. Keep
@@ -4572,13 +4573,10 @@ fn present_interactive(
         if host.metrics() == metrics {
             return Ok(true);
         }
-        if attempt == PRESENT_RESIZE_ATTEMPTS {
-            eprintln!(
-                "pf-shell: compositor resized the surface during {PRESENT_RESIZE_ATTEMPTS} consecutive presents; keeping the latest committed frame"
-            );
-        }
     }
-    Ok(true)
+    Err(format!(
+        "compositor resized the surface during {PRESENT_RESIZE_ATTEMPTS} consecutive presents"
+    ))
 }
 
 fn present_pending_reconnect_redraw(
@@ -10158,6 +10156,115 @@ exec="./launch"
         );
         assert_eq!(frames.get(), 1);
         assert_eq!(host.presents, 1);
+    }
+
+    /// A host whose surface is resized by every present (a pathological
+    /// configure storm) must never let `present_interactive` report success for
+    /// a stale-layout frame: the bounded retry fails closed instead.
+    struct StormHost {
+        metrics: SurfaceMetrics,
+        presents: u64,
+    }
+
+    impl FrameHost for StormHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.metrics
+        }
+        fn present(&mut self, _scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            self.presents += 1;
+            // Every commit is raced by another resize, flipping the surface
+            // between landscape and portrait.
+            self.metrics = if self.metrics.orientation == Orientation::Landscape {
+                SurfaceMetrics {
+                    logical_width: 720.0,
+                    logical_height: 1280.0,
+                    orientation: Orientation::Portrait,
+                    ..self.metrics
+                }
+            } else {
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    orientation: Orientation::Landscape,
+                    ..self.metrics
+                }
+            };
+            Ok(pf_ports::PresentAck {
+                sequence: self.presents,
+            })
+        }
+    }
+
+    impl RenderedFrameHost for StormHost {
+        fn set_text_scale(&mut self, _factor: f32) -> Result<(), String> {
+            Ok(())
+        }
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            None
+        }
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            None
+        }
+    }
+
+    #[test]
+    fn resize_storm_fails_closed_instead_of_reporting_a_stale_frame() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = StormHost {
+            metrics: SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Insets::default(),
+                orientation: Orientation::Landscape,
+            },
+            presents: 0,
+        };
+        let attempts = u64::try_from(PRESENT_RESIZE_ATTEMPTS).unwrap();
+
+        let result = present_interactive(&mut host, &mut core, "A Open");
+        let error = result.expect_err("a resize racing every attempt must fail the presentation");
+        assert!(
+            error.contains("consecutive presents"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            host.presents, attempts,
+            "exactly the bounded number of attempts is committed before failing"
+        );
+
+        // The failure propagates through the idle-loop presentation path: a
+        // later resize re-triggers presentation, and the storm still fails
+        // closed instead of letting the shell go idle on a stale-layout frame.
+        let before = redraw_state(&core);
+        let before_metrics = host.metrics();
+        host.metrics = SurfaceMetrics {
+            logical_width: 720.0,
+            logical_height: 1280.0,
+            orientation: Orientation::Portrait,
+            ..before_metrics
+        };
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+        let propagated = present_if_changed(
+            &mut host,
+            &mut core,
+            "A Open",
+            &before,
+            &before_metrics,
+            &mut frames,
+            &mut presented_revision,
+        );
+        assert!(
+            propagated.is_err(),
+            "present_if_changed must propagate the fail-closed error"
+        );
+        assert_eq!(host.presents, attempts * 2);
+        assert_eq!(frames.get(), 0, "no frame is reported as presented");
+        assert_eq!(presented_revision, 0);
     }
 
     impl InteractiveInput<OffscreenHost> for ScriptedInteractiveInput {

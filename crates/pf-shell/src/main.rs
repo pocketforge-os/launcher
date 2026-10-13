@@ -9,7 +9,7 @@ use pf_catalog::{
 };
 use pf_framehost::{FbdevHost, OffscreenHost, PresentRotation};
 #[cfg(feature = "wayland")]
-use pf_framehost_wayland::{BufferTransform, Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
+use pf_framehost_wayland::{Key, KeyEvent, KeyState, RepeatInfo, WaylandHost};
 use pf_input_map::{DeviceContract, EffectiveMap, JsonRemapStore, MemoryStore, RemapStore};
 #[cfg(feature = "desktop-sim")]
 use pf_ports::Clock;
@@ -1105,13 +1105,8 @@ fn main() -> Result<(), String> {
         let environment = value(&args, "--session-environment").unwrap_or(DEFAULT_ENVIRONMENT);
         let environment_path = PathBuf::from(environment);
         let session = CompositorSession::load(&environment_path)?;
-        let host = WaylandHost::connect_with_socket_and_transform(
-            &session.wayland_display,
-            1280,
-            720,
-            BufferTransform::Rotate90,
-        )
-        .map_err(|e| e.to_string())?;
+        let host = WaylandHost::connect_with_socket_configure_driven(&session.wayland_display)
+            .map_err(|e| e.to_string())?;
         let mut host = CapturingWaylandHost::new_compositor(host, environment_path, session);
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut automation = automation_server(&args)?;
@@ -1763,7 +1758,7 @@ impl CapturingWaylandHost {
             .ok_or_else(|| "compositor reconnect is missing its session publication".to_owned())?;
         let next = CompositorSession::reload(environment, previous)?;
         self.inner
-            .reconnect_with_socket_and_transform(&next.wayland_display, BufferTransform::Rotate90)
+            .reconnect_with_socket(&next.wayland_display)
             .map_err(|error| error.to_string())?;
         self.session = Some(next);
         self.capture = OffscreenHost::new(self.inner.metrics());
@@ -1772,6 +1767,22 @@ impl CapturingWaylandHost {
             .map_err(|error| format!("render: {error:?}"))?;
         restore_wayland_theme_after_reconnect(&mut self.inner, &mut self.capture, self.theme_base);
         self.reconnect_redraw_pending = true;
+        Ok(())
+    }
+
+    /// Rebuild the capture surface after a compositor-driven resize.
+    fn ensure_capture_size(&mut self) -> Result<(), PresentFailure> {
+        let metrics = self.inner.metrics();
+        if self.capture.metrics() == metrics {
+            return Ok(());
+        }
+        self.capture = OffscreenHost::new(metrics);
+        self.capture
+            .set_text_scale(self.text_scale)
+            .map_err(|error| PresentFailure::Backend(format!("render: {error:?}")))?;
+        if let Some(base) = self.theme_base {
+            self.capture.set_theme_base(base);
+        }
         Ok(())
     }
 }
@@ -1796,6 +1807,7 @@ impl FrameHost for CapturingWaylandHost {
             }
             Err(error) => return Err(error),
         };
+        self.ensure_capture_size()?;
         self.capture.present(scene)?;
         self.reconnect_redraw_pending = false;
         Ok(ack)
@@ -2018,6 +2030,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             }
         }
         let before = redraw_state(core);
+        let before_metrics = host.metrics();
         drive_socket_session(core, &mut session)?;
         drive_automation(
             automation,
@@ -2050,6 +2063,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 core,
                 &activate,
                 &before,
+                &before_metrics,
                 &mut frames,
                 &mut presented_revision,
             )?;
@@ -2572,8 +2586,17 @@ fn acknowledge_presented_frames(
 ) -> Result<(), String> {
     if acknowledger.poll(socket, core, *frames)? {
         let before = redraw_state(core);
+        let before_metrics = host.metrics();
         drive_socket_session(core, session)?;
-        present_if_changed(host, core, activate, &before, frames, presented_revision)?;
+        present_if_changed(
+            host,
+            core,
+            activate,
+            &before,
+            &before_metrics,
+            frames,
+            presented_revision,
+        )?;
     }
     Ok(())
 }
@@ -3083,10 +3106,15 @@ fn present_if_changed(
         Option<String>,
         u64,
     ),
+    before_metrics: &SurfaceMetrics,
     frames: &mut automation::FrameCounter,
     presented_revision: &mut u64,
 ) -> Result<bool, String> {
-    if *before == redraw_state(core) || !present_interactive(host, core, activate)? {
+    // A compositor-driven resize changes metrics without touching core state, so the
+    // surface metrics are part of the redraw trigger.
+    if (*before == redraw_state(core) && *before_metrics == host.metrics())
+        || !present_interactive(host, core, activate)?
+    {
         return Ok(false);
     }
     frames.increment();
@@ -10016,6 +10044,7 @@ exec="./launch"
             orientation: Orientation::Landscape,
         });
         let before = redraw_state(&core);
+        let before_metrics = host.metrics();
         let mut frames = automation::FrameCounter::default();
         let mut presented_revision = 0;
 
@@ -10025,6 +10054,7 @@ exec="./launch"
                 &mut core,
                 "A Open",
                 &before,
+                &before_metrics,
                 &mut frames,
                 &mut presented_revision,
             )
@@ -10032,6 +10062,81 @@ exec="./launch"
         );
         assert_eq!(frames.get(), 0);
         assert_eq!(presented_revision, 0);
+    }
+
+    struct ResizingHost {
+        metrics: SurfaceMetrics,
+        presents: u64,
+    }
+
+    impl FrameHost for ResizingHost {
+        fn metrics(&self) -> SurfaceMetrics {
+            self.metrics
+        }
+        fn present(&mut self, _scene: &pf_scene::Scene) -> pf_ports::PresentResult {
+            self.presents += 1;
+            Ok(pf_ports::PresentAck {
+                sequence: self.presents,
+            })
+        }
+    }
+
+    impl RenderedFrameHost for ResizingHost {
+        fn set_text_scale(&mut self, _factor: f32) -> Result<(), String> {
+            Ok(())
+        }
+        fn render_notes(&self) -> Option<&[RenderNote]> {
+            None
+        }
+        fn raster_frame(&self) -> Option<&RasterFrame> {
+            None
+        }
+    }
+
+    /// Positive control for `idle_state_does_not_present_another_frame`: a
+    /// compositor-driven resize changes only the surface metrics, and that alone
+    /// must trigger a re-present (the re-layout happens inside `present_interactive`).
+    #[test]
+    fn metrics_change_alone_triggers_a_present() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let mut host = ResizingHost {
+            metrics: SurfaceMetrics {
+                logical_width: 1280.0,
+                logical_height: 720.0,
+                scale: 1.0,
+                safe_insets: Insets::default(),
+                orientation: Orientation::Landscape,
+            },
+            presents: 0,
+        };
+        let before = redraw_state(&core);
+        let before_metrics = host.metrics();
+        host.metrics = SurfaceMetrics {
+            logical_width: 720.0,
+            logical_height: 1280.0,
+            orientation: Orientation::Portrait,
+            ..before_metrics
+        };
+        let mut frames = automation::FrameCounter::default();
+        let mut presented_revision = 0;
+
+        assert!(
+            present_if_changed(
+                &mut host,
+                &mut core,
+                "A Open",
+                &before,
+                &before_metrics,
+                &mut frames,
+                &mut presented_revision,
+            )
+            .unwrap()
+        );
+        assert_eq!(frames.get(), 1);
+        assert_eq!(host.presents, 1);
     }
 
     impl InteractiveInput<OffscreenHost> for ScriptedInteractiveInput {
@@ -12146,6 +12251,7 @@ exec="./launch"
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)
             .expect("create fbdev file");
         file.set_len(u64::from(info.stride) * u64::from(info.height))
@@ -12202,7 +12308,7 @@ exec="./launch"
     #[cfg(feature = "wayland")]
     mod wayland_stub_compositor {
         use super::*;
-        use pf_framehost_wayland::{BufferTransform, WaylandHost};
+        use pf_framehost_wayland::{BufferTransform, WaylandHost, WaylandHostError};
         use std::fs::File;
         use std::os::unix::fs::FileExt;
         use std::os::unix::net::UnixListener;
@@ -12544,12 +12650,8 @@ exec="./launch"
                 _handle: &DisplayHandle,
                 data_init: &mut DataInit<'_, Self>,
             ) {
-                match request {
-                    xdg_wm_base::Request::GetXdgSurface { id, .. } => {
-                        state.xdg_surface = Some(data_init.init(id, ()));
-                    }
-                    xdg_wm_base::Request::Pong { .. } => {}
-                    _ => {}
+                if let xdg_wm_base::Request::GetXdgSurface { id, .. } = request {
+                    state.xdg_surface = Some(data_init.init(id, ()));
                 }
             }
         }
@@ -12719,13 +12821,8 @@ exec="./launch"
                     preferred_transform: false,
                 },
             );
-            let host = WaylandHost::connect_with_socket_and_transform(
-                &stub.socket_path,
-                1280,
-                720,
-                BufferTransform::Normal,
-            )
-            .expect("connect stub compositor");
+            let mut host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
             let metrics = host.metrics();
             assert_eq!(
                 (
@@ -12735,6 +12832,209 @@ exec="./launch"
                 ),
                 (720.0, 1280.0, Orientation::Portrait),
                 "compositor mode must adopt the xdg_toplevel configure size"
+            );
+            let scene = stub_scene();
+            host.present(&scene).expect("present driven frame");
+            let snapshot = stub.wait_for_frames(1);
+            let frame = &snapshot.frames[0];
+            assert_eq!(
+                (frame.width, frame.height, frame.stride),
+                (720, 1280, 2880),
+                "the buffer is submitted at the configure size"
+            );
+            assert_eq!(
+                frame.transform, None,
+                "compositor mode never rotates client-side"
+            );
+            assert_eq!(snapshot.min_size, None);
+            assert_eq!(snapshot.max_size, None);
+            assert_eq!(snapshot.acked_serials, vec![1]);
+            assert_eq!(
+                frame.xrgb,
+                stub_expected_xrgb(&scene, metrics),
+                "compositor mode submits unrotated logical pixels"
+            );
+        }
+
+        /// A landscape configure wins over a mismatching `wl_output` current mode:
+        /// the surface size comes from `xdg_toplevel`, laid out without rotation.
+        #[test]
+        fn wayland_compositor_mode_adopts_landscape_configure_size() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-landscape",
+                StubConfig {
+                    initial_configure: (1280, 720),
+                    output_mode: Some((720, 1280)),
+                    preferred_transform: false,
+                },
+            );
+            let mut host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
+            let metrics = host.metrics();
+            assert_eq!(
+                (
+                    metrics.logical_width,
+                    metrics.logical_height,
+                    metrics.orientation
+                ),
+                (1280.0, 720.0, Orientation::Landscape),
+                "a non-zero configure must win over the wl_output mode"
+            );
+            let scene = stub_scene();
+            host.present(&scene).expect("present landscape frame");
+            let snapshot = stub.wait_for_frames(1);
+            let frame = &snapshot.frames[0];
+            assert_eq!((frame.width, frame.height, frame.stride), (1280, 720, 5120));
+            assert_eq!(frame.transform, None);
+            assert_eq!(
+                frame.xrgb,
+                stub_expected_xrgb(&scene, metrics),
+                "landscape configure lays out without rotation"
+            );
+        }
+
+        /// The protocol allows a 0x0 configure ("client chooses"); the only fallback
+        /// is the current `wl_output` mode.
+        #[test]
+        fn wayland_zero_configure_falls_back_to_output_mode() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-fallback",
+                StubConfig {
+                    initial_configure: (0, 0),
+                    output_mode: Some((720, 1280)),
+                    preferred_transform: false,
+                },
+            );
+            let host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
+            let metrics = host.metrics();
+            assert_eq!(
+                (
+                    metrics.logical_width,
+                    metrics.logical_height,
+                    metrics.orientation
+                ),
+                (720.0, 1280.0, Orientation::Portrait),
+                "a 0x0 configure falls back to the wl_output current mode"
+            );
+        }
+
+        /// Negative control: a 0x0 configure with no `wl_output` fails closed instead
+        /// of presenting at a placeholder size.
+        #[test]
+        fn wayland_zero_configure_without_output_fails_closed() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-fail-closed",
+                StubConfig {
+                    initial_configure: (0, 0),
+                    output_mode: None,
+                    preferred_transform: false,
+                },
+            );
+            match WaylandHost::connect_with_socket_configure_driven(&stub.socket_path) {
+                Err(WaylandHostError::InvalidConfigure {
+                    width: 0,
+                    height: 0,
+                }) => {}
+                Err(other) => panic!("unexpected error: {other}"),
+                Ok(_) => panic!("a 0x0 configure without any output must not connect"),
+            }
+        }
+
+        /// `wl_surface.preferred_buffer_transform` is recorded (and logged) but never
+        /// acted on: the frame stays unrotated at the configure size.
+        #[test]
+        fn wayland_preferred_buffer_transform_is_recorded_not_applied() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-preferred",
+                StubConfig {
+                    initial_configure: (720, 1280),
+                    output_mode: None,
+                    preferred_transform: true,
+                },
+            );
+            let mut host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
+            host.poll().expect("poll for the transform hint");
+            assert_eq!(
+                host.preferred_buffer_transform_hint(),
+                Some(1),
+                "the hint is recorded for diagnostics (1 = 90 degrees)"
+            );
+            let scene = stub_scene();
+            host.present(&scene).expect("present hinted frame");
+            let snapshot = stub.wait_for_frames(1);
+            let frame = &snapshot.frames[0];
+            assert_eq!((frame.width, frame.height), (720, 1280));
+            assert_eq!(
+                frame.transform, None,
+                "the hint must not rotate the submitted buffer"
+            );
+            assert_eq!(
+                frame.xrgb,
+                stub_expected_xrgb(&scene, host.metrics()),
+                "pixels stay unrotated despite the hint"
+            );
+        }
+
+        /// A later configure with a new size drives a re-layout: metrics change and
+        /// the next present submits at the new size, still unrotated.
+        #[test]
+        fn wayland_configure_resize_changes_metrics_and_frame_size() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-resize",
+                StubConfig {
+                    initial_configure: (1280, 720),
+                    output_mode: None,
+                    preferred_transform: false,
+                },
+            );
+            let mut host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
+            let scene = stub_scene();
+            host.present(&scene).expect("present first frame");
+            let first = stub.wait_for_frames(1);
+            assert_eq!((first.frames[0].width, first.frames[0].height), (1280, 720));
+
+            stub.send_configure(720, 1280);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while host.metrics().orientation != Orientation::Portrait {
+                assert!(Instant::now() < deadline, "resize configure timeout");
+                host.poll().expect("poll for the resize configure");
+            }
+            let metrics = host.metrics();
+            assert_eq!(
+                (metrics.logical_width, metrics.logical_height),
+                (720.0, 1280.0)
+            );
+            host.present(&scene).expect("present resized frame");
+            let snapshot = stub.wait_for_frames(2);
+            assert!(
+                snapshot.acked_serials.contains(&2),
+                "the resize configure must be acked: {:?}",
+                snapshot.acked_serials
+            );
+            let frame = &snapshot.frames[1];
+            assert_eq!(
+                (frame.width, frame.height, frame.stride),
+                (720, 1280, 2880),
+                "the resized buffer matches the new logical size"
+            );
+            assert_eq!(frame.transform, None);
+            assert_eq!(
+                frame.xrgb,
+                stub_expected_xrgb(&scene, metrics),
+                "the resized frame is laid out at the new size without rotation"
             );
         }
 
@@ -12792,7 +13092,10 @@ exec="./launch"
                 (1280, 720),
                 "pinned mode ignores later configure sizes"
             );
-            assert_eq!(host.metrics().logical_width, 1280.0);
+            assert_eq!(
+                (host.metrics().logical_width, host.metrics().logical_height),
+                (1280.0, 720.0)
+            );
         }
     }
 }

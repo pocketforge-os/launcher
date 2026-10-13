@@ -4545,18 +4545,39 @@ fn present(
     present_scene(host, core, prompt, &scene)
 }
 
+/// Presentation attempts allowed when the compositor resizes the surface while
+/// a present is in flight. Each attempt re-lays out at the newest metrics, so a
+/// resize burst settles in one extra frame per configure; the bound keeps a
+/// pathological configure storm from spinning inside a single present call.
+const PRESENT_RESIZE_ATTEMPTS: usize = 4;
+
 fn present_interactive(
     host: &mut impl RenderedFrameHost,
     core: &mut ShellCore,
     prompt: &str,
 ) -> Result<bool, String> {
-    let Some(scene) = core.scene(host.metrics(), prompt) else {
-        // While a session is active, the foreground app owns presentation. Keep
-        // polling input, authority events, and host lifecycle without committing
-        // a replacement shell frame.
-        return Ok(false);
-    };
-    present_scene(host, core, prompt, &scene)?;
+    // The host dispatches pending compositor events (including xdg_toplevel
+    // configure) inside present, after this scene was laid out. If the surface
+    // resized during that dispatch, the frame just committed carries a stale
+    // layout, so rebuild it at the new metrics and present again.
+    for attempt in 1..=PRESENT_RESIZE_ATTEMPTS {
+        let metrics = host.metrics();
+        let Some(scene) = core.scene(metrics, prompt) else {
+            // While a session is active, the foreground app owns presentation. Keep
+            // polling input, authority events, and host lifecycle without committing
+            // a replacement shell frame.
+            return Ok(false);
+        };
+        present_scene(host, core, prompt, &scene)?;
+        if host.metrics() == metrics {
+            return Ok(true);
+        }
+        if attempt == PRESENT_RESIZE_ATTEMPTS {
+            eprintln!(
+                "pf-shell: compositor resized the surface during {PRESENT_RESIZE_ATTEMPTS} consecutive presents; keeping the latest committed frame"
+            );
+        }
+    }
     Ok(true)
 }
 
@@ -13035,6 +13056,83 @@ exec="./launch"
                 frame.xrgb,
                 stub_expected_xrgb(&scene, metrics),
                 "the resized frame is laid out at the new size without rotation"
+            );
+        }
+
+        /// A resize configure that arrives between scene construction and the
+        /// host's internal event poll must not stay committed as a stale-layout
+        /// frame: presentation detects the metrics change during submit,
+        /// re-lays out at the new size, and commits a corrected frame.
+        #[test]
+        fn wayland_resize_during_present_is_corrected_by_a_relayout() {
+            let runtime = tempfile::TempDir::new().expect("stub runtime dir");
+            let stub = StubCompositor::start(
+                &runtime,
+                "wayland-present-race",
+                StubConfig {
+                    initial_configure: (1280, 720),
+                    output_mode: None,
+                    preferred_transform: false,
+                },
+            );
+            let mut host = WaylandHost::connect_with_socket_configure_driven(&stub.socket_path)
+                .expect("connect stub compositor");
+            let snapshot: CatalogSnapshot =
+                serde_json::from_str(include_str!("../fixtures/catalog.json"))
+                    .expect("catalog fixture parses");
+            let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+            core.authority_snapshot(false);
+
+            // Queue the resize on the wire while the client still sees the old
+            // size: nothing polls between this send and the scene construction
+            // inside `present_interactive`, so the configure is dispatched by
+            // the host's internal poll during the first present.
+            stub.send_configure(720, 1280);
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                (host.metrics().logical_width, host.metrics().logical_height),
+                (1280.0, 720.0),
+                "the configure must still be pending when the scene is built"
+            );
+
+            present_interactive(&mut host, &mut core, "A Open")
+                .expect("present through the resize");
+
+            let metrics = host.metrics();
+            assert_eq!(
+                (
+                    metrics.logical_width,
+                    metrics.logical_height,
+                    metrics.orientation
+                ),
+                (720.0, 1280.0, Orientation::Portrait),
+                "the configure dispatched during present updates the metrics"
+            );
+            let corrected = core
+                .scene(metrics, "A Open")
+                .expect("scene at the resized metrics");
+            let expected = stub_expected_xrgb(&corrected, metrics);
+            let observed = stub.wait_for_frames(2);
+            assert!(
+                observed.acked_serials.contains(&2),
+                "the resize configure must be acked: {:?}",
+                observed.acked_serials
+            );
+            let stale = &observed.frames[0];
+            let fixed = &observed.frames[1];
+            assert_eq!(
+                (fixed.width, fixed.height, fixed.stride),
+                (720, 1280, 2880),
+                "the corrected buffer matches the new logical size"
+            );
+            assert_eq!(fixed.transform, None);
+            assert_eq!(
+                fixed.xrgb, expected,
+                "the last committed frame is laid out at the resized metrics"
+            );
+            assert_ne!(
+                stale.xrgb, expected,
+                "control: the first commit carried the pre-resize layout, so the retry did real work"
             );
         }
 

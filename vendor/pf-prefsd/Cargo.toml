@@ -45,6 +45,10 @@ path = "tests/systemd_units.rs"
 [dependencies.libc]
 version = "0.2"
 
+[dependencies.pf-peer-identity]
+version = "0.0.1"
+path = "../pf-peer-identity"
+
 [dependencies.pf-prefs]
 version = "0.0.1"
 path = "../pf-prefs"

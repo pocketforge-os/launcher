@@ -12,6 +12,50 @@ use std::path::{Component, Path, PathBuf};
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
 const DNS_PORT: u16 = 53;
 
+#[derive(Clone, Copy)]
+enum DisplayResourceGrant {
+    ReadOnly,
+    Socket,
+    DeviceReadWrite,
+}
+
+#[derive(Clone, Copy)]
+struct DisplayRouteResource {
+    class: &'static str,
+    grant: DisplayResourceGrant,
+}
+
+struct DisplayRoute {
+    requirement: &'static str,
+    resources: &'static [DisplayRouteResource],
+}
+
+// A display route is complete only when every resource class in one row is present. Future
+// variants (for example an explicitly mediated X11 route) extend this table instead of adding a
+// parallel display-policy branch.
+const DISPLAY_ROUTES: &[DisplayRoute] = &[
+    DisplayRoute {
+        requirement: "display-devices",
+        resources: &[DisplayRouteResource {
+            class: "display-devices",
+            grant: DisplayResourceGrant::DeviceReadWrite,
+        }],
+    },
+    DisplayRoute {
+        requirement: "both display-sockets and session-environment",
+        resources: &[
+            DisplayRouteResource {
+                class: "display-sockets",
+                grant: DisplayResourceGrant::Socket,
+            },
+            DisplayRouteResource {
+                class: "session-environment",
+                grant: DisplayResourceGrant::ReadOnly,
+            },
+        ],
+    },
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyInputs {
     pub platform_runtime: PathBuf,
@@ -255,7 +299,11 @@ pub fn derive_policy(
             _ => Err(PolicyError(format!("required resource {name} is missing"))),
         }
     };
-    let mut add_devices = |name: &str, mode: &str, optional: bool| -> Result<(), PolicyError> {
+    let add_devices = |devices: &mut BTreeMap<PathBuf, String>,
+                       name: &str,
+                       mode: &str,
+                       optional: bool|
+     -> Result<(), PolicyError> {
         for path in resource(name, optional)? {
             devices
                 .entry(path)
@@ -271,20 +319,63 @@ pub fn derive_policy(
 
     if launch.takes_display {
         groups.insert("video".to_owned());
-        socket_paths.extend(resource("display-sockets", false)?);
-        read_only_paths.extend(resource("session-environment", false)?);
-        add_devices("render-devices", "rw", false)?;
+        let complete_routes = DISPLAY_ROUTES
+            .iter()
+            .filter(|route| {
+                route.resources.iter().all(|required| {
+                    inputs
+                        .resources
+                        .get(required.class)
+                        .is_some_and(|paths| !paths.is_empty())
+                })
+            })
+            .collect::<Vec<_>>();
+        if complete_routes.is_empty() {
+            let expected = DISPLAY_ROUTES
+                .iter()
+                .map(|route| route.requirement)
+                .collect::<Vec<_>>()
+                .join(" or ");
+            return Err(PolicyError(format!(
+                "required display resource is missing: expected {expected}"
+            )));
+        }
+        for route in complete_routes {
+            for required in route.resources {
+                let paths = resource(required.class, false)?;
+                match required.grant {
+                    DisplayResourceGrant::ReadOnly => read_only_paths.extend(paths),
+                    DisplayResourceGrant::Socket => socket_paths.extend(paths),
+                    DisplayResourceGrant::DeviceReadWrite => {
+                        for path in paths {
+                            devices.insert(path, "rw".to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        add_devices(&mut devices, "render-devices", "rw", false)?;
     }
     if launch.audio || capability_bases.contains("audio") {
         groups.insert("audio".to_owned());
         let optional = !launch.audio && capability_optional.get("audio") == Some(&true);
-        socket_paths.extend(resource("audio-sockets", optional)?);
-        read_only_paths.extend(resource("session-environment", optional)?);
-        add_devices("audio-devices", "rw", optional)?;
+        let audio_sockets = resource("audio-sockets", true)?;
+        let audio_devices = resource("audio-devices", true)?;
+        if !optional && audio_sockets.is_empty() && audio_devices.is_empty() {
+            return Err(PolicyError(
+                "required audio resource is missing: expected audio-devices or audio-sockets"
+                    .to_owned(),
+            ));
+        }
+        socket_paths.extend(audio_sockets);
+        for path in audio_devices {
+            devices.insert(path, "rw".to_owned());
+        }
     }
     if capability_bases.contains("input") {
         groups.insert("input".to_owned());
         add_devices(
+            &mut devices,
             "input-devices",
             "r",
             capability_optional.get("input") == Some(&true),
@@ -296,12 +387,12 @@ pub fn derive_policy(
             .into_iter()
             .filter(|name| capability_bases.contains(*name))
             .all(|name| capability_optional.get(name) == Some(&true));
-        add_devices("input-devices", "rw", optional)?;
+        add_devices(&mut devices, "input-devices", "rw", optional)?;
     }
     if capability_bases.contains("video-decode") {
         let optional = capability_optional.get("video-decode") == Some(&true);
-        add_devices("video-decode-devices", "rw", optional)?;
-        add_devices("media-devices", "rw", optional)?;
+        add_devices(&mut devices, "video-decode-devices", "rw", optional)?;
+        add_devices(&mut devices, "media-devices", "rw", optional)?;
         if ["video-decode-devices", "media-devices"]
             .into_iter()
             .any(|name| {

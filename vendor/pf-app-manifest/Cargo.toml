@@ -34,5 +34,12 @@ path = "src/lib.rs"
 version = "1"
 features = ["derive"]
 
+[dependencies.sha2]
+version = "0.10"
+
 [dependencies.toml]
 version = "0.8"
+
+[dev-dependencies.pocketforge]
+version = "0.0.1"
+path = "../pocketforge"

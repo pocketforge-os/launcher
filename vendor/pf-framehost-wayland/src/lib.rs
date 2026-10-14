@@ -271,20 +271,27 @@ impl State {
 
     /// Adopt a compositor configure size as the new logical (and buffer) size.
     ///
-    /// The xdg-shell protocol allows a 0x0 configure meaning "client chooses"; the only
-    /// fallback this client uses is the current mode of the first `wl_output` that
-    /// advertised one. Anything unusable is recorded as a fail-closed configure error.
+    /// The xdg-shell protocol allows either configure dimension to be zero, meaning
+    /// "client chooses" for that axis. Initial configures choose from the current mode
+    /// of the first `wl_output` that advertised one; later configures keep the current
+    /// client-chosen axis. Anything unusable is recorded as a fail-closed configure error.
     fn adopt_configure(&mut self, width: i32, height: i32) {
-        let adopted = if width > 0 && height > 0 {
-            match (u32::try_from(width), u32::try_from(height)) {
-                (Ok(width), Ok(height)) => ValidatedSize::new(width, height).ok(),
-                _ => None,
-            }
-        } else if width == 0 && height == 0 {
-            self.output_current_mode
-                .and_then(|(width, height)| ValidatedSize::new(width, height).ok())
+        let fallback = if self.size_adopted {
+            Some(self.size.dimensions())
         } else {
-            None
+            self.output_current_mode
+        };
+        let resolve_axis = |configured: i32, fallback: Option<u32>| match configured {
+            0 => fallback,
+            1.. => u32::try_from(configured).ok(),
+            _ => None,
+        };
+        let adopted = match (
+            resolve_axis(width, fallback.map(|size| size.0)),
+            resolve_axis(height, fallback.map(|size| size.1)),
+        ) {
+            (Some(width), Some(height)) => ValidatedSize::new(width, height).ok(),
+            _ => None,
         };
         match adopted {
             Some(validated) => {
@@ -370,7 +377,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.seat = Some(registry.bind(name, version.min(7), qh, ()));
                     state.seat_name = Some(name);
                 }
-                _ => return,
+                _ => (),
             }
         }
         #[cfg(feature = "keyboard")]
@@ -550,13 +557,13 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let wl_output::Event::Mode {
-            flags: WEnum::Value(wl_output::Mode::Current),
+            flags: WEnum::Value(flags),
             width,
             height,
             ..
         } = event
         {
-            if state.output_current_mode.is_none() {
+            if flags.contains(wl_output::Mode::Current) && state.output_current_mode.is_none() {
                 if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
                     if width > 0 && height > 0 {
                         state.output_current_mode = Some((width, height));

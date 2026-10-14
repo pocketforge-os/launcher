@@ -4,9 +4,11 @@
 //! descriptor or executable path, and every filesystem object is checked before launch.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::net::IpAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -15,8 +17,10 @@ pub const PLATFORM_CONTRACT_PATH: &str = "/usr/share/pocketforge/platform-capabi
 
 /// The runtime's canonical capability vocabulary.
 pub const KNOWN_CAPABILITIES: &[&str] = &[
+    "bluetooth",
     "input",
     "vibration",
+    "video-decode",
     "rumble",
     "imu",
     "accelerometer",
@@ -39,6 +43,9 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "pointer",
     "menu",
     "options",
+    // Platform-owned opt-in for launchers which must create nested user/mount/network
+    // namespaces (notably the browser's bwrap sandbox).
+    "sandbox.nested_userns",
 ];
 
 /// Minimum-spec graphics version vocabulary: OpenGL ES.
@@ -56,6 +63,17 @@ pub const KNOWN_INPUTS: &[&str] = &[
     "touch",
     "keyboard",
     "pointer",
+];
+
+/// The orientations when the `[display]` table is absent: the compositor
+/// presents the app landscape, upright, and letterboxes nothing.
+pub const DEFAULT_ORIENTATIONS: &[DisplayOrientation] = &[DisplayOrientation::Landscape];
+
+/// The orientations whose logical canvas swaps the panel's logical landscape
+/// size: width and height trade places relative to `landscape`.
+pub const PORTRAIT_ORIENTATIONS: &[DisplayOrientation] = &[
+    DisplayOrientation::Portrait,
+    DisplayOrientation::PortraitFlipped,
 ];
 
 /// Inputs the system input layer provides on every device, so declaring them
@@ -98,6 +116,13 @@ pub fn parse_capability_requirement(token: &str) -> CapabilityRequirement {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// The app.toml schema version. Absent means 1 — the schema before
+    /// `[display] orientations` existed; every manifest that was valid at 1
+    /// still parses unchanged and gets the defaults. The current version is
+    /// 2. Any other version is refused, mirroring the platform contract's
+    /// own version gate.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub app: App,
     pub runtime: Runtime,
     #[serde(default)]
@@ -110,6 +135,58 @@ pub struct Manifest {
     pub requirements: Option<Requirements>,
     #[serde(default)]
     pub recommended: Option<Requirements>,
+    /// How the compositor may present the app (`[display]`). Absent means
+    /// [`DEFAULT_ORIENTATIONS`].
+    #[serde(default)]
+    pub display: Option<Display>,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl Manifest {
+    /// The orientations the app allows: its declared `[display] orientations`,
+    /// or [`DEFAULT_ORIENTATIONS`] when the table is absent. Never empty —
+    /// parse-time validation refuses that.
+    pub fn display_orientations(&self) -> Vec<DisplayOrientation> {
+        match &self.display {
+            Some(display) => display.orientations.clone(),
+            None => DEFAULT_ORIENTATIONS.to_vec(),
+        }
+    }
+}
+
+/// Orientations in which an app can render without compatibility letterboxing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Display {
+    /// A NON-EMPTY subset of the [`DisplayOrientation`] vocabulary (SDL's
+    /// `SDL_DisplayOrientation` names, lower-cased). Unknown values are
+    /// refused by the parser; duplicates and the empty list are refused by
+    /// validation.
+    pub orientations: Vec<DisplayOrientation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayOrientation {
+    Landscape,
+    LandscapeFlipped,
+    Portrait,
+    PortraitFlipped,
+}
+
+impl DisplayOrientation {
+    /// The lower-cased `SDL_DisplayOrientation` name (the TOML spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DisplayOrientation::Landscape => "landscape",
+            DisplayOrientation::LandscapeFlipped => "landscape_flipped",
+            DisplayOrientation::Portrait => "portrait",
+            DisplayOrientation::PortraitFlipped => "portrait_flipped",
+        }
+    }
 }
 
 /// An app's declared minimum spec (`[requirements]`, enforced at launch) or
@@ -130,7 +207,10 @@ pub struct Requirements {
     /// Controls the app cannot work without, from [`KNOWN_INPUTS`].
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Minimum display size in physical pixels, compared orientation-independently.
+    /// Minimum logical display size in pixels. The app is refused only when
+    /// this cannot be met in ANY allowed orientation (`[display]
+    /// orientations`, default [`DEFAULT_ORIENTATIONS`]); the portrait
+    /// orientations swap the panel's logical landscape width and height.
     #[serde(default)]
     pub display_min: Option<DisplaySize>,
     /// Install size plus working space. Carried and validated, not checked at
@@ -261,7 +341,10 @@ pub fn parse_manifest(source: &str) -> Result<Manifest, ManifestError> {
     let manifest: Manifest = toml::from_str(source).map_err(|error| {
         let message = error.to_string();
         ManifestError {
-            kind: if message.contains("unknown field") || message.contains("missing field") {
+            kind: if message.contains("unknown field")
+                || message.contains("missing field")
+                || message.contains("unknown variant")
+            {
                 ManifestErrorKind::Invalid
             } else {
                 ManifestErrorKind::Parse
@@ -277,6 +360,12 @@ pub fn parse_manifest(source: &str) -> Result<Manifest, ManifestError> {
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
+    if !matches!(manifest.schema_version, 1 | 2) {
+        return invalid_manifest("schema_version must be 1 or 2");
+    }
+    if let Some(display) = &manifest.display {
+        validate_display(display)?;
+    }
     if validate_app_id(&manifest.app.id).is_err() {
         return invalid_manifest("invalid app.id");
     }
@@ -298,7 +387,15 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
     let mut capabilities = BTreeSet::new();
     for capability in &manifest.app.capabilities {
         let requirement = parse_capability_requirement(capability);
-        if requirement.base.is_empty() || !capabilities.insert(requirement.base.clone()) {
+        let uniqueness_key = if requirement.base == "egress" {
+            format!(
+                "egress:{}",
+                requirement.modifier.as_deref().unwrap_or_default()
+            )
+        } else {
+            requirement.base.clone()
+        };
+        if requirement.base.is_empty() || !capabilities.insert(uniqueness_key) {
             return invalid_manifest("invalid or duplicate capability");
         }
         if validate_requirement(&requirement).is_err() {
@@ -336,6 +433,23 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
                 return invalid_manifest("invalid fetch sha256");
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate the `[display]` table: a NON-EMPTY list of the typed
+/// [`DisplayOrientation`] vocabulary with no duplicates (an unknown TOML
+/// spelling is refused earlier, by serde, as an unknown variant).
+fn validate_display(display: &Display) -> Result<(), ManifestError> {
+    if display.orientations.is_empty() {
+        return invalid_manifest("empty display orientations");
+    }
+    let mut seen: Vec<DisplayOrientation> = Vec::new();
+    for orientation in &display.orientations {
+        if seen.contains(orientation) {
+            return invalid_manifest("duplicate display orientation");
+        }
+        seen.push(*orientation);
     }
     Ok(())
 }
@@ -453,15 +567,21 @@ fn decimal_version(value: &str) -> bool {
 
 fn validate_requirement(requirement: &CapabilityRequirement) -> Result<(), ()> {
     if requirement.base == "egress" {
-        return if requirement
+        return requirement
             .modifier
             .as_deref()
-            .is_some_and(|modifier| !modifier.is_empty())
-        {
-            Ok(())
-        } else {
-            Err(())
-        };
+            .ok_or(())
+            .and_then(|modifier| {
+                // Schema-1 manifests historically carried a host-only egress
+                // modifier. Keep those descriptors parseable; the policy
+                // compiler still refuses to launch them until they declare a
+                // canonical protocol/port authority.
+                if parse_egress_authority(modifier).is_ok() || valid_egress_host(modifier) {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            });
     }
     if let Some(modifier) = requirement.modifier.as_deref() {
         if !matches!(
@@ -476,6 +596,74 @@ fn validate_requirement(requirement: &CapabilityRequirement) -> Result<(), ()> {
     } else {
         Err(())
     }
+}
+
+/// A normalized network authority shared by the launcher policy and network-namespace renderer.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct EgressAuthority {
+    pub protocol: EgressProtocol,
+    pub port: u16,
+    pub host: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressProtocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EgressAuthorityError;
+
+impl fmt::Display for EgressAuthorityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid egress authority")
+    }
+}
+
+impl std::error::Error for EgressAuthorityError {}
+
+/// Parse the canonical `egress:<protocol>/<destination-port>@<host>` modifier.
+pub fn parse_egress_authority(modifier: &str) -> Result<EgressAuthority, EgressAuthorityError> {
+    let (protocol_port, host) = modifier.split_once('@').ok_or(EgressAuthorityError)?;
+    let (protocol, port) = protocol_port.split_once('/').ok_or(EgressAuthorityError)?;
+    let protocol = match protocol {
+        "tcp" => EgressProtocol::Tcp,
+        "udp" => EgressProtocol::Udp,
+        _ => return Err(EgressAuthorityError),
+    };
+    let port = port.parse::<u16>().map_err(|_| EgressAuthorityError)?;
+    if port == 0 || !valid_egress_host(host) {
+        return Err(EgressAuthorityError);
+    }
+    Ok(EgressAuthority {
+        protocol,
+        port,
+        host: host.to_ascii_lowercase(),
+    })
+}
+
+fn valid_egress_host(host: &str) -> bool {
+    if host == "*" {
+        return true;
+    }
+    if host.is_empty() || host.len() > 253 || !host.is_ascii() {
+        return false;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    host.split('.').all(|label| {
+        let bytes = label.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() <= 63
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    })
 }
 
 fn validate_exec_path(value: &str) -> Result<PathBuf, String> {
@@ -552,6 +740,27 @@ pub struct PlatformContract {
     /// Schema 2: physical display size in pixels.
     #[serde(default)]
     pub display: Option<DisplaySize>,
+    /// Production contracts are fail closed. Only an explicitly non-production
+    /// signed contract may request best-effort ABI masking.
+    #[serde(default = "default_production")]
+    pub production: bool,
+    #[serde(default)]
+    pub landlock_mode: Option<LandlockMode>,
+    #[serde(default)]
+    pub landlock_full_min_abi: Option<u32>,
+    #[serde(default)]
+    pub landlock_browser_min_abi: Option<u32>,
+}
+
+const fn default_production() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandlockMode {
+    Required,
+    BestEffort,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -695,6 +904,27 @@ pub fn parse_platform_contract(source: &str) -> Result<PlatformContract, Platfor
             "invalid platform_version",
         );
     }
+    match (
+        contract.landlock_mode,
+        contract.landlock_full_min_abi,
+        contract.landlock_browser_min_abi,
+    ) {
+        (None, None, None) => {}
+        (Some(mode), Some(10), Some(6)) => {
+            if contract.production && mode == LandlockMode::BestEffort {
+                return invalid_contract(
+                    PlatformContractErrorReason::Schema,
+                    "production contract cannot use best_effort Landlock",
+                );
+            }
+        }
+        _ => {
+            return invalid_contract(
+                PlatformContractErrorReason::Schema,
+                "Landlock contract requires mode, full ABI 10 and browser ABI 6",
+            );
+        }
+    }
     let mut previous: Option<&str> = None;
     let mut seen = BTreeSet::new();
     for capability in &contract.supported_capabilities {
@@ -757,6 +987,10 @@ pub enum ReasonCode {
     ExecEscape,
     ExecNotExecutable,
     ExecIo,
+    LandlockUnavailable,
+    LandlockAbiTooOld,
+    PolicyInvalid,
+    PolicyApplyFailed,
     RuntimeFamilyMismatch,
     RuntimeAbiMismatch,
     PlatformVersionMismatch,
@@ -800,6 +1034,10 @@ impl ReasonCode {
             Self::ExecEscape => "exec_escape",
             Self::ExecNotExecutable => "exec_not_executable",
             Self::ExecIo => "exec_io",
+            Self::LandlockUnavailable => "landlock_unavailable",
+            Self::LandlockAbiTooOld => "landlock_abi_too_old",
+            Self::PolicyInvalid => "policy_invalid",
+            Self::PolicyApplyFailed => "policy_apply_failed",
             Self::RuntimeFamilyMismatch => "runtime_family_mismatch",
             Self::RuntimeAbiMismatch => "runtime_abi_mismatch",
             Self::PlatformVersionMismatch => "platform_version_mismatch",
@@ -848,6 +1086,7 @@ pub struct ResolvedApp {
     pub app_dir: PathBuf,
     pub executable: PathBuf,
     pub manifest: Manifest,
+    pub manifest_sha256: String,
     pub platform: PlatformContract,
 }
 
@@ -961,6 +1200,7 @@ impl Resolver {
             detail: format!("read descriptor: {error}"),
             exit_code: 74,
         })?;
+        let manifest_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
         let manifest = parse_manifest(&source).map_err(|error| match error.kind {
             ManifestErrorKind::Parse => {
                 resolve_error(ReasonCode::DescriptorParse, 65, error.message)
@@ -1053,12 +1293,13 @@ impl Resolver {
             app_dir: canonical_app,
             executable: canonical_exec,
             manifest,
+            manifest_sha256,
             platform,
         })
     }
 }
 
-fn check_compatibility(
+pub fn check_compatibility(
     manifest: &Manifest,
     platform: &PlatformContract,
 ) -> Result<(), ResolveError> {
@@ -1105,19 +1346,22 @@ fn check_compatibility(
         }
     }
     if let Some(requirements) = &manifest.requirements {
-        check_requirements(requirements, platform)?;
+        check_requirements(requirements, platform, &manifest.display_orientations())?;
     }
     Ok(())
 }
 
 /// Enforce the `[requirements]` minimum spec against the platform contract's
-/// device facts. A contract that lacks the fact for a declared requirement
-/// fails closed with [`ReasonCode::RequirementUnverifiable`]; under schema 1
-/// every fact is absent, so any requirement is unverifiable there. The
-/// `[recommended]` table is informational and is never consulted here.
+/// device facts, with the app's allowed `orientations` (`[display]`, default
+/// [`DEFAULT_ORIENTATIONS`]) feeding the display_min rule. A contract that
+/// lacks the fact for a declared requirement fails closed with
+/// [`ReasonCode::RequirementUnverifiable`]; under schema 1 every fact is
+/// absent, so any requirement is unverifiable there. The `[recommended]` table
+/// is informational and is never consulted here.
 fn check_requirements(
     requirements: &Requirements,
     platform: &PlatformContract,
+    orientations: &[DisplayOrientation],
 ) -> Result<(), ResolveError> {
     if let Some(required) = requirements.memory_mib {
         match platform.app_memory_budget_mib {
@@ -1179,15 +1423,36 @@ fn check_requirements(
                 required.width, required.height
             )));
         };
-        let (required_small, required_large) = sorted_sides(required);
-        let (display_small, display_large) = sorted_sides(display);
-        if required_small > display_small || required_large > display_large {
+        // The compositor presents the app in ANY allowed orientation, so the
+        // minimum only has to fit the logical canvas of ONE of them. The panel's
+        // logical landscape size comes from the contract's display fact; the
+        // portrait orientations swap its width and height.
+        let met = orientations.iter().any(|orientation| {
+            let logical = if PORTRAIT_ORIENTATIONS.contains(orientation) {
+                DisplaySize {
+                    width: display.height,
+                    height: display.width,
+                }
+            } else {
+                display
+            };
+            required.width <= logical.width && required.height <= logical.height
+        });
+        if !met {
             return Err(resolve_error(
                 ReasonCode::DisplayTooSmall,
                 65,
                 format!(
-                    "display_min {}x{} exceeds display {}x{}",
-                    required.width, required.height, display.width, display.height
+                    "display_min {}x{} exceeds display {}x{} in allowed orientations {}",
+                    required.width,
+                    required.height,
+                    display.width,
+                    display.height,
+                    orientations
+                        .iter()
+                        .map(DisplayOrientation::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             ));
         }
@@ -1227,15 +1492,6 @@ fn input_satisfied(required: &str, device_inputs: &[String]) -> bool {
     device_inputs
         .iter()
         .any(|input| input == required || (required == "stick" && input == "two_sticks"))
-}
-
-/// The smaller side first, so display comparisons are orientation-independent.
-fn sorted_sides(display: DisplaySize) -> (u32, u32) {
-    if display.width <= display.height {
-        (display.width, display.height)
-    } else {
-        (display.height, display.width)
-    }
 }
 
 fn unverifiable(detail: String) -> ResolveError {

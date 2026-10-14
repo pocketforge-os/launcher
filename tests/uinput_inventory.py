@@ -54,9 +54,9 @@ def load_manifest():
                    if line and not line.startswith("#"))
 
 
-def check(extra=None, quiet=False, allowed=None):
+def check(extra=None, quiet=False, allowed=None, items=None):
     allowed = load_manifest() if allowed is None else allowed
-    items = occurrences(extra)
+    items = occurrences(extra) if items is None else items
     live = Counter(item[0] for item in items)
     by_key = defaultdict(list)
     for item in items:
@@ -81,10 +81,17 @@ def main():
         for key, path, number, line in occurrences():
             print(f"{key}\t# {path}:{number} {line}")
         return 0
-    known = occurrences()[0]
-    if args.self_test and check([(known[1], known[3])], quiet=True):
-        print("inventory self-test failed: duplicate live occurrence was accepted", file=sys.stderr)
-        return 2
+    if args.self_test:
+        if not check(quiet=True, allowed=Counter(), items=[]):
+            print("inventory self-test failed: empty inventory was rejected", file=sys.stderr)
+            return 2
+        path = "seeded/classified.c"
+        line = 'open("/dev/uinput", O_RDWR);'
+        key = fingerprint(path, line)
+        item = (key, path, 1, line)
+        if check(quiet=True, allowed=Counter({key: 1}), items=[item, item]):
+            print("inventory self-test failed: duplicate live occurrence was accepted", file=sys.stderr)
+            return 2
     stale = load_manifest()
     stale[f"seeded/stale.c\t{'0' * 64}"] += 1
     if args.self_test and check(quiet=True, allowed=stale):
@@ -96,7 +103,7 @@ def main():
     if not check():
         return 1
     print("uinput-inventory: PASS seeded_violation=red duplicate_live=red "
-          "stale_manifest=red clean_tree=green")
+          "stale_manifest=red empty_inventory=green clean_tree=green")
     return 0
 
 

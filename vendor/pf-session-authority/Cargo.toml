@@ -34,12 +34,8 @@ name = "pf-session-authorityd"
 path = "src/bin/pf-session-authorityd.rs"
 
 [[test]]
-name = "daemon_initial_state"
-path = "tests/daemon_initial_state.rs"
-
-[[test]]
-name = "daemon_slow_client"
-path = "tests/daemon_slow_client.rs"
+name = "orientation"
+path = "tests/orientation.rs"
 
 [dependencies.libc]
 version = "0.2"
@@ -56,6 +52,14 @@ path = "../pf-peer-identity"
 version = "0.0.1"
 path = "../pf-ports"
 
+[dependencies.pf-prefs]
+version = "0.0.1"
+path = "../pf-prefs"
+
+[dependencies.pf-prefsd]
+version = "0.0.1"
+path = "../pf-prefsd"
+
 [dependencies.pf-wire]
 version = "0.0.1"
 path = "../pf-wire"
@@ -66,6 +70,9 @@ features = ["derive"]
 
 [dependencies.serde_json]
 version = "1"
+
+[dependencies.toml]
+version = "0.8"
 
 [dev-dependencies.pf-app-launch]
 path = "../pf-app-launch"

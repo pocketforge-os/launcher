@@ -1,11 +1,13 @@
 use evdev::{AttributeSet, KeyCode, uinput::VirtualDevice};
 use pf_input_feed::{CONTRACT_KEYS, encoded_press, focus_walk};
 use std::{
-    env, fs,
+    env, fs, io,
     path::Path,
     thread,
     time::{Duration, Instant},
 };
+
+mod uinput_domain;
 
 fn value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
@@ -71,13 +73,16 @@ fn main() -> Result<(), String> {
     for code in CONTRACT_KEYS {
         keys.insert(KeyCode(code));
     }
-    let mut device = VirtualDevice::builder()
-        .map_err(|e| e.to_string())?
-        .name("PocketForge static action feeder")
-        .with_keys(&keys)
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
+    let mut device = uinput_domain::guarded_host_open(|| {
+        VirtualDevice::builder()
+            .map_err(io::Error::other)?
+            .name("PocketForge static action feeder")
+            .with_keys(&keys)
+            .map_err(io::Error::other)?
+            .build()
+            .map_err(io::Error::other)
+    })
+    .map_err(|error| error.to_string())?;
     let node = device
         .enumerate_dev_nodes_blocking()
         .map_err(|e| e.to_string())?

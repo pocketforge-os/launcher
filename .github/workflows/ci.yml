@@ -30,6 +30,7 @@ jobs:
         run: |
           scripts/check-vendor.sh
           scripts/test-check-vendor.sh
+          python3 tests/uinput_inventory.py --self-test
       - name: Build offline with a clean Cargo cache
         run: |
           clean_cargo_home="$(mktemp -d)"

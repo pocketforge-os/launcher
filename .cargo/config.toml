@@ -1,9 +1,9 @@
 [source.crates-io]
 replace-with = "vendored-sources"
 
-[source."git+https://github.com/pocketforge-os/runtime.git?rev=a94690d152f421890073511f62e20f70ed68b0d4"]
+[source."git+https://github.com/pocketforge-os/runtime.git?rev=f2402f59630ea76c2f6d4a767c9e4e362f73adbc"]
 git = "https://github.com/pocketforge-os/runtime.git"
-rev = "a94690d152f421890073511f62e20f70ed68b0d4"
+rev = "f2402f59630ea76c2f6d4a767c9e4e362f73adbc"
 replace-with = "vendored-sources"
 
 [source.vendored-sources]

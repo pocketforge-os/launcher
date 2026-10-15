@@ -9711,6 +9711,7 @@ mod tests {
             receipt: Some(Receipt::Returned),
             started_at,
             ended_at: ended_at.map(|(at, precision)| EndStamp { at, precision }),
+            post_app_owner: None,
         }
     }
 

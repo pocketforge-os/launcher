@@ -24,21 +24,21 @@ all = "warn"
 pedantic = "warn"
 
 [workspace.dependencies]
-pf-app-launch = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-app-manifest = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
-pocketforge = { git = "https://github.com/pocketforge-os/runtime.git", rev = "679eb323a7eddb27b6af3273fa77ce63c33c42cd" }
+pf-app-launch = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-app-manifest = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-scene = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-ports = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-render = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-framehost = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-framehost-wayland = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-theme = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-input-map = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-prefs = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-prefs-port = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-session-client = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-session-authority = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pf-wire = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
+pocketforge = { git = "https://github.com/pocketforge-os/runtime.git", rev = "4707facb1e3a840e5b2a1b969efb369c4da5203a" }
 taffy = { version = "=0.7.7", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid"] }
 
 # Offscreen evidence renders are CPU-bound software rasterization. In dev,

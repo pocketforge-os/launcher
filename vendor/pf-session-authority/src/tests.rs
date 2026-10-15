@@ -34,6 +34,7 @@ struct FakeSystem {
     fail_owner: bool,
     fail_start: bool,
     lifecycle: Option<SystemLifecycle>,
+    gamescope: Option<GamescopeSessionLifecycle>,
     /// Per-item lifecycle, consulted before `lifecycle` (the slot's handler unit).
     lifecycles: BTreeMap<String, SystemLifecycle>,
     handoffs: Vec<UrlHandoff>,
@@ -297,6 +298,155 @@ fn command_system_queries_the_exact_app_target_and_selected_owner_units() {
 }
 
 #[test]
+fn command_system_selects_gamescope_home_or_idle_without_starting_fb0_owner() {
+    let dir = scratch("gamescope-home");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let signal = dir.join("focused-home-unit");
+    fs::write(&signal, b"pf-shell-gamescope.service\n").unwrap();
+    let config = SessionOwnerConfig {
+        home_client_unit: Some("pf-shell-gamescope.service".to_owned()),
+        home_client_presentation: Some(signal.clone()),
+    };
+    let executor = FakeExecutor {
+        outputs: VecDeque::from([
+            CommandOutput {
+                code: 0,
+                stdout: String::new(),
+            },
+            CommandOutput {
+                code: 0,
+                stdout: "loaded\n".into(),
+            },
+            CommandOutput {
+                code: 0,
+                stdout: String::new(),
+            },
+        ]),
+        ..FakeExecutor::default()
+    };
+    let mut home = CommandSystem::with_executor_and_session_owner(
+        CommandTemplates::default(),
+        executor,
+        config,
+    );
+    assert_eq!(
+        home.gamescope_session_lifecycle().unwrap(),
+        Some(GamescopeSessionLifecycle::HomeClient {
+            unit: "pf-shell-gamescope.service".to_owned(),
+            active: true,
+            presenting: true,
+            ack_signal: signal.display().to_string(),
+        })
+    );
+    home.activate_home_client("pf-shell-gamescope.service")
+        .unwrap();
+    let calls = home.into_executor().calls;
+    assert_eq!(
+        calls,
+        [
+            (
+                "systemctl".into(),
+                vec![
+                    "is-active".into(),
+                    "--quiet".into(),
+                    "pocketforge-gamescope-session.target".into(),
+                ],
+            ),
+            (
+                "systemctl".into(),
+                vec![
+                    "show".into(),
+                    "--property".into(),
+                    "LoadState".into(),
+                    "--value".into(),
+                    "pf-shell-gamescope.service".into(),
+                ],
+            ),
+            (
+                "systemctl".into(),
+                vec![
+                    "is-active".into(),
+                    "--quiet".into(),
+                    "pf-shell-gamescope.service".into(),
+                ],
+            ),
+            (
+                "systemctl".into(),
+                vec!["start".into(), "pf-shell-gamescope.service".into()],
+            ),
+        ]
+    );
+    assert!(!calls
+        .iter()
+        .any(|(_, args)| { args.iter().any(|arg| arg == "pf-shell-selected.service") }));
+
+    let mut idle = CommandSystem::with_executor(
+        CommandTemplates::default(),
+        FakeExecutor {
+            outputs: VecDeque::from([CommandOutput {
+                code: 0,
+                stdout: String::new(),
+            }]),
+            ..FakeExecutor::default()
+        },
+    );
+    assert_eq!(
+        idle.gamescope_session_lifecycle().unwrap(),
+        Some(GamescopeSessionLifecycle::SessionIdle)
+    );
+    assert_eq!(idle.into_executor().calls.len(), 1);
+
+    let mut missing = CommandSystem::with_executor_and_session_owner(
+        CommandTemplates::default(),
+        FakeExecutor {
+            outputs: VecDeque::from([
+                CommandOutput {
+                    code: 0,
+                    stdout: String::new(),
+                },
+                CommandOutput {
+                    code: 0,
+                    stdout: "not-found\n".into(),
+                },
+            ]),
+            ..FakeExecutor::default()
+        },
+        SessionOwnerConfig {
+            home_client_unit: Some("pf-shell-gamescope.service".to_owned()),
+            home_client_presentation: Some(signal.clone()),
+        },
+    );
+    assert_eq!(
+        missing.gamescope_session_lifecycle().unwrap(),
+        Some(GamescopeSessionLifecycle::SessionIdle)
+    );
+    assert_eq!(missing.into_executor().calls.len(), 2);
+
+    let mut fb0 = CommandSystem::with_executor(
+        CommandTemplates::default(),
+        FakeExecutor {
+            outputs: VecDeque::from([CommandOutput {
+                code: 3,
+                stdout: String::new(),
+            }]),
+            ..FakeExecutor::default()
+        },
+    );
+    assert_eq!(fb0.gamescope_session_lifecycle().unwrap(), None);
+    fb0.activate_selected_owner().unwrap();
+    assert_eq!(
+        fb0.into_executor().calls.last().unwrap(),
+        &(
+            "systemctl".to_owned(),
+            vec!["start".to_owned(), "pf-shell-selected.service".to_owned()]
+        )
+    );
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn desktop_sim_templates_create_and_remove_session_markers() {
     let dir = scratch("desktop-sim");
     let _ = fs::remove_dir_all(&dir);
@@ -363,6 +513,13 @@ impl SessionSystem for FakeSystem {
             .cloned()
             .or_else(|| self.lifecycle.clone()))
     }
+    fn gamescope_session_lifecycle(&mut self) -> Result<Option<GamescopeSessionLifecycle>, String> {
+        Ok(self.gamescope.clone())
+    }
+    fn activate_home_client(&mut self, unit: &str) -> Result<(), String> {
+        self.calls.push(format!("home {unit}"));
+        Ok(())
+    }
     fn open_url(&mut self, handoff: &UrlHandoff) -> Result<UrlHandoffOutcome, String> {
         // The URL is data on the handoff. A real system passes it in the launch request; the
         // fake records exactly what it was given and never builds a command from it.
@@ -422,6 +579,107 @@ fn restore(a: &mut Authority<MemoryStore, FakeSystem, TestClock>) {
         _ => false,
     }));
     a.observe(Observation::PresentationAcknowledged).unwrap();
+}
+
+#[test]
+fn gamescope_post_app_owner_is_home_or_session_idle_never_fb0() {
+    let lifecycle = SystemLifecycle {
+        app: AppUnitState::InactiveSuccess,
+        foreground_target_active: false,
+        selected_owner_active: false,
+    };
+
+    let mut idle = authority();
+    let idle_id = launch_running(&mut idle);
+    idle.system.lifecycle = Some(lifecycle.clone());
+    idle.system.gamescope = Some(GamescopeSessionLifecycle::SessionIdle);
+    idle.tick().unwrap();
+    assert!(matches!(idle.state.phase, Phase::Idle));
+    assert!(!idle.system.calls.iter().any(|call| call == "owner"));
+    assert_eq!(
+        idle.state.history[0].post_app_owner,
+        Some(PostAppOwnerEvidence {
+            owner_tier: OwnerTier::Gamescope,
+            post_app_owner: PostAppOwner::SessionIdle,
+            home_unit: None,
+            ack_signal: None,
+            ack_latency_ms: None,
+        })
+    );
+    assert_eq!(idle.state.history[0].session_id, idle_id);
+
+    let mut home = authority();
+    launch_running(&mut home);
+    home.system.lifecycle = Some(lifecycle);
+    home.system.gamescope = Some(GamescopeSessionLifecycle::HomeClient {
+        unit: "pf-shell-gamescope.service".to_owned(),
+        active: false,
+        presenting: false,
+        ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+    });
+    home.tick().unwrap();
+    assert_eq!(
+        home.system.calls,
+        ["start", "home pf-shell-gamescope.service"]
+    );
+    assert!(matches!(
+        home.state.phase,
+        Phase::Restoring {
+            rung: RestorationRung::OwnerActive,
+            ..
+        }
+    ));
+
+    home.system.gamescope = Some(GamescopeSessionLifecycle::HomeClient {
+        unit: "pf-shell-gamescope.service".to_owned(),
+        active: true,
+        presenting: false,
+        ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+    });
+    home.tick().unwrap();
+    home.clock.advance(Duration::from_millis(37));
+    home.system.gamescope = Some(GamescopeSessionLifecycle::HomeClient {
+        unit: "pf-shell-gamescope.service".to_owned(),
+        active: true,
+        presenting: true,
+        ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+    });
+    home.tick().unwrap();
+    assert!(matches!(home.state.phase, Phase::Idle));
+    assert_eq!(
+        home.state.history[0].post_app_owner,
+        Some(PostAppOwnerEvidence {
+            owner_tier: OwnerTier::Gamescope,
+            post_app_owner: PostAppOwner::HomeClient,
+            home_unit: Some("pf-shell-gamescope.service".to_owned()),
+            ack_signal: Some("/run/pocketforge/session/focused-home-unit".to_owned()),
+            ack_latency_ms: Some(37),
+        })
+    );
+    assert!(!home.system.calls.iter().any(|call| call == "owner"));
+
+    let mut stalled = authority();
+    launch_running(&mut stalled);
+    stalled.system.lifecycle = Some(SystemLifecycle {
+        app: AppUnitState::InactiveSuccess,
+        foreground_target_active: false,
+        selected_owner_active: false,
+    });
+    stalled.system.gamescope = Some(GamescopeSessionLifecycle::HomeClient {
+        unit: "pf-shell-gamescope.service".to_owned(),
+        active: false,
+        presenting: false,
+        ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+    });
+    stalled.tick().unwrap();
+    stalled.clock.advance(DEFAULT_PRESENTATION_TIMEOUT);
+    stalled.tick().unwrap();
+    assert!(matches!(
+        stalled.state.phase,
+        Phase::RecoveryRequired { ref reason, .. }
+            if reason.starts_with("presentation_not_acknowledged:")
+    ));
+    assert!(!stalled.system.calls.iter().any(|call| call == "owner"));
 }
 
 #[test]
@@ -1001,7 +1259,7 @@ fn authority_accepts_then_start_failure_is_recorded_as_crash_drift() {
 struct MustNotExec;
 
 impl pf_app_launch::Exec for MustNotExec {
-    fn exec(&mut self, _: &Path, _: &Path) -> io::Result<()> {
+    fn exec(&mut self, _: &Path, _: &Path, _: &[(String, String)]) -> io::Result<()> {
         panic!("mutated application must fail before exec")
     }
 }
@@ -1467,6 +1725,94 @@ fn late_presentation_ack_after_timeout_reaches_idle_with_receipt_in_history() {
     ));
 }
 
+fn gamescope_home(unit: &str, active: bool, presenting: bool) -> GamescopeSessionLifecycle {
+    GamescopeSessionLifecycle::HomeClient {
+        unit: unit.to_owned(),
+        active,
+        presenting,
+        ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+    }
+}
+
+fn gamescope_home_timed_out(
+    active_before_timeout: bool,
+) -> (Authority<MemoryStore, FakeSystem, TestClock>, String) {
+    let (mut authority, _log) = logged_authority(None);
+    let session_id = launch_running(&mut authority);
+    authority.system.lifecycle = crashed_unit_restored_owner();
+    authority.system.gamescope = Some(gamescope_home(
+        "pf-shell-gamescope.service",
+        active_before_timeout,
+        false,
+    ));
+    authority.tick().unwrap();
+    let expected_rung = if active_before_timeout {
+        RestorationRung::PresentationAcknowledged
+    } else {
+        RestorationRung::OwnerActive
+    };
+    assert!(matches!(
+        authority.state.phase,
+        Phase::Restoring { rung, .. } if rung == expected_rung
+    ));
+    authority.clock.advance(DEFAULT_PRESENTATION_TIMEOUT);
+    authority.tick().unwrap();
+    assert!(matches!(
+        authority.state.phase,
+        Phase::RecoveryRequired { ref reason, .. }
+            if reason.starts_with("presentation_not_acknowledged:")
+    ));
+    (authority, session_id)
+}
+
+#[test]
+fn late_gamescope_home_ack_after_timeout_completes_from_both_rungs() {
+    for active_before_timeout in [false, true] {
+        let (mut authority, session_id) = gamescope_home_timed_out(active_before_timeout);
+        authority.system.gamescope = Some(gamescope_home("pf-shell-gamescope.service", true, true));
+
+        authority.tick().unwrap();
+
+        assert!(matches!(authority.state.phase, Phase::Idle));
+        assert_eq!(
+            authority.state.history[0].receipt,
+            Some(Receipt::Crash {
+                summary: "systemd result: exit-code".into()
+            })
+        );
+        assert_eq!(authority.state.history[0].session_id, session_id);
+        assert_eq!(
+            authority.state.history[0].post_app_owner,
+            Some(PostAppOwnerEvidence {
+                owner_tier: OwnerTier::Gamescope,
+                post_app_owner: PostAppOwner::HomeClient,
+                home_unit: Some("pf-shell-gamescope.service".to_owned()),
+                ack_signal: Some("/run/pocketforge/session/focused-home-unit".to_owned()),
+                ack_latency_ms: Some(DEFAULT_PRESENTATION_TIMEOUT.as_millis() as u64),
+            })
+        );
+    }
+}
+
+#[test]
+fn late_gamescope_home_ack_requires_the_same_active_session_home() {
+    let (mut authority, _) = gamescope_home_timed_out(true);
+    authority.system.gamescope = Some(gamescope_home("wrong-home.service", true, true));
+    authority.tick().unwrap();
+    assert!(matches!(
+        authority.state.phase,
+        Phase::RecoveryRequired { .. }
+    ));
+
+    authority.system.gamescope = None;
+    authority.tick().unwrap();
+    assert!(matches!(
+        authority.state.phase,
+        Phase::RecoveryRequired { .. }
+    ));
+    assert_eq!(authority.state.history[0].receipt, None);
+}
+
 #[test]
 fn every_other_recovery_reason_stays_terminal_for_a_late_ack() {
     for rung in [
@@ -1484,6 +1830,13 @@ fn every_other_recovery_reason_stays_terminal_for_a_late_ack() {
         .unwrap();
         assert_eq!(
             a.observe(Observation::PresentationAcknowledged),
+            Err(AuthorityError::InvalidObservation)
+        );
+        assert_eq!(
+            a.observe(Observation::GamescopeHomePresented {
+                unit: "pf-shell-gamescope.service".to_owned(),
+                ack_signal: "/run/pocketforge/session/focused-home-unit".to_owned(),
+            }),
             Err(AuthorityError::InvalidObservation)
         );
         assert!(matches!(a.state.phase, Phase::RecoveryRequired { .. }));

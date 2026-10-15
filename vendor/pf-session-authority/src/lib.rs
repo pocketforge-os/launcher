@@ -23,8 +23,9 @@
 //! stop escalates at its deadline instead of up to a tick later. The
 //! presentation-acknowledgement rung has a deadline ([`DEFAULT_PRESENTATION_TIMEOUT`]); on expiry
 //! the authority records `RecoveryRequired` with reason `presentation_not_acknowledged` and keeps
-//! the owed receipt, so a late acknowledgement still completes the ladder truthfully. That is the
-//! only recovery a client can complete; every other `RecoveryRequired` reason stays terminal.
+//! the owed receipt, so a late client acknowledgement or the configured Gamescope home becoming
+//! presented still completes the ladder truthfully. Presentation timeout is the only
+//! self-healing `RecoveryRequired` reason; every other reason stays terminal.
 //!
 //! Closes are the authority's own escalation ladder, and contract v2 of the RPC publishes its
 //! progress for the system menu (every-menu spec §9.6): `StoppingGracefully` when a graceful stop
@@ -191,6 +192,35 @@ pub struct HistoryEntry {
     pub started_at: Option<SystemTime>,
     #[serde(default)]
     pub ended_at: Option<EndStamp>,
+    /// How ownership was restored after this app ended. Omitted for the legacy fb0 path so
+    /// pre-Gamescope receipts remain byte-for-byte stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_app_owner: Option<PostAppOwnerEvidence>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerTier {
+    Gamescope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostAppOwner {
+    SessionIdle,
+    HomeClient,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PostAppOwnerEvidence {
+    pub owner_tier: OwnerTier,
+    pub post_app_owner: PostAppOwner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_signal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_latency_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -513,6 +543,45 @@ pub struct CommandTemplates {
     systemd_reconciliation: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionOwnerConfig {
+    home_client_unit: Option<String>,
+    home_client_presentation: Option<PathBuf>,
+}
+
+impl SessionOwnerConfig {
+    pub fn new(
+        home_client_unit: String,
+        home_client_presentation: PathBuf,
+    ) -> Result<Self, String> {
+        if !valid_service_unit(&home_client_unit) {
+            return Err("home client must be a valid .service unit".to_owned());
+        }
+        if !home_client_presentation.is_absolute()
+            || !home_client_presentation.starts_with("/run/pocketforge/session")
+            || home_client_presentation
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(
+                "home client presentation signal must be below /run/pocketforge/session".to_owned(),
+            );
+        }
+        Ok(Self {
+            home_client_unit: Some(home_client_unit),
+            home_client_presentation: Some(home_client_presentation),
+        })
+    }
+}
+
+fn valid_service_unit(unit: &str) -> bool {
+    unit.ends_with(".service")
+        && !unit.is_empty()
+        && unit
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@'))
+}
+
 impl Default for CommandTemplates {
     fn default() -> Self {
         Self {
@@ -587,6 +656,7 @@ fn desktop_sim_remove_template(state_dir: &str) -> Vec<String> {
 pub struct CommandSystem<E = ProcessExecutor> {
     templates: CommandTemplates,
     executor: E,
+    session_owner: SessionOwnerConfig,
 }
 
 impl CommandSystem<ProcessExecutor> {
@@ -594,6 +664,18 @@ impl CommandSystem<ProcessExecutor> {
         Self {
             templates,
             executor: ProcessExecutor,
+            session_owner: SessionOwnerConfig::default(),
+        }
+    }
+
+    pub fn new_with_session_owner(
+        templates: CommandTemplates,
+        session_owner: SessionOwnerConfig,
+    ) -> Self {
+        Self {
+            templates,
+            executor: ProcessExecutor,
+            session_owner,
         }
     }
 }
@@ -603,6 +685,18 @@ impl<E> CommandSystem<E> {
         Self {
             templates,
             executor,
+            session_owner: SessionOwnerConfig::default(),
+        }
+    }
+    pub fn with_executor_and_session_owner(
+        templates: CommandTemplates,
+        executor: E,
+        session_owner: SessionOwnerConfig,
+    ) -> Self {
+        Self {
+            templates,
+            executor,
+            session_owner,
         }
     }
     pub fn into_executor(self) -> E {
@@ -685,6 +779,12 @@ pub trait SessionSystem {
     fn lifecycle(&mut self, _item_id: &str) -> Result<Option<SystemLifecycle>, String> {
         Ok(None)
     }
+    fn gamescope_session_lifecycle(&mut self) -> Result<Option<GamescopeSessionLifecycle>, String> {
+        Ok(None)
+    }
+    fn activate_home_client(&mut self, _unit: &str) -> Result<(), String> {
+        Err("Gamescope home client is not configured".to_owned())
+    }
     /// Start the handler (or deliver to a running one) with the URL as data and switch the
     /// foreground to it, leaving an app caller running behind it. Calls with the same handler
     /// session id must be idempotent because a durable intent is replayed after an ambiguous
@@ -739,6 +839,17 @@ pub struct SystemLifecycle {
     pub selected_owner_active: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GamescopeSessionLifecycle {
+    SessionIdle,
+    HomeClient {
+        unit: String,
+        active: bool,
+        presenting: bool,
+        ack_signal: String,
+    },
+}
+
 impl<E: CommandExecutor> SessionSystem for CommandSystem<E> {
     fn start_foreground(
         &mut self,
@@ -759,6 +870,52 @@ impl<E: CommandExecutor> SessionSystem for CommandSystem<E> {
     fn activate_selected_owner(&mut self) -> Result<(), String> {
         let template = self.templates.activate_selected_owner.clone();
         command_ok(self.run(&template, "", "")?)
+    }
+
+    fn gamescope_session_lifecycle(&mut self) -> Result<Option<GamescopeSessionLifecycle>, String> {
+        if !self.is_active("pocketforge-gamescope-session.target")? {
+            return Ok(None);
+        }
+        let (Some(unit), Some(signal)) = (
+            self.session_owner.home_client_unit.clone(),
+            self.session_owner.home_client_presentation.clone(),
+        ) else {
+            return Ok(Some(GamescopeSessionLifecycle::SessionIdle));
+        };
+        match self.property(&unit, "LoadState")?.as_str() {
+            "not-found" => return Ok(Some(GamescopeSessionLifecycle::SessionIdle)),
+            "loaded" => {}
+            state => return Err(format!("home client {unit} has LoadState {state:?}")),
+        }
+        let active = self.is_active(&unit)?;
+        let presenting = if active {
+            match fs::read_to_string(&signal) {
+                Ok(value) => value == format!("{unit}\n"),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(format!(
+                        "read Gamescope presentation signal {}: {error}",
+                        signal.display()
+                    ))
+                }
+            }
+        } else {
+            false
+        };
+        Ok(Some(GamescopeSessionLifecycle::HomeClient {
+            unit,
+            active,
+            presenting,
+            ack_signal: signal.display().to_string(),
+        }))
+    }
+
+    fn activate_home_client(&mut self, unit: &str) -> Result<(), String> {
+        if self.session_owner.home_client_unit.as_deref() != Some(unit) {
+            return Err("requested Gamescope home client is not configured".to_owned());
+        }
+        let args = ["start".to_owned(), unit.to_owned()];
+        command_ok(self.executor.execute("systemctl", &args)?)
     }
 
     fn lifecycle(&mut self, item_id: &str) -> Result<Option<SystemLifecycle>, String> {
@@ -806,6 +963,10 @@ pub enum Observation {
     TargetReleased,
     SelectedOwnerActive,
     PresentationAcknowledged,
+    GamescopeSessionIdle,
+    GamescopeHomeAvailable { unit: String, ack_signal: String },
+    GamescopeHomeActive { unit: String, ack_signal: String },
+    GamescopeHomePresented { unit: String, ack_signal: String },
     Failed { rung: FailureRung, reason: String },
 }
 
@@ -1867,6 +2028,7 @@ pub struct Authority<S, B, C> {
     graceful_deadline: Option<MonotonicTime>,
     presentation_timeout: Duration,
     presentation_deadline: Option<MonotonicTime>,
+    home_ack_started: Option<MonotonicTime>,
     log: LogSink,
     escalation: Option<EscalationHook>,
     now_fn: fn() -> SystemTime,
@@ -2116,6 +2278,7 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
             graceful_deadline: None,
             presentation_timeout: DEFAULT_PRESENTATION_TIMEOUT,
             presentation_deadline: None,
+            home_ack_started: None,
             log: stderr_log_sink(),
             escalation: None,
             now_fn,
@@ -2357,6 +2520,7 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                     receipt: None,
                     started_at: None,
                     ended_at: None,
+                    post_app_owner: None,
                 });
                 self.state.history.truncate(self.recent_bound);
                 self.publish(WireEvent::ObservedStarting);
@@ -2491,13 +2655,19 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
         let Phase::Restoring {
             item_id,
             receipt,
-            rung: RestorationRung::PresentationAcknowledged,
+            rung,
             ..
         } = &self.state.phase
         else {
             self.presentation_deadline = None;
             return Ok(());
         };
+        let awaiting_gamescope_home =
+            *rung == RestorationRung::OwnerActive && self.home_ack_started.is_some();
+        if *rung != RestorationRung::PresentationAcknowledged && !awaiting_gamescope_home {
+            self.presentation_deadline = None;
+            return Ok(());
+        }
         let (item_id, receipt) = (item_id.clone(), receipt.clone());
         let now = self.clock.now();
         let timeout = self.presentation_timeout;
@@ -2521,7 +2691,7 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                 return Ok(());
             };
             if matches!(self.state.phase, Phase::RecoveryRequired { .. }) {
-                return Ok(());
+                return self.reconcile_late_gamescope_home();
             }
             let snapshot = match self.system.lifecycle(&item_id) {
                 Ok(Some(snapshot)) => snapshot,
@@ -2533,6 +2703,30 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                     ));
                 }
             };
+            let gamescope = match self.system.gamescope_session_lifecycle() {
+                Ok(snapshot) => snapshot,
+                Err(reason) => {
+                    return self.recover(format!(
+                        "{}: {reason}",
+                        ReasonCode::SystemdStateUnknown.as_str()
+                    ));
+                }
+            };
+            if matches!(
+                self.state.phase,
+                Phase::Restoring {
+                    rung: RestorationRung::OwnerActive,
+                    ..
+                }
+            ) && matches!(
+                gamescope,
+                Some(GamescopeSessionLifecycle::HomeClient { .. })
+            ) && self.home_ack_started.is_none()
+            {
+                self.home_ack_started = Some(self.clock.now());
+                self.presentation_deadline =
+                    Some(self.clock.deadline_after(self.presentation_timeout).0);
+            }
             let observation = match (&self.state.phase, snapshot.app) {
                 (
                     Phase::Starting {
@@ -2573,14 +2767,50 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                         ..
                     },
                     _,
-                ) if !snapshot.foreground_target_active => Some(Observation::TargetReleased),
+                ) => match gamescope.clone() {
+                    Some(GamescopeSessionLifecycle::SessionIdle) => {
+                        Some(Observation::GamescopeSessionIdle)
+                    }
+                    Some(GamescopeSessionLifecycle::HomeClient {
+                        unit, ack_signal, ..
+                    }) => Some(Observation::GamescopeHomeAvailable { unit, ack_signal }),
+                    None if !snapshot.foreground_target_active => Some(Observation::TargetReleased),
+                    None => None,
+                },
                 (
                     Phase::Restoring {
                         rung: RestorationRung::OwnerActive,
                         ..
                     },
                     _,
-                ) if snapshot.selected_owner_active => Some(Observation::SelectedOwnerActive),
+                ) => match gamescope.clone() {
+                    Some(GamescopeSessionLifecycle::HomeClient {
+                        unit,
+                        active: true,
+                        ack_signal,
+                        ..
+                    }) => Some(Observation::GamescopeHomeActive { unit, ack_signal }),
+                    Some(_) => None,
+                    None if snapshot.selected_owner_active => {
+                        Some(Observation::SelectedOwnerActive)
+                    }
+                    None => None,
+                },
+                (
+                    Phase::Restoring {
+                        rung: RestorationRung::PresentationAcknowledged,
+                        ..
+                    },
+                    _,
+                ) => match gamescope {
+                    Some(GamescopeSessionLifecycle::HomeClient {
+                        unit,
+                        presenting: true,
+                        ack_signal,
+                        ..
+                    }) => Some(Observation::GamescopeHomePresented { unit, ack_signal }),
+                    _ => None,
+                },
                 _ => None,
             };
             let Some(observation) = observation else {
@@ -2590,6 +2820,59 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
         }
         Ok(())
     }
+
+    fn reconcile_late_gamescope_home(&mut self) -> Result<(), AuthorityError> {
+        let Phase::RecoveryRequired {
+            session_id,
+            reason,
+            pending_receipt: Some(_),
+            ..
+        } = &self.state.phase
+        else {
+            return Ok(());
+        };
+        if !is_presentation_timeout(reason) {
+            return Ok(());
+        }
+        let session_id = session_id.clone();
+        let Some(evidence) = self
+            .state
+            .history
+            .iter()
+            .find(|entry| entry.session_id == session_id)
+            .and_then(|entry| entry.post_app_owner.as_ref())
+        else {
+            // The legacy fb0 presentation path has no Gamescope owner evidence and remains
+            // byte-for-byte unchanged: only its explicit client acknowledgement can recover.
+            return Ok(());
+        };
+        if evidence.owner_tier != OwnerTier::Gamescope
+            || evidence.post_app_owner != PostAppOwner::HomeClient
+        {
+            return Ok(());
+        }
+        let (Some(expected_unit), Some(expected_signal)) =
+            (evidence.home_unit.clone(), evidence.ack_signal.clone())
+        else {
+            return Ok(());
+        };
+        let gamescope = self
+            .system
+            .gamescope_session_lifecycle()
+            .map_err(AuthorityError::Backend)?;
+        match gamescope {
+            Some(GamescopeSessionLifecycle::HomeClient {
+                unit,
+                active: true,
+                presenting: true,
+                ack_signal,
+            }) if unit == expected_unit && ack_signal == expected_signal => {
+                self.observe(Observation::GamescopeHomePresented { unit, ack_signal })
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn begin_restoration(&mut self, receipt: Receipt) -> Result<(), AuthorityError> {
         let session_id = self
             .session_id()
@@ -2702,6 +2985,65 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
             (
                 Phase::Restoring {
                     session_id,
+                    receipt,
+                    rung: RestorationRung::TargetReleased,
+                    ..
+                },
+                Observation::GamescopeSessionIdle,
+            ) => {
+                let (id, receipt) = (session_id.clone(), receipt.clone());
+                self.set_post_app_owner(
+                    &id,
+                    PostAppOwnerEvidence {
+                        owner_tier: OwnerTier::Gamescope,
+                        post_app_owner: PostAppOwner::SessionIdle,
+                        home_unit: None,
+                        ack_signal: None,
+                        ack_latency_ms: None,
+                    },
+                );
+                self.complete_restoration(id, receipt)
+            }
+            (
+                Phase::Restoring {
+                    session_id,
+                    item_id,
+                    receipt,
+                    rung: RestorationRung::TargetReleased,
+                },
+                Observation::GamescopeHomeAvailable { unit, ack_signal },
+            ) => {
+                let session_id = session_id.clone();
+                let item_id = item_id.clone();
+                let receipt = receipt.clone();
+                if let Err(reason) = self.system.activate_home_client(&unit) {
+                    return self
+                        .recover(format!("{}: {reason}", ReasonCode::OwnerNotActive.as_str()));
+                }
+                self.set_post_app_owner(
+                    &session_id,
+                    PostAppOwnerEvidence {
+                        owner_tier: OwnerTier::Gamescope,
+                        post_app_owner: PostAppOwner::HomeClient,
+                        home_unit: Some(unit),
+                        ack_signal: Some(ack_signal),
+                        ack_latency_ms: None,
+                    },
+                );
+                self.home_ack_started = Some(self.clock.now());
+                self.presentation_deadline =
+                    Some(self.clock.deadline_after(self.presentation_timeout).0);
+                self.state.phase = Phase::Restoring {
+                    session_id,
+                    item_id,
+                    receipt,
+                    rung: RestorationRung::OwnerActive,
+                };
+                self.persist()
+            }
+            (
+                Phase::Restoring {
+                    session_id,
                     item_id,
                     receipt,
                     rung: RestorationRung::TargetReleased,
@@ -2730,8 +3072,43 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                     receipt,
                     rung: RestorationRung::OwnerActive,
                 },
+                Observation::GamescopeHomeActive { unit, ack_signal },
+            ) => {
+                let session_id = session_id.clone();
+                let item_id = item_id.clone();
+                let receipt = receipt.clone();
+                self.refresh_home_evidence(&session_id, &unit, &ack_signal, None);
+                if self.home_ack_started.is_none() {
+                    self.home_ack_started = Some(self.clock.now());
+                }
+                self.state.phase = Phase::Restoring {
+                    session_id,
+                    item_id,
+                    receipt,
+                    rung: RestorationRung::PresentationAcknowledged,
+                };
+                self.persist()
+            }
+            (
+                Phase::Restoring {
+                    session_id,
+                    item_id,
+                    receipt,
+                    rung: RestorationRung::OwnerActive,
+                },
                 Observation::SelectedOwnerActive,
             ) => {
+                if self.home_ack_started.take().is_some() {
+                    self.presentation_deadline = None;
+                    if let Some(entry) = self
+                        .state
+                        .history
+                        .iter_mut()
+                        .find(|entry| entry.session_id == session_id.as_str())
+                    {
+                        entry.post_app_owner = None;
+                    }
+                }
                 self.state.phase = Phase::Restoring {
                     session_id: session_id.clone(),
                     item_id: item_id.clone(),
@@ -2754,8 +3131,28 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                 let (id, receipt) = (session_id.clone(), receipt.clone());
                 self.complete_restoration(id, receipt)
             }
-            // A late acknowledgement after the presentation deadline expired: the only
-            // self-healing exit from RecoveryRequired. The owed receipt becomes history now.
+            (
+                Phase::Restoring {
+                    session_id,
+                    receipt,
+                    rung: RestorationRung::PresentationAcknowledged,
+                    ..
+                },
+                Observation::GamescopeHomePresented { unit, ack_signal },
+            ) => {
+                let (id, receipt) = (session_id.clone(), receipt.clone());
+                let latency_ms = self.home_ack_started.map(|started| {
+                    self.clock
+                        .now()
+                        .as_nanos()
+                        .saturating_sub(started.as_nanos())
+                        / 1_000_000
+                });
+                self.refresh_home_evidence(&id, &unit, &ack_signal, latency_ms);
+                self.complete_restoration(id, receipt)
+            }
+            // A late client acknowledgement after the presentation deadline expired. The owed
+            // receipt becomes history now; the system-driven Gamescope form is handled below.
             (
                 Phase::RecoveryRequired {
                     session_id,
@@ -2768,9 +3165,52 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                 let (id, receipt) = (session_id.clone(), receipt.clone());
                 self.complete_restoration(id, receipt)
             }
+            (
+                Phase::RecoveryRequired {
+                    session_id,
+                    reason,
+                    pending_receipt: Some(receipt),
+                    ..
+                },
+                Observation::GamescopeHomePresented { unit, ack_signal },
+            ) if is_presentation_timeout(reason) => {
+                let (id, receipt) = (session_id.clone(), receipt.clone());
+                if !self.recorded_gamescope_home_matches(&id, &unit, &ack_signal) {
+                    return Err(AuthorityError::InvalidObservation);
+                }
+                let latency_ms = self.home_ack_started.map(|started| {
+                    self.clock
+                        .now()
+                        .as_nanos()
+                        .saturating_sub(started.as_nanos())
+                        / 1_000_000
+                });
+                self.refresh_home_evidence(&id, &unit, &ack_signal, latency_ms);
+                self.complete_restoration(id, receipt)
+            }
             _ => Err(AuthorityError::InvalidObservation),
         }
     }
+
+    fn recorded_gamescope_home_matches(
+        &self,
+        session_id: &str,
+        unit: &str,
+        ack_signal: &str,
+    ) -> bool {
+        self.state
+            .history
+            .iter()
+            .find(|entry| entry.session_id == session_id)
+            .and_then(|entry| entry.post_app_owner.as_ref())
+            .is_some_and(|evidence| {
+                evidence.owner_tier == OwnerTier::Gamescope
+                    && evidence.post_app_owner == PostAppOwner::HomeClient
+                    && evidence.home_unit.as_deref() == Some(unit)
+                    && evidence.ack_signal.as_deref() == Some(ack_signal)
+            })
+    }
+
     fn complete_restoration(&mut self, id: String, receipt: Receipt) -> Result<(), AuthorityError> {
         if let Some(entry) = self.state.history.iter_mut().find(|e| e.session_id == id) {
             entry.receipt = Some(receipt.clone());
@@ -2781,9 +3221,40 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
             receipt,
         });
         self.presentation_deadline = None;
+        self.home_ack_started = None;
         self.state.phase = Phase::Idle;
         self.state.return_slot = None;
         self.persist()
+    }
+
+    fn set_post_app_owner(&mut self, session_id: &str, evidence: PostAppOwnerEvidence) {
+        if let Some(entry) = self
+            .state
+            .history
+            .iter_mut()
+            .find(|entry| entry.session_id == session_id)
+        {
+            entry.post_app_owner = Some(evidence);
+        }
+    }
+
+    fn refresh_home_evidence(
+        &mut self,
+        session_id: &str,
+        unit: &str,
+        ack_signal: &str,
+        latency_ms: Option<u64>,
+    ) {
+        self.set_post_app_owner(
+            session_id,
+            PostAppOwnerEvidence {
+                owner_tier: OwnerTier::Gamescope,
+                post_app_owner: PostAppOwner::HomeClient,
+                home_unit: Some(unit.to_owned()),
+                ack_signal: Some(ack_signal.to_owned()),
+                ack_latency_ms: latency_ms,
+            },
+        );
     }
     /// Stamps a history entry's end and receipt without publishing a Terminal event: used for
     /// sessions that end behind or beside the foreground session (the slot's caller or handler),
@@ -2839,6 +3310,7 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                 receipt: None,
                 started_at: Some((self.now_fn)()),
                 ended_at: None,
+                post_app_owner: None,
             });
             self.state.history.truncate(self.recent_bound);
         }
@@ -3330,6 +3802,7 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
             receipt: None,
             started_at: None,
             ended_at: None,
+            post_app_owner: None,
         });
         self.state.history.truncate(self.recent_bound);
         self.publish(WireEvent::ObservedStarting);

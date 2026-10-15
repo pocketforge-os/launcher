@@ -1356,6 +1356,7 @@ fn emit_f10_evidence(
             at: start + Duration::from_secs(3 * 60 * 60 + 20 * 60),
             precision: EndPrecision::Approximate,
         }),
+        post_app_owner: None,
     }]);
     core.action(&ShellAction::Custom("Room.next".into()));
     // Library opens with focus on its search affordance. Move into the grid for the
@@ -7805,6 +7806,7 @@ mod durable_tests {
                 at: std::time::SystemTime::now(),
                 precision: pf_session_authority::EndPrecision::Observed,
             }),
+            post_app_owner: None,
         }
     }
 
@@ -9578,6 +9580,7 @@ exec="./launch"
             receipt: None,
             started_at: Some(std::time::SystemTime::UNIX_EPOCH),
             ended_at: None,
+            post_app_owner: None,
         }];
         core.load_history(&active_history);
         let mut frames = automation::FrameCounter::default();
@@ -10752,6 +10755,7 @@ exec="./launch"
                 at: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1),
                 precision: EndPrecision::Approximate,
             }),
+            post_app_owner: None,
         }
     }
 

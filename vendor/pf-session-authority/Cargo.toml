@@ -44,6 +44,10 @@ version = "0.2"
 version = "0.0.1"
 path = "../pf-app-manifest"
 
+[dependencies.pf-hang-trigger]
+version = "0.0.1"
+path = "../pf-hang-trigger"
+
 [dependencies.pf-peer-identity]
 version = "0.0.1"
 path = "../pf-peer-identity"

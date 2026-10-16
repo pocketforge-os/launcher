@@ -9204,7 +9204,7 @@ exec="./launch"
     }
 
     #[test]
-    fn sysfs_device_status_reads_system_battery_and_ignores_non_batteries() {
+    fn sysfs_device_status_tracks_capacity_charge_state_and_required_files() {
         let sysfs = tempfile::tempdir().unwrap();
         write_power_supply(sysfs.path(), "BAT0", "73", "Discharging", "System");
         let mains = sysfs.path().join("AC");
@@ -9213,10 +9213,27 @@ exec="./launch"
         fs::write(mains.join("capacity"), "1\n").unwrap();
         fs::write(mains.join("status"), "Unknown\n").unwrap();
 
-        let status = SysfsDeviceStatusPort::new(sysfs.path()).status().unwrap();
+        let port = SysfsDeviceStatusPort::new(sysfs.path());
+        let status = port.status().unwrap();
 
         assert_eq!(status.battery_percent, 73);
+        assert!(
+            format!("{status:?}").contains("Discharging"),
+            "the device-status contract must preserve the live charge state"
+        );
         assert_eq!(status.attention_message, None);
+
+        fs::write(sysfs.path().join("BAT0/capacity"), "74\n").unwrap();
+        fs::write(sysfs.path().join("BAT0/status"), "Charging\n").unwrap();
+        let changed = port.status().unwrap();
+        assert_eq!(changed.battery_percent, 74);
+        assert!(format!("{changed:?}").contains("Charging"));
+
+        fs::remove_file(sysfs.path().join("BAT0/status")).unwrap();
+        assert!(
+            port.status().is_err(),
+            "removing required charge state must produce unavailable, not stale data"
+        );
     }
 
     #[test]

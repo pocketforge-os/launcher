@@ -17851,6 +17851,38 @@ mod tests {
     }
 
     #[test]
+    fn chrome_status_renders_explicit_battery_unavailable_after_a_failed_observation() {
+        struct Unavailable;
+        impl DeviceStatusPort for Unavailable {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Err("missing power_supply capability".to_owned())
+            }
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.load_device_status(&Unavailable);
+
+        let scene = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "status-cluster")
+                .map(|node| node.accessible_label.as_str()),
+            Some("Battery unavailable")
+        );
+        assert!(node_by_id(scene.root(), "battery-outline").is_none());
+    }
+
+    #[test]
     fn attention_pill_internal_geometry_matches_tokens_at_every_text_scale() {
         fn clear_attention_label(node: &mut Node) -> bool {
             if node.id.as_str() == "attention" {

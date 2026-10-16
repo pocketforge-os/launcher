@@ -1,4 +1,8 @@
 # Classified kernel-input creation and exposure occurrences.
-# pf-input-feed has no intended builder workflow; shared transitional admission is
-# removed with the other host/CI uses by tsp-ihne1.56.5.
-tools/pf-input-feed/src/main.rs	efcaede445d224495c8ea3dd6d452bed284a6493a1a70b270b604a880cfa9aa1	# tools/pf-input-feed/src/main.rs:77 VirtualDevice::builder()
+# EMPTY by design: pf-input-feed's uinput executable front end (virtual device +
+# /proc readiness scan) was removed by tsp-ihne1.56.5 — host uinput is global to
+# every seat, so the tool is now a PRIVATE input_event stream producer (stdout,
+# regular file or named FIFO; see tools/pf-input-feed/src/lib.rs). No tracked
+# source creates or opens a kernel input device anymore. The tsp-ihne1.56.1
+# fail-closed guard port (uinput_domain) stays in-tree for the wave-2 fixture
+# migration and contains no creation call of its own.

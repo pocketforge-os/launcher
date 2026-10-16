@@ -74,6 +74,7 @@ pub enum Domain {
 }
 
 impl Domain {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PfvdGuest => "pfvd-guest",
@@ -126,6 +127,7 @@ fn complete_set(values: &[String], required: &[&str]) -> bool {
         .all(|wanted| values.iter().any(|got| got == wanted))
 }
 
+#[must_use]
 pub fn evaluate(probe: &Probe) -> Verdict {
     if probe.container == Check::Error {
         return verdict(false, Domain::ProbeError, Some("systemd-detect-virt"));
@@ -317,6 +319,7 @@ fn probe_logind() -> LogindState {
     LogindState::NoSeat
 }
 
+#[must_use]
 pub fn probe_host() -> Probe {
     let container = command_check(&["--container", "--quiet"]);
     let vm = if container == Check::No {
@@ -345,6 +348,12 @@ pub fn probe_host() -> Probe {
     }
 }
 
+/// Fail-closed authorization of a probe result.
+///
+/// # Errors
+///
+/// Returns `PermissionDenied` carrying the refusal reason whenever the verdict
+/// does not allow a host-kernel input device in this domain.
 pub fn require_safe(probe: &Probe) -> io::Result<Domain> {
     let result = evaluate(probe);
     if result.allowed {
@@ -357,10 +366,22 @@ pub fn require_safe(probe: &Probe) -> io::Result<Domain> {
     }
 }
 
+/// [`require_safe`] against a fresh [`probe_host`] reading of this machine.
+///
+/// # Errors
+///
+/// Returns `PermissionDenied` unless the live host probe lands in an allowed
+/// domain (see [`require_safe`]).
 pub fn require_safe_host() -> io::Result<Domain> {
     require_safe(&probe_host())
 }
 
+/// Test seam: run `opener` only if `probe` authorizes it.
+///
+/// # Errors
+///
+/// Returns `PermissionDenied` from [`require_safe`] when the probe's domain is
+/// not allowed, or whatever error `opener` itself produces.
 #[cfg(test)]
 pub fn guarded_open<T, F>(probe: &Probe, opener: F) -> io::Result<T>
 where
@@ -370,6 +391,13 @@ where
     opener()
 }
 
+/// [`guarded_open`] against the live host probe. Retained for the wave-2
+/// fixture migration; no executable path in this crate calls it anymore.
+///
+/// # Errors
+///
+/// Returns `PermissionDenied` from [`require_safe_host`] when this machine is
+/// not an allowed domain, or whatever error `opener` itself produces.
 pub fn guarded_host_open<T, F>(opener: F) -> io::Result<T>
 where
     F: FnOnce() -> io::Result<T>,

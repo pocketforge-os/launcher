@@ -30,10 +30,10 @@ jobs:
         run: |
           scripts/check-vendor.sh
           scripts/test-check-vendor.sh
-      - name: Host-route guards (canonical inventory, runtime#150 port)
+      - name: Host-route guards (canonical inventory, runtime#153 port)
         run: |
           # Canonical tests/uinput_inventory.py ported from runtime
-          # 9cfba117de3bac4d51061738bc6076e027f3c463 (tsp-ihne1.56.5); the
+          # 1aa5bd677efd993e34fdda54496122c79451780e (tsp-ihne1.56.5); the
           # vendored sha256s are pinned in tests/fixtures/*.SOURCE and this
           # step fails if a vendored file drifts. The plain scan must print
           # host_route_inventory=PASS over every tracked workflow, unit and

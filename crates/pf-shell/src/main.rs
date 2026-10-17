@@ -3038,6 +3038,9 @@ impl SocketPowerPort {
 impl PowerPort for SocketPowerPort {
     fn capabilities(&self) -> Result<Vec<PowerCapability>, PowerError> {
         let response = self.call(&serde_json::json!({"method":"capabilities"}))?;
+        if response.get("result").and_then(serde_json::Value::as_str) != Some("capabilities") {
+            return Err(PowerError::BackendUnavailable);
+        }
         let actions = response
             .get("actions")
             .and_then(serde_json::Value::as_array)
@@ -3066,7 +3069,11 @@ impl PowerPort for SocketPowerPort {
         };
         let response = self.call(&serde_json::json!({"method":"request","action":action}))?;
         match response.get("result").and_then(serde_json::Value::as_str) {
-            Some("accepted") => Ok(PowerRequestResult::Accepted),
+            Some("accepted")
+                if response.get("action").and_then(serde_json::Value::as_str) == Some(action) =>
+            {
+                Ok(PowerRequestResult::Accepted)
+            }
             Some("unsupported") => Ok(PowerRequestResult::Unsupported),
             Some("refused") => Ok(PowerRequestResult::Refused {
                 reason: response
@@ -4925,6 +4932,21 @@ fn hex(bytes: &[u8]) -> String {
 mod durable_tests {
     use super::*;
 
+    fn power_response_server(
+        dir: &Path,
+        name: &str,
+        response: serde_json::Value,
+    ) -> (SocketPowerPort, thread::JoinHandle<()>) {
+        let socket = dir.join(name);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            pf_wire::read_frame(&mut stream).unwrap();
+            pf_wire::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap()).unwrap();
+        });
+        (SocketPowerPort::new(socket), server)
+    }
+
     #[test]
     fn socket_power_port_maps_bounded_protocol_and_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
@@ -4948,7 +4970,7 @@ mod durable_tests {
                 request,
                 serde_json::json!({"method":"request","action":"suspend"})
             );
-            let response = serde_json::json!({"result":"accepted"});
+            let response = serde_json::json!({"result":"accepted","action":"suspend"});
             pf_wire::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap()).unwrap();
         });
         let mut power = SocketPowerPort::new(socket);
@@ -4961,6 +4983,38 @@ mod durable_tests {
 
         let missing = SocketPowerPort::new(dir.path().join("missing.sock"));
         assert_eq!(missing.capabilities(), Err(PowerError::BackendUnavailable));
+
+        for (name, response) in [
+            (
+                "cap-missing-result.sock",
+                serde_json::json!({"actions":["restart"]}),
+            ),
+            (
+                "cap-wrong-result.sock",
+                serde_json::json!({"result":"accepted","actions":["restart"]}),
+            ),
+        ] {
+            let (power, server) = power_response_server(dir.path(), name, response);
+            assert_eq!(power.capabilities(), Err(PowerError::BackendUnavailable));
+            server.join().unwrap();
+        }
+        for (name, response) in [
+            (
+                "accepted-missing-action.sock",
+                serde_json::json!({"result":"accepted"}),
+            ),
+            (
+                "accepted-wrong-action.sock",
+                serde_json::json!({"result":"accepted","action":"power_off"}),
+            ),
+        ] {
+            let (mut power, server) = power_response_server(dir.path(), name, response);
+            assert_eq!(
+                power.request(PowerAction::Sleep),
+                Err(PowerError::BackendUnavailable)
+            );
+            server.join().unwrap();
+        }
     }
 
     fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {

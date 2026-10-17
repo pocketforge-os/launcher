@@ -28,11 +28,34 @@ if [ ! -f "$policy_source" ]; then
   exit 1
 fi
 seen=0
+# tests/uinput_inventory.py carries a documented launcher adaptation (the
+# canonical runtime#150 seed_creator_self_test indexes occurrences()[0], which
+# raises IndexError on this repo's zero-occurrence creator tree; see the comment
+# inside the script and the port PR). The .SOURCE line still pins the CANONICAL
+# sha256; the adapted file's sha256 is pinned here so tampering still fails.
+canonical_inventory_sha256="2ab81480358a83ed8f521205539be8023c6a94e3436eb5ac6137eed28a9afca1"
+adapted_inventory_sha256="092663f6dce2ba23358ecb05780e396104e27997da73fa00f0a772de62ee2e08"
 while read -r path sha; do
   [ -n "$path" ] || continue
   if [ ! -f "$path" ]; then
     echo "vendored_sources=FAIL path=$path reason=missing"
     fail=1
+    continue
+  fi
+  if [ "$path" = "tests/uinput_inventory.py" ]; then
+    if [ "$sha" != "$canonical_inventory_sha256" ]; then
+      echo "vendored_sources=FAIL path=$path reason=source-pin-drift pinned=$sha canonical=$canonical_inventory_sha256"
+      fail=1
+      continue
+    fi
+    actual="$(sha256sum "$path" | cut -d' ' -f1)"
+    if [ "$actual" != "$adapted_inventory_sha256" ]; then
+      echo "vendored_sources=FAIL path=$path reason=adapted-sha-drift pinned=$adapted_inventory_sha256 actual=$actual"
+      fail=1
+    else
+      echo "vendored_sources=PASS path=$path (launcher adaptation; canonical_sha256=$canonical_inventory_sha256)"
+    fi
+    seen=$((seen + 1))
     continue
   fi
   check_line "$path" "$sha"

@@ -30,7 +30,17 @@ jobs:
         run: |
           scripts/check-vendor.sh
           scripts/test-check-vendor.sh
+      - name: Host-route guards (canonical inventory, runtime#150 port)
+        run: |
+          # Canonical tests/uinput_inventory.py ported from runtime
+          # 9cfba117de3bac4d51061738bc6076e027f3c463 (tsp-ihne1.56.5); the
+          # vendored sha256s are pinned in tests/fixtures/*.SOURCE and this
+          # step fails if a vendored file drifts. The plain scan must print
+          # host_route_inventory=PASS over every tracked workflow, unit and
+          # script; runs_on lines report the runner-label map evaluation.
+          bash tests/test-vendored-sources.sh
           python3 tests/uinput_inventory.py --self-test
+          python3 tests/uinput_inventory.py
       - name: Build offline with a clean Cargo cache
         run: |
           clean_cargo_home="$(mktemp -d)"

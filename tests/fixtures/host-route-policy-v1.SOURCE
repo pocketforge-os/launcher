@@ -2,10 +2,12 @@
 # The static spec lives in runtime; this repo vendors the fixtures verbatim and
 # tests/uinput_inventory.py is the canonical port that consumes them.
 # tests/test-vendored-sources.sh fails if any sha256 below stops matching.
+# Re-pinned 2026-10-17 to runtime#150 (amended workspace-anchor rule,
+# coreutils env fix, tokenizer fix, product_clipboard_adapter_call class).
 source_repo=pocketforge-os/runtime
-source_commit=0b1b5d094e173cee3b96399e489d0bf549fdb706
-canonical_doc=docs/host-route-policy.md (read it at the pinned commit; not vendored)
-fixture=tests/fixtures/host-route-policy-v1.json sha256=a29ea7d54ad9d9b7e230f74cb627cdb894ba98dd31ced7d663dde3036d2f0796
-fixture=tests/fixtures/host-route-cases-v1.jsonl sha256=db03f5779205c11e3cdcc4ccedb21012fa4048232b6da67bd1aade2bbeaa4560
+source_commit=9cfba117de3bac4d51061738bc6076e027f3c463
+canonical_doc=docs/host-route-policy.md sha256=4219eeee476c337ffc078110971f306a9d315410965a5b2e5fd26719c8bb7d82 (read it at the pinned commit; not vendored)
+fixture=tests/fixtures/host-route-policy-v1.json sha256=0d24b88f6e8140a25056bac9793df008101a369c25f967a8590559c9e2063c6e
+fixture=tests/fixtures/host-route-cases-v1.jsonl sha256=a1e24dae4b405242aeda96ec03fd00fac4727289ff08ea824c549aa3082e27af
 fixture=tests/fixtures/input-runner-host-map-v1.schema.json sha256=f8d2290f985aba251205d9fa4b3112234b8119b75c309ce58333cf8b623ec5d2
-fixture=tests/uinput_inventory.py sha256=5f5909527d39f683d7e2176ba55b5e730cbf1e318271a894d38e11a00282d805
+fixture=tests/uinput_inventory.py sha256=2ab81480358a83ed8f521205539be8023c6a94e3436eb5ac6137eed28a9afca1

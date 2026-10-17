@@ -6,3 +6,9 @@
 # source creates or opens a kernel input device anymore. The tsp-ihne1.56.1
 # fail-closed guard port (uinput_domain) stays in-tree for the wave-2 fixture
 # migration and contains no creation call of its own.
+# Canonical host-route port (runtime#150, runtime 9cfba117de3bac4d51061738bc6076e027f3c463):
+# tests/uinput_inventory.py is the vendored canonical script with ONE documented
+# launcher adaptation (seed_creator_self_test duplicate-live control on a
+# zero-occurrence tree; see the comment inside the script). The plain scan and
+# --self-test both run in ci.yml; tests/test-vendored-sources.sh pins the
+# canonical AND adapted sha256s.

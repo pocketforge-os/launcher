@@ -67,11 +67,59 @@ pub const MIN_TARGET_SIZE_PX: f32 = 48.0;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceStatus {
     pub battery_percent: u8,
+    pub battery_charge_state: BatteryChargeState,
     pub attention_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatteryChargeState {
+    Unknown,
+    Charging,
+    Discharging,
+    NotCharging,
+    Full,
+}
+
+impl BatteryChargeState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Charging => "Charging",
+            Self::Discharging => "Discharging",
+            Self::NotCharging => "Not charging",
+            Self::Full => "Full",
+        }
+    }
+
+    #[must_use]
+    const fn chrome_label(self) -> &'static str {
+        // The top strip has a fixed handheld-width lane beside the room switcher.
+        // Keep the painted state to one deterministic marker; the ordinary filled
+        // battery is the conventional discharging state, so it needs no suffix. The
+        // battery node exposes `label()` in full for accessibility.
+        match self {
+            Self::Unknown => "?",
+            Self::Charging => "+",
+            Self::Discharging => "",
+            Self::NotCharging => "=",
+            Self::Full => "F",
+        }
+    }
 }
 
 pub trait DeviceStatusPort {
     fn status(&self) -> Result<DeviceStatus, String>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BatteryObservation {
+    NotLoaded,
+    Available {
+        percent: u8,
+        charge_state: BatteryChargeState,
+    },
+    Unavailable,
 }
 
 const HOME_SHELF_LIMIT: usize = 6;
@@ -1059,7 +1107,7 @@ pub struct ShellCore {
     time_state: Result<pf_ports::TimeState, String>,
     transfer_services: Result<Vec<TransferServiceState>, String>,
     system_status: Option<String>,
-    battery_percent: Option<u8>,
+    battery: BatteryObservation,
     attention_message: Option<String>,
     playtime: HashMap<String, Playtime>,
     recent_use: HashMap<String, SystemTime>,
@@ -1230,7 +1278,7 @@ impl ShellCore {
             time_state: Err("Time status unavailable".into()),
             transfer_services: Err("Transfer status unavailable".into()),
             system_status: None,
-            battery_percent: None,
+            battery: BatteryObservation::NotLoaded,
             attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
@@ -1290,14 +1338,18 @@ impl ShellCore {
     }
 
     pub fn load_device_status(&mut self, port: &dyn DeviceStatusPort) {
-        let (battery_percent, attention) = port.status().map_or((None, None), |status| {
-            (
-                Some(status.battery_percent.min(100)),
+        let (battery, attention) = match port.status() {
+            Ok(status) => (
+                BatteryObservation::Available {
+                    percent: status.battery_percent.min(100),
+                    charge_state: status.battery_charge_state,
+                },
                 status.attention_message,
-            )
-        });
-        if self.battery_percent != battery_percent || self.attention_message != attention {
-            self.battery_percent = battery_percent;
+            ),
+            Err(_) => (BatteryObservation::Unavailable, None),
+        };
+        if self.battery != battery || self.attention_message != attention {
+            self.battery = battery;
             self.attention_message = attention;
             self.bump_revision();
         }
@@ -3373,15 +3425,27 @@ impl ShellCore {
             .network_state
             .as_ref()
             .is_ok_and(|state| state.connected_ssid.is_some());
-        let has_battery = scene_core.battery_percent.is_some();
+        let has_battery = matches!(scene_core.battery, BatteryObservation::Available { .. });
         let mut status_parts = Vec::new();
-        if let Some(percent) = scene_core.battery_percent {
-            status_parts.push(percent.to_string());
+        match scene_core.battery {
+            // The battery outline supplies the percent context visually; keeping the
+            // painted value to `NN<state>` preserves the approved handheld geometry.
+            BatteryObservation::Available {
+                percent,
+                charge_state,
+            } => status_parts.push(format!("{percent}{}", charge_state.chrome_label())),
+            BatteryObservation::Unavailable => status_parts.push("Battery unavailable".into()),
+            BatteryObservation::NotLoaded => {}
         }
         if scene_core.authority_unavailable() {
             status_parts.push("!".into());
         }
-        if let Ok(state) = &scene_core.time_state {
+        // At enlarged text scales the live battery state owns the fixed status lane;
+        // the clock would otherwise force the atomic battery group off-screen.
+        if (scene_core.text_scale == 100
+            || matches!(scene_core.battery, BatteryObservation::NotLoaded))
+            && let Ok(state) = &scene_core.time_state
+        {
             let seconds = state
                 .wall_clock
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -3423,18 +3487,24 @@ impl ShellCore {
                 ),
             );
         }
-        if let Some(battery_percent) = scene_core.battery_percent.filter(|_| status_group_fits) {
+        if let BatteryObservation::Available {
+            percent: battery_percent,
+            charge_state,
+        } = scene_core.battery
+            && status_group_fits
+        {
             // A delicate OUTLINE capsule (mockup ~12x7) centered on the status
             // centerline, not the near-solid filled block the four opaque rects drew.
             // The outline is a 1px themed border on a transparent body; the charge is a
             // small inner fill, and a short nub is the terminal.
             let cy = status_center_y;
             let level_width = (9.0 * f32::from(battery_percent) / 100.0).max(1.5);
+            let battery_label = format!("Battery {battery_percent}%, {}", charge_state.label());
             children.extend([
                 node(
                     "battery-outline",
                     Role::Group,
-                    "Battery",
+                    &battery_label,
                     battery_x,
                     cy - 3.5,
                     12.0,
@@ -12836,6 +12906,7 @@ mod tests {
             fn status(&self) -> Result<DeviceStatus, String> {
                 Ok(DeviceStatus {
                     battery_percent: 82,
+                    battery_charge_state: BatteryChargeState::Discharging,
                     attention_message: None,
                 })
             }
@@ -12887,7 +12958,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_device_status_and_time_are_absent_from_chrome() {
+    fn unavailable_device_status_is_explicit_and_time_is_absent_from_chrome() {
         struct Unavailable;
         impl DeviceStatusPort for Unavailable {
             fn status(&self) -> Result<DeviceStatus, String> {
@@ -12902,11 +12973,14 @@ mod tests {
             "battery-cavity",
             "battery-level",
             "battery-terminal",
-            "status-cluster",
             "attention-pill",
         ] {
             assert!(node_by_id(scene.root(), id).is_none(), "unexpected {id}");
         }
+        assert_eq!(
+            node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
+            Some("Battery unavailable")
+        );
         assert!(node_by_id(scene.root(), "status-bar").is_none());
     }
 
@@ -17650,13 +17724,23 @@ mod tests {
     }
 
     #[test]
+    fn chrome_battery_charge_state_markers_are_distinct() {
+        assert_eq!(BatteryChargeState::Unknown.chrome_label(), "?");
+        assert_eq!(BatteryChargeState::Charging.chrome_label(), "+");
+        assert_eq!(BatteryChargeState::Discharging.chrome_label(), "");
+        assert_eq!(BatteryChargeState::NotCharging.chrome_label(), "=");
+        assert_eq!(BatteryChargeState::Full.chrome_label(), "F");
+    }
+
+    #[test]
     fn chrome_status_uses_observed_battery_and_optional_attention() {
-        struct Status(u8, Option<&'static str>);
+        struct Status(u8, BatteryChargeState, Option<&'static str>);
         impl DeviceStatusPort for Status {
             fn status(&self) -> Result<DeviceStatus, String> {
                 Ok(DeviceStatus {
                     battery_percent: self.0,
-                    attention_message: self.1.map(str::to_owned),
+                    battery_charge_state: self.1,
+                    attention_message: self.2.map(str::to_owned),
                 })
             }
         }
@@ -17672,7 +17756,7 @@ mod tests {
             "Ready Game",
             vec![variant("native", "ready-app", Availability::Ready)],
         )]);
-        core.load_device_status(&Status(25, None));
+        core.load_device_status(&Status(25, BatteryChargeState::Discharging, None));
         let scene = core.scene(metrics, "").unwrap();
         assert!(
             (node_by_id(scene.root(), "battery-level")
@@ -17685,6 +17769,14 @@ mod tests {
         );
         assert!(node_by_id(scene.root(), "attention-pill").is_none());
         assert!(node_by_id(scene.root(), "wifi-glyph").is_none());
+        assert_eq!(
+            node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
+            Some("25")
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "battery-outline").map(|node| node.accessible_label.as_str()),
+            Some("Battery 25%, Discharging")
+        );
 
         let mut connected = pf_ports::FakeNetworkPort::new(NetworkState {
             interface_present: true,
@@ -17696,7 +17788,13 @@ mod tests {
         let scene = core.scene(metrics, "").unwrap();
         assert!(node_by_id(scene.root(), "wifi-glyph").is_some());
 
-        core.load_device_status(&Status(100, Some("Controller battery low")));
+        let revision_before_change = core.revision();
+        core.load_device_status(&Status(
+            100,
+            BatteryChargeState::Charging,
+            Some("Controller battery low"),
+        ));
+        assert!(core.revision() > revision_before_change);
         let scene = core.scene(metrics, "").unwrap();
         assert!(
             (node_by_id(scene.root(), "battery-level")
@@ -17710,6 +17808,10 @@ mod tests {
         assert_eq!(
             node_by_id(scene.root(), "attention").map(|node| node.accessible_label.as_str()),
             Some("Controller battery low")
+        );
+        assert_eq!(
+            node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
+            Some("100+")
         );
         let root = scene.root();
         let item_ids = [
@@ -17851,6 +17953,37 @@ mod tests {
     }
 
     #[test]
+    fn chrome_status_renders_explicit_battery_unavailable_after_a_failed_observation() {
+        struct Unavailable;
+        impl DeviceStatusPort for Unavailable {
+            fn status(&self) -> Result<DeviceStatus, String> {
+                Err("missing power_supply capability".to_owned())
+            }
+        }
+
+        let metrics = SurfaceMetrics {
+            logical_width: 1280.0,
+            logical_height: 720.0,
+            scale: 1.0,
+            safe_insets: Default::default(),
+            orientation: pf_scene::Orientation::Landscape,
+        };
+        let mut core = fixture_core(vec![item(
+            "ready",
+            "Ready Game",
+            vec![variant("native", "ready-app", Availability::Ready)],
+        )]);
+        core.load_device_status(&Unavailable);
+
+        let scene = core.scene(metrics, "").unwrap();
+        assert_eq!(
+            node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
+            Some("Battery unavailable")
+        );
+        assert!(node_by_id(scene.root(), "battery-outline").is_none());
+    }
+
+    #[test]
     fn attention_pill_internal_geometry_matches_tokens_at_every_text_scale() {
         fn clear_attention_label(node: &mut Node) -> bool {
             if node.id.as_str() == "attention" {
@@ -17886,6 +18019,7 @@ mod tests {
             fn status(&self) -> Result<DeviceStatus, String> {
                 Ok(DeviceStatus {
                     battery_percent: 50,
+                    battery_charge_state: BatteryChargeState::Discharging,
                     attention_message: Some("Controller battery low".to_owned()),
                 })
             }
@@ -17969,6 +18103,7 @@ mod tests {
             fn status(&self) -> Result<DeviceStatus, String> {
                 Ok(DeviceStatus {
                     battery_percent: 50,
+                    battery_charge_state: BatteryChargeState::Discharging,
                     attention_message: Some(self.0.to_owned()),
                 })
             }
@@ -18557,6 +18692,7 @@ mod tests {
             fn status(&self) -> Result<DeviceStatus, String> {
                 Ok(DeviceStatus {
                     battery_percent: 25,
+                    battery_charge_state: BatteryChargeState::Discharging,
                     attention_message: Some("Controller battery low".to_owned()),
                 })
             }

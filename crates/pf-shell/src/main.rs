@@ -40,7 +40,7 @@ use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
     commit_pinned_variant, control_bindings, footer_prompt, safe_return_options,
 };
-use pf_shell_core::{DeviceStatus, DeviceStatusPort, Effect, ShellCore};
+use pf_shell_core::{BatteryChargeState, DeviceStatus, DeviceStatusPort, Effect, ShellCore};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -708,6 +708,7 @@ impl DeviceStatusPort for FakeDeviceStatusPort {
     fn status(&self) -> Result<DeviceStatus, String> {
         Ok(DeviceStatus {
             battery_percent: 82,
+            battery_charge_state: BatteryChargeState::Discharging,
             attention_message: self.attention.then(|| "Controller battery low".into()),
         })
     }
@@ -734,8 +735,24 @@ enum BatteryScope {
 
 struct ObservedBattery {
     capacity: u8,
-    status: String,
+    charge_state: BatteryChargeState,
     scope: BatteryScope,
+}
+
+fn parse_battery_charge_state(value: &str) -> Option<BatteryChargeState> {
+    if value.eq_ignore_ascii_case("unknown") {
+        Some(BatteryChargeState::Unknown)
+    } else if value.eq_ignore_ascii_case("charging") {
+        Some(BatteryChargeState::Charging)
+    } else if value.eq_ignore_ascii_case("discharging") {
+        Some(BatteryChargeState::Discharging)
+    } else if value.eq_ignore_ascii_case("not charging") {
+        Some(BatteryChargeState::NotCharging)
+    } else if value.eq_ignore_ascii_case("full") {
+        Some(BatteryChargeState::Full)
+    } else {
+        None
+    }
 }
 
 impl DeviceStatusPort for SysfsDeviceStatusPort {
@@ -764,6 +781,9 @@ impl DeviceStatusPort for SysfsDeviceStatusPort {
             let Ok(status) = read_sysfs_value(&path.join("status")) else {
                 continue;
             };
+            let Some(charge_state) = parse_battery_charge_state(&status) else {
+                continue;
+            };
             let scope = match read_sysfs_value(&path.join("scope")) {
                 Ok(scope) if scope.eq_ignore_ascii_case("system") => BatteryScope::System,
                 Ok(scope) if scope.eq_ignore_ascii_case("device") => BatteryScope::Controller,
@@ -771,7 +791,7 @@ impl DeviceStatusPort for SysfsDeviceStatusPort {
             };
             batteries.push(ObservedBattery {
                 capacity,
-                status,
+                charge_state,
                 scope,
             });
         }
@@ -788,8 +808,10 @@ impl DeviceStatusPort for SysfsDeviceStatusPort {
             .ok_or_else(|| "Device status unavailable".to_owned())?;
         let low = batteries.iter().find(|battery| {
             battery.capacity <= LOW_BATTERY_PERCENT
-                && !battery.status.eq_ignore_ascii_case("charging")
-                && !battery.status.eq_ignore_ascii_case("full")
+                && !matches!(
+                    battery.charge_state,
+                    BatteryChargeState::Charging | BatteryChargeState::Full
+                )
         });
         let attention_message = low.map(|battery| match battery.scope {
             BatteryScope::Controller => "Controller battery low".to_owned(),
@@ -797,6 +819,7 @@ impl DeviceStatusPort for SysfsDeviceStatusPort {
         });
         Ok(DeviceStatus {
             battery_percent: displayed.capacity,
+            battery_charge_state: displayed.charge_state,
             attention_message,
         })
     }
@@ -9204,7 +9227,7 @@ exec="./launch"
     }
 
     #[test]
-    fn sysfs_device_status_reads_system_battery_and_ignores_non_batteries() {
+    fn sysfs_device_status_tracks_capacity_charge_state_and_required_files() {
         let sysfs = tempfile::tempdir().unwrap();
         write_power_supply(sysfs.path(), "BAT0", "73", "Discharging", "System");
         let mains = sysfs.path().join("AC");
@@ -9213,10 +9236,24 @@ exec="./launch"
         fs::write(mains.join("capacity"), "1\n").unwrap();
         fs::write(mains.join("status"), "Unknown\n").unwrap();
 
-        let status = SysfsDeviceStatusPort::new(sysfs.path()).status().unwrap();
+        let port = SysfsDeviceStatusPort::new(sysfs.path());
+        let status = port.status().unwrap();
 
         assert_eq!(status.battery_percent, 73);
+        assert_eq!(status.battery_charge_state, BatteryChargeState::Discharging);
         assert_eq!(status.attention_message, None);
+
+        fs::write(sysfs.path().join("BAT0/capacity"), "74\n").unwrap();
+        fs::write(sysfs.path().join("BAT0/status"), "Charging\n").unwrap();
+        let changed = port.status().unwrap();
+        assert_eq!(changed.battery_percent, 74);
+        assert_eq!(changed.battery_charge_state, BatteryChargeState::Charging);
+
+        fs::remove_file(sysfs.path().join("BAT0/status")).unwrap();
+        assert!(
+            port.status().is_err(),
+            "removing required charge state must produce unavailable, not stale data"
+        );
     }
 
     #[test]
@@ -9225,6 +9262,27 @@ exec="./launch"
         write_power_supply(sysfs.path(), "BAT0", "unknown", "Discharging", "System");
 
         assert!(SysfsDeviceStatusPort::new(sysfs.path()).status().is_err());
+    }
+
+    #[test]
+    fn sysfs_device_status_accepts_only_linux_charge_state_values() {
+        let sysfs = tempfile::tempdir().unwrap();
+        write_power_supply(sysfs.path(), "BAT0", "50", "Unknown", "System");
+        let port = SysfsDeviceStatusPort::new(sysfs.path());
+
+        for (raw, expected) in [
+            ("Unknown", BatteryChargeState::Unknown),
+            ("Charging", BatteryChargeState::Charging),
+            ("Discharging", BatteryChargeState::Discharging),
+            ("Not charging", BatteryChargeState::NotCharging),
+            ("Full", BatteryChargeState::Full),
+        ] {
+            fs::write(sysfs.path().join("BAT0/status"), format!("{raw}\n")).unwrap();
+            assert_eq!(port.status().unwrap().battery_charge_state, expected);
+        }
+
+        fs::write(sysfs.path().join("BAT0/status"), "Almost full\n").unwrap();
+        assert!(port.status().is_err());
     }
 
     #[test]

@@ -1,0 +1,14 @@
+# Vendored canonical host-route spec fixtures (tsp-ihne1.56.5 port).
+# The static spec lives in runtime; this repo vendors the fixtures verbatim and
+# tests/uinput_inventory.py is the canonical port that consumes them.
+# tests/test-vendored-sources.sh fails if any sha256 below stops matching.
+# Re-pinned 2026-10-17 to runtime#155 167b2196 (canonical fail-open fix,
+# tsp-ihne1.56.5.2: GitHub Actions job-level container/services option
+# strings are now scanned as container argv) + runtime#154 1e1e1260 (doc).
+source_repo=pocketforge-os/runtime
+source_commit=1e1e126096d2f54a56c76b10a94826a321906900
+canonical_doc=docs/host-route-policy.md sha256=5e71f56b322df7fe23a892e5127c8cadbe5a2573089aa846f0be7d9a7b93bc53 (read it at the pinned commit; not vendored)
+fixture=tests/fixtures/host-route-policy-v1.json sha256=997477f77687eda1ecab32afbb9bfbd6d31ba58d721f9d7cb0f9dd881d362ffb
+fixture=tests/fixtures/host-route-cases-v1.jsonl sha256=d1e311ba2edffd7e1d21a8257055784d271e877d5eac8ed4b295a80af079043f
+fixture=tests/fixtures/input-runner-host-map-v1.schema.json sha256=f8d2290f985aba251205d9fa4b3112234b8119b75c309ce58333cf8b623ec5d2
+fixture=tests/uinput_inventory.py sha256=29b13a71a3972b1bef3f0f1c3af98e44e9040cdb69c0eaa1fab2a361c25c8242

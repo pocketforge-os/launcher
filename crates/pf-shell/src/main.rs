@@ -1042,8 +1042,7 @@ fn main() -> Result<(), String> {
     } else {
         socket_power = SocketPowerPort::new(
             env::var_os("PF_POWER_SOCK")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_POWER_SOCKET)),
+                .map_or_else(|| PathBuf::from(DEFAULT_POWER_SOCKET), PathBuf::from),
         );
         &mut socket_power
     };
@@ -3021,7 +3020,7 @@ impl SocketPowerPort {
         Self { socket }
     }
 
-    fn call(&self, request: serde_json::Value) -> Result<serde_json::Value, PowerError> {
+    fn call(&self, request: &serde_json::Value) -> Result<serde_json::Value, PowerError> {
         let mut stream =
             UnixStream::connect(&self.socket).map_err(|_| PowerError::BackendUnavailable)?;
         let deadline = Some(Duration::from_secs(3));
@@ -3038,7 +3037,7 @@ impl SocketPowerPort {
 
 impl PowerPort for SocketPowerPort {
     fn capabilities(&self) -> Result<Vec<PowerCapability>, PowerError> {
-        let response = self.call(serde_json::json!({"method":"capabilities"}))?;
+        let response = self.call(&serde_json::json!({"method":"capabilities"}))?;
         let actions = response
             .get("actions")
             .and_then(serde_json::Value::as_array)
@@ -3065,7 +3064,7 @@ impl PowerPort for SocketPowerPort {
             PowerAction::Restart => "restart",
             PowerAction::Sleep => "suspend",
         };
-        let response = self.call(serde_json::json!({"method":"request","action":action}))?;
+        let response = self.call(&serde_json::json!({"method":"request","action":action}))?;
         match response.get("result").and_then(serde_json::Value::as_str) {
             Some("accepted") => Ok(PowerRequestResult::Accepted),
             Some("unsupported") => Ok(PowerRequestResult::Unsupported),

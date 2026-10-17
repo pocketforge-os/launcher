@@ -67,6 +67,7 @@ mod compositor_session;
 use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
+const DEFAULT_POWER_SOCKET: &str = "/run/pocketforge/power.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 const RUNTIME_FAMILY: &str = "pocketforge/native";
 const RUNTIME_ABI: &str = "1";
@@ -1018,7 +1019,7 @@ fn main() -> Result<(), String> {
         });
     }
     let mut fake_power;
-    let mut unavailable_power;
+    let mut socket_power;
     let power: &mut dyn PowerPort = if device_fixture_mode {
         fake_power = FakePowerPort::new(
             vec![
@@ -1039,8 +1040,12 @@ fn main() -> Result<(), String> {
         );
         &mut fake_power
     } else {
-        unavailable_power = UnavailablePowerPort;
-        &mut unavailable_power
+        socket_power = SocketPowerPort::new(
+            env::var_os("PF_POWER_SOCK")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_POWER_SOCKET)),
+        );
+        &mut socket_power
     };
     core.load_power(power);
     let mut fake_network;
@@ -3007,15 +3012,72 @@ fn capture_screenshot(
     Ok(path)
 }
 
-struct UnavailablePowerPort;
+struct SocketPowerPort {
+    socket: PathBuf,
+}
 
-impl PowerPort for UnavailablePowerPort {
-    fn capabilities(&self) -> Result<Vec<PowerCapability>, PowerError> {
-        Err(PowerError::BackendUnavailable)
+impl SocketPowerPort {
+    fn new(socket: PathBuf) -> Self {
+        Self { socket }
     }
 
-    fn request(&mut self, _action: PowerAction) -> Result<PowerRequestResult, PowerError> {
-        Err(PowerError::BackendUnavailable)
+    fn call(&self, request: serde_json::Value) -> Result<serde_json::Value, PowerError> {
+        let mut stream =
+            UnixStream::connect(&self.socket).map_err(|_| PowerError::BackendUnavailable)?;
+        let deadline = Some(Duration::from_secs(3));
+        stream
+            .set_read_timeout(deadline)
+            .and_then(|()| stream.set_write_timeout(deadline))
+            .map_err(|_| PowerError::BackendUnavailable)?;
+        let body = serde_json::to_vec(&request).map_err(|_| PowerError::BackendUnavailable)?;
+        pf_wire::write_frame(&mut stream, &body).map_err(|_| PowerError::BackendUnavailable)?;
+        let body = pf_wire::read_frame(&mut stream).map_err(|_| PowerError::BackendUnavailable)?;
+        serde_json::from_slice(&body).map_err(|_| PowerError::BackendUnavailable)
+    }
+}
+
+impl PowerPort for SocketPowerPort {
+    fn capabilities(&self) -> Result<Vec<PowerCapability>, PowerError> {
+        let response = self.call(serde_json::json!({"method":"capabilities"}))?;
+        let actions = response
+            .get("actions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(PowerError::BackendUnavailable)?;
+        let mut capabilities = Vec::new();
+        for action in actions {
+            let action = match action.as_str() {
+                Some("power_off") => PowerAction::PowerOff,
+                Some("restart") => PowerAction::Restart,
+                Some("suspend") => PowerAction::Sleep,
+                _ => return Err(PowerError::BackendUnavailable),
+            };
+            capabilities.push(PowerCapability {
+                action,
+                support: Support::Supported,
+            });
+        }
+        Ok(capabilities)
+    }
+
+    fn request(&mut self, action: PowerAction) -> Result<PowerRequestResult, PowerError> {
+        let action = match action {
+            PowerAction::PowerOff => "power_off",
+            PowerAction::Restart => "restart",
+            PowerAction::Sleep => "suspend",
+        };
+        let response = self.call(serde_json::json!({"method":"request","action":action}))?;
+        match response.get("result").and_then(serde_json::Value::as_str) {
+            Some("accepted") => Ok(PowerRequestResult::Accepted),
+            Some("unsupported") => Ok(PowerRequestResult::Unsupported),
+            Some("refused") => Ok(PowerRequestResult::Refused {
+                reason: response
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("service refused request")
+                    .to_owned(),
+            }),
+            _ => Err(PowerError::BackendUnavailable),
+        }
     }
 
     fn idle_policy(&self) -> Result<IdlePolicy, PowerError> {
@@ -4863,6 +4925,44 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod durable_tests {
     use super::*;
+
+    #[test]
+    fn socket_power_port_maps_bounded_protocol_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("power.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: serde_json::Value =
+                serde_json::from_slice(&pf_wire::read_frame(&mut stream).unwrap()).unwrap();
+            assert_eq!(request, serde_json::json!({"method":"capabilities"}));
+            let response = serde_json::json!({
+                "result":"capabilities",
+                "actions":["power_off","restart","suspend"]
+            });
+            pf_wire::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: serde_json::Value =
+                serde_json::from_slice(&pf_wire::read_frame(&mut stream).unwrap()).unwrap();
+            assert_eq!(
+                request,
+                serde_json::json!({"method":"request","action":"suspend"})
+            );
+            let response = serde_json::json!({"result":"accepted"});
+            pf_wire::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap()).unwrap();
+        });
+        let mut power = SocketPowerPort::new(socket);
+        assert_eq!(power.capabilities().unwrap().len(), 3);
+        assert_eq!(
+            power.request(PowerAction::Sleep),
+            Ok(PowerRequestResult::Accepted)
+        );
+        server.join().unwrap();
+
+        let missing = SocketPowerPort::new(dir.path().join("missing.sock"));
+        assert_eq!(missing.capabilities(), Err(PowerError::BackendUnavailable));
+    }
 
     fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {
         if node.state.focused {

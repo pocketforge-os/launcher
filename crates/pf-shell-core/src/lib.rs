@@ -2693,7 +2693,9 @@ impl ShellCore {
                     None
                 }
                 row if self.sleep_row() == Some(row) => {
-                    Some(Effect::RequestPower(PowerAction::Sleep))
+                    self.power_dialog = PowerDialog::Confirm(PowerAction::Sleep);
+                    self.focus = 0;
+                    None
                 }
                 row if self.idle_policy_loaded && row == self.idle_row() => {
                     let minutes = self
@@ -20421,6 +20423,33 @@ mod tests {
         assert_eq!(
             core.action(&ShellAction::Activate),
             Some(Effect::RequestPower(PowerAction::PowerOff))
+        );
+    }
+
+    #[test]
+    fn suspend_requires_confirmation_and_cancel_has_no_effect() {
+        let mut core = core();
+        let power = FakePowerPort::new(
+            vec![PowerCapability {
+                action: PowerAction::Sleep,
+                support: Support::Supported,
+            }],
+            IdlePolicy::default(),
+        );
+        core.load_power(&power);
+        core.go(Route::Quick);
+        core.focus = core.sleep_row().unwrap();
+
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.power_dialog, PowerDialog::Confirm(PowerAction::Sleep));
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.power_dialog, PowerDialog::Closed);
+
+        core.action(&ShellAction::Activate);
+        core.action(&ShellAction::Move(AxisMove::Down));
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::RequestPower(PowerAction::Sleep))
         );
     }
 

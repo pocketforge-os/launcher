@@ -95,13 +95,15 @@ impl BatteryChargeState {
     #[must_use]
     const fn chrome_label(self) -> &'static str {
         // The top strip has a fixed handheld-width lane beside the room switcher.
-        // Keep the painted state compact; the battery node exposes `label()` in full.
+        // Keep the painted state to one deterministic marker; the ordinary filled
+        // battery is the conventional discharging state, so it needs no suffix. The
+        // battery node exposes `label()` in full for accessibility.
         match self {
-            Self::Unknown => "UNK",
-            Self::Charging => "CHG",
-            Self::Discharging => "DSG",
-            Self::NotCharging => "NCH",
-            Self::Full => "FULL",
+            Self::Unknown => "?",
+            Self::Charging => "+",
+            Self::Discharging => "",
+            Self::NotCharging => "=",
+            Self::Full => "F",
         }
     }
 }
@@ -3426,10 +3428,12 @@ impl ShellCore {
         let has_battery = matches!(scene_core.battery, BatteryObservation::Available { .. });
         let mut status_parts = Vec::new();
         match scene_core.battery {
+            // The battery outline supplies the percent context visually; keeping the
+            // painted value to `NN<state>` preserves the approved handheld geometry.
             BatteryObservation::Available {
                 percent,
                 charge_state,
-            } => status_parts.push(format!("{percent}% {}", charge_state.chrome_label())),
+            } => status_parts.push(format!("{percent}{}", charge_state.chrome_label())),
             BatteryObservation::Unavailable => status_parts.push("Battery unavailable".into()),
             BatteryObservation::NotLoaded => {}
         }
@@ -3450,7 +3454,7 @@ impl ShellCore {
                 % 86_400;
             status_parts.push(format!("{}:{:02}", seconds / 3_600, seconds % 3_600 / 60));
         }
-        let status_text = (!status_parts.is_empty()).then(|| status_parts.join(" "));
+        let status_text = (!status_parts.is_empty()).then(|| status_parts.join("     "));
         let status_width = status_text
             .as_ref()
             .map(|text| text_node_box_width(caption_text_width(text, scene_core.text_scale)));
@@ -17723,7 +17727,7 @@ mod tests {
     fn chrome_battery_charge_state_markers_are_distinct() {
         assert_eq!(BatteryChargeState::Unknown.chrome_label(), "?");
         assert_eq!(BatteryChargeState::Charging.chrome_label(), "+");
-        assert_eq!(BatteryChargeState::Discharging.chrome_label(), "-");
+        assert_eq!(BatteryChargeState::Discharging.chrome_label(), "");
         assert_eq!(BatteryChargeState::NotCharging.chrome_label(), "=");
         assert_eq!(BatteryChargeState::Full.chrome_label(), "F");
     }
@@ -17767,7 +17771,7 @@ mod tests {
         assert!(node_by_id(scene.root(), "wifi-glyph").is_none());
         assert_eq!(
             node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
-            Some("25%-")
+            Some("25")
         );
         assert_eq!(
             node_by_id(scene.root(), "battery-outline").map(|node| node.accessible_label.as_str()),
@@ -17807,7 +17811,7 @@ mod tests {
         );
         assert_eq!(
             node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
-            Some("100%+")
+            Some("100+")
         );
         let root = scene.root();
         let item_ids = [

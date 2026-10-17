@@ -17720,6 +17720,15 @@ mod tests {
     }
 
     #[test]
+    fn chrome_battery_charge_state_markers_are_distinct() {
+        assert_eq!(BatteryChargeState::Unknown.chrome_label(), "?");
+        assert_eq!(BatteryChargeState::Charging.chrome_label(), "+");
+        assert_eq!(BatteryChargeState::Discharging.chrome_label(), "-");
+        assert_eq!(BatteryChargeState::NotCharging.chrome_label(), "=");
+        assert_eq!(BatteryChargeState::Full.chrome_label(), "F");
+    }
+
+    #[test]
     fn chrome_status_uses_observed_battery_and_optional_attention() {
         struct Status(u8, BatteryChargeState, Option<&'static str>);
         impl DeviceStatusPort for Status {
@@ -17758,7 +17767,7 @@ mod tests {
         assert!(node_by_id(scene.root(), "wifi-glyph").is_none());
         assert_eq!(
             node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
-            Some("25% DSG")
+            Some("25%-")
         );
         assert_eq!(
             node_by_id(scene.root(), "battery-outline").map(|node| node.accessible_label.as_str()),
@@ -17798,7 +17807,7 @@ mod tests {
         );
         assert_eq!(
             node_by_id(scene.root(), "status-cluster").map(|node| node.accessible_label.as_str()),
-            Some("100% CHG")
+            Some("100%+")
         );
         let root = scene.root();
         let item_ids = [

@@ -67,7 +67,7 @@ mod compositor_session;
 use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
-const DEFAULT_POWER_SOCKET: &str = "/run/pocketforge/power.sock";
+const DEFAULT_POWER_SOCKET: &str = "/run/pocketforge-power/power.sock";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 const RUNTIME_FAMILY: &str = "pocketforge/native";
 const RUNTIME_ABI: &str = "1";

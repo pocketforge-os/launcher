@@ -9602,7 +9602,7 @@ fn add_explicit_action_name(action_node: &mut Node, text_scale: u16) {
             COLOR_SURFACE_CANVAS_TOKEN,
         )
         .with_type_role(TypeRole::Label);
-        label.state = action_node.state;
+        label.state = action_node.state.clone();
         action_node.children.push(label);
     }
     for child in &mut action_node.children {

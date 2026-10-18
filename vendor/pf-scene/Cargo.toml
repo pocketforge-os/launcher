@@ -30,6 +30,10 @@ repository = "https://github.com/pocketforge-os/runtime"
 name = "pf_scene"
 path = "src/lib.rs"
 
+[[test]]
+name = "menu_semantics"
+path = "tests/menu_semantics.rs"
+
 [dependencies.taffy]
 version = "0.7.7"
 features = [

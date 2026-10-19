@@ -495,17 +495,18 @@ fn build_context_maps_from_reverse_codes(
         .into_iter()
         .map(|context| {
             let mut by_code = BTreeMap::new();
-            add_context_mappings(map, control_by_code, &mut by_code, "global", false);
+            add_context_mappings(map, control_by_code, &mut by_code, "global", false, false);
             // Search keeps the shell controls as its baseline so navigation and protected
             // actions remain available while typing. Search rows are applied last and therefore
             // intentionally win a physical-code collision (north/Search.submit is the shipped
             // example).
-            add_context_mappings(map, control_by_code, &mut by_code, "shell", false);
+            add_context_mappings(map, control_by_code, &mut by_code, "shell", false, false);
             add_context_mappings(
                 map,
                 control_by_code,
                 &mut by_code,
                 "search",
+                context == "shell",
                 context == "shell",
             );
             add_room_shoulder_actions(&mut by_code);
@@ -520,6 +521,7 @@ fn add_context_mappings(
     by_code: &mut BTreeMap<u16, ShellAction>,
     context: &str,
     search_entry_only: bool,
+    preserve_existing: bool,
 ) {
     for mapping in map.mappings() {
         if mapping.context != context
@@ -536,7 +538,11 @@ fn add_context_mappings(
             continue;
         };
         if let Some(action) = semantic_action(&mapping.action) {
-            by_code.insert(code, action);
+            if preserve_existing {
+                by_code.entry(code).or_insert(action);
+            } else {
+                by_code.insert(code, action);
+            }
         }
     }
 }
@@ -1134,6 +1140,78 @@ mod tests {
                 Some(&EvdevInputEvent::Pressed {
                     code,
                     action: Some(action),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn shell_bindings_win_cross_context_remaps_on_initial_and_rebuilt_maps() {
+        let shell_remaps = [
+            ("Quick", 307, ShellAction::Custom("Quick".into())),
+            ("Move.up", 103, ShellAction::Move(AxisMove::Up)),
+            ("Move.down", 108, ShellAction::Move(AxisMove::Down)),
+            ("Move.left", 105, ShellAction::Move(AxisMove::Left)),
+            ("Move.right", 106, ShellAction::Move(AxisMove::Right)),
+        ];
+        for (action, code, expected) in shell_remaps {
+            let initial = decode_map_with(
+                persisted_cross_context_map(Some(action), None),
+                &[(EV_KEY, 314, 1)],
+                |source| source.set_active_context("shell"),
+            );
+            assert_eq!(
+                initial.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code: 314,
+                    action: Some(expected.clone()),
+                })
+            );
+
+            let rebuilt = decode_map_with(
+                persisted_cross_context_map(Some(action), None),
+                &[(EV_KEY, 314, 1)],
+                |source| {
+                    let map = persisted_cross_context_map(Some(action), None);
+                    source.apply_effective_map(&map);
+                    source.set_active_context("shell");
+                },
+            );
+            assert_eq!(
+                rebuilt.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code: 314,
+                    action: Some(expected.clone()),
+                })
+            );
+
+            let search_open_initial = decode_map_with(
+                persisted_cross_context_map(None, Some(code)),
+                &[(EV_KEY, code, 1)],
+                |source| source.set_active_context("shell"),
+            );
+            assert_eq!(
+                search_open_initial.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code,
+                    action: Some(expected.clone()),
+                })
+            );
+
+            let search_open_rebuilt = decode_map_with(
+                persisted_cross_context_map(None, Some(code)),
+                &[(EV_KEY, code, 1)],
+                |source| {
+                    let map = persisted_cross_context_map(None, Some(code));
+                    source.apply_effective_map(&map);
+                    source.set_active_context("shell");
+                },
+            );
+            assert_eq!(
+                search_open_rebuilt.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code,
+                    action: Some(expected),
                 })
             );
         }
@@ -1850,6 +1928,64 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(&path, &contract, map).unwrap();
+        prepare(&mut source);
+        let mut decoded = Vec::new();
+        while let Ok(event) = source.next_input_event_timeout(Duration::ZERO) {
+            decoded.extend(event);
+        }
+        decoded
+    }
+
+    fn persisted_cross_context_map(
+        shell_action: Option<&str>,
+        search_open_control: Option<u16>,
+    ) -> EffectiveMap {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let mut persisted = contract.effective_map.clone();
+        if let Some(action) = shell_action {
+            persisted
+                .iter_mut()
+                .find(|mapping| mapping.context == "shell" && mapping.action == action)
+                .unwrap()
+                .binding = Binding::single("select");
+        }
+        if let Some(code) = search_open_control {
+            let control = contract
+                .physical_controls
+                .iter()
+                .find(|control| {
+                    control.input_code.as_deref().and_then(linux_key_code) == Some(code)
+                })
+                .unwrap()
+                .position
+                .clone();
+            persisted
+                .iter_mut()
+                .find(|mapping| mapping.context == "search" && mapping.action == "Search.open")
+                .unwrap()
+                .binding = Binding::single(control);
+        }
+        EffectiveMap::from_persisted(
+            contract,
+            Some(("pocketforge-sim-gamepad".into(), persisted)),
+        )
+        .unwrap()
+    }
+
+    fn decode_map_with(
+        map: EffectiveMap,
+        records: &[(u16, u16, i32)],
+        prepare: impl FnOnce(&mut EvdevActionSource),
+    ) -> Vec<EvdevInputEvent> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pf-gamepad-remap");
+        let bytes: Vec<u8> = records
+            .iter()
+            .flat_map(|&(event_type, code, value)| input_event(event_type, code, value))
+            .collect();
+        std::fs::write(&path, bytes).unwrap();
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
         let (mut source, _) = EvdevActionSource::open_with_map(&path, &contract, map).unwrap();
         prepare(&mut source);
         let mut decoded = Vec::new();

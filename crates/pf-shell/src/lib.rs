@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn evdev_north_resolves_by_active_context_on_initial_and_rebuilt_maps() {
         let initial = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
-            source.set_active_context("shell")
+            source.set_active_context("shell");
         });
         assert_eq!(
             initial.last(),
@@ -1043,7 +1043,7 @@ mod tests {
         );
 
         let search = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
-            source.set_active_context("search")
+            source.set_active_context("search");
         });
         assert_eq!(
             search.last(),

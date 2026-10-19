@@ -390,8 +390,10 @@ fn vertical_slice_frame_hashes_are_stable() {
         // Library, focused Library, and Search change only for .407's route hints.
         // These three combine .407's route hints with .404's shared status chrome;
         // Library also retains main's first-grid-item focus semantics.
-        "e7e1057e35cc4eba026025d745003df051333b7dfe851a73b622c14766854d01  ",
-        "63c31d0bb28e543b7410222b3b40ffa71df66112cea89fcf1d819bb166bb0c70  ",
+        // tsp-mc9m.60.29.31 rebaselines Library and focused Library after correcting
+        // the shipped A133 Quick face labels; both routes render those controls.
+        "2dbafa54e208ad4d464b64b559d3e2dfe67fc4dafebe2c8e586a71a91bc2e212  ",
+        "890960906eda3b60443e8b80153a518c67cd56d95d104cbc231ff3e48c0124ca  ",
         "6b81b51eff237a08274e33a2dad8b0806586907e3520f9b7c2c1060305c8479c  ",
         // tsp-op5a.405 restores the detail CTA hierarchy: Play uses the theme focus
         // accent with wide rounded primary geometry, while Pin is a rounded outline
@@ -509,8 +511,9 @@ fn settings_and_first_run_frame_hashes_are_stable() {
     assert!(
         transcript.contains("b2035e4ce8ebe27a989c25c9b2c2002442c371ca6455c31517e9c9ae2fc437c5  ")
     );
+    // tsp-mc9m.60.29.31 rebaselines Controls for the corrected A133 face labels.
     assert!(
-        transcript.contains("21544b06f25c61b88a09f5766336ca0e4f8f599bc1cd8c81d34a185bf6dbf337  ")
+        transcript.contains("cbb59104e9490724c101e9ef246eaf4b499d4811658b127ec6aa939cd3b8f39f  ")
     );
     assert!(
         transcript.contains("3d9ed040605f733d4ef7f732774393c0b4d251bc6d93dd8a2adee426e3e762d5  ")

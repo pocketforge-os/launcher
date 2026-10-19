@@ -1372,7 +1372,7 @@ mod tests {
         let before = prompt(&map, &ShellAction::Activate);
         let mut remap = GamepadRemap::new(map);
         remap
-            .preview("shell", "Activate", Binding::single("north"))
+            .preview("shell", "Activate", Binding::single("west"))
             .unwrap();
         assert_eq!(
             remap.gamepad_action(&ShellAction::Back).unwrap(),
@@ -1388,7 +1388,7 @@ mod tests {
         let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
         let mut remap = GamepadRemap::new(map);
         remap
-            .preview("shell", "Activate", Binding::single("north"))
+            .preview("shell", "Activate", Binding::single("west"))
             .unwrap();
         assert_eq!(
             remap.gamepad_action(&ShellAction::Activate).unwrap(),

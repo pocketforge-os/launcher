@@ -5,8 +5,8 @@ use pf_catalog::{
     VariantPinCommitResult,
 };
 use pf_input_map::{
-    Binding, BindingShape, DeviceContract, EffectiveMap, MapError, Mapping, MemoryStore,
-    RemapEngine, RemapStore, TransactionOutcome,
+    Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
+    RemapStore, TransactionOutcome,
 };
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ActionSourceError, Deadline, GlyphResolver, GlyphResult,
@@ -476,13 +476,6 @@ impl EvdevActionSource {
     }
 }
 
-fn mapping_is_active(mapping: &Mapping, context: &str) -> bool {
-    mapping.context == "global"
-        || mapping.context == context
-        // Search.open is the shell's entry action; Search.submit is search-only.
-        || (context == "shell" && mapping.context == "search" && mapping.action == "Search.open")
-}
-
 fn build_context_maps(
     map: &EffectiveMap,
     controls: &BTreeMap<String, u16>,
@@ -502,27 +495,50 @@ fn build_context_maps_from_reverse_codes(
         .into_iter()
         .map(|context| {
             let mut by_code = BTreeMap::new();
-            for mapping in map.mappings() {
-                if mapping.binding.shape != BindingShape::SinglePress
-                    || !mapping_is_active(mapping, context)
-                {
-                    continue;
-                }
-                let Some(code) = mapping.binding.controls.first().and_then(|control| {
-                    control_by_code
-                        .iter()
-                        .find_map(|(code, position)| (position == control).then_some(*code))
-                }) else {
-                    continue;
-                };
-                if let Some(action) = semantic_action(&mapping.action) {
-                    by_code.insert(code, action);
-                }
-            }
+            add_context_mappings(map, control_by_code, &mut by_code, "global", false);
+            // Search keeps the shell controls as its baseline so navigation and protected
+            // actions remain available while typing. Search rows are applied last and therefore
+            // intentionally win a physical-code collision (north/Search.submit is the shipped
+            // example).
+            add_context_mappings(map, control_by_code, &mut by_code, "shell", false);
+            add_context_mappings(
+                map,
+                control_by_code,
+                &mut by_code,
+                "search",
+                context == "shell",
+            );
             add_room_shoulder_actions(&mut by_code);
             (context.into(), by_code)
         })
         .collect()
+}
+
+fn add_context_mappings(
+    map: &EffectiveMap,
+    control_by_code: &BTreeMap<u16, String>,
+    by_code: &mut BTreeMap<u16, ShellAction>,
+    context: &str,
+    search_entry_only: bool,
+) {
+    for mapping in map.mappings() {
+        if mapping.context != context
+            || mapping.binding.shape != BindingShape::SinglePress
+            || (search_entry_only && mapping.action != "Search.open")
+        {
+            continue;
+        }
+        let Some(code) = mapping.binding.controls.first().and_then(|control| {
+            control_by_code
+                .iter()
+                .find_map(|(code, position)| (position == control).then_some(*code))
+        }) else {
+            continue;
+        };
+        if let Some(action) = semantic_action(&mapping.action) {
+            by_code.insert(code, action);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1052,6 +1068,25 @@ mod tests {
                 action: Some(ShellAction::Custom("Filter.next".into())),
             })
         );
+        for (code, action) in [
+            (305, ShellAction::Activate),
+            (304, ShellAction::Back),
+            (103, ShellAction::Move(AxisMove::Up)),
+            (108, ShellAction::Move(AxisMove::Down)),
+            (105, ShellAction::Move(AxisMove::Left)),
+            (106, ShellAction::Move(AxisMove::Right)),
+        ] {
+            let decoded = decode_raw_with(&[(EV_KEY, code, 1)], |source| {
+                source.set_active_context("search");
+            });
+            assert_eq!(
+                decoded.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code,
+                    action: Some(action),
+                })
+            );
+        }
 
         let rebuilt = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
             let contract = DeviceContract::parse_json(CONTRACT).unwrap();
@@ -1080,6 +1115,28 @@ mod tests {
                 action: Some(ShellAction::Custom("Filter.next".into())),
             })
         );
+        for (code, action) in [
+            (305, ShellAction::Activate),
+            (304, ShellAction::Back),
+            (103, ShellAction::Move(AxisMove::Up)),
+            (108, ShellAction::Move(AxisMove::Down)),
+            (105, ShellAction::Move(AxisMove::Left)),
+            (106, ShellAction::Move(AxisMove::Right)),
+        ] {
+            let decoded = decode_raw_with(&[(EV_KEY, code, 1)], |source| {
+                let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+                let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+                source.apply_effective_map(&map);
+                source.set_active_context("search");
+            });
+            assert_eq!(
+                decoded.last(),
+                Some(&EvdevInputEvent::Pressed {
+                    code,
+                    action: Some(action),
+                })
+            );
+        }
     }
 
     fn thread_cpu_ticks() -> u64 {

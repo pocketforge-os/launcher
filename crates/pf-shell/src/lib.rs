@@ -972,6 +972,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shipped_quick_binding_matches_a133_north_control() {
+        let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+        let quick = contract
+            .effective_map
+            .iter()
+            .find(|mapping| mapping.context == "shell" && mapping.action == "Quick")
+            .expect("shipped contract must bind Quick");
+
+        assert_eq!(quick.binding.controls, vec!["north"]);
+    }
+
     fn thread_cpu_ticks() -> u64 {
         let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
         let fields = stat.rsplit_once(") ").unwrap().1.split_whitespace();

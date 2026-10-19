@@ -5,8 +5,8 @@ use pf_catalog::{
     VariantPinCommitResult,
 };
 use pf_input_map::{
-    Binding, BindingShape, DeviceContract, EffectiveMap, MapError, MemoryStore, RemapEngine,
-    RemapStore, TransactionOutcome,
+    Binding, BindingShape, DeviceContract, EffectiveMap, MapError, Mapping, MemoryStore,
+    RemapEngine, RemapStore, TransactionOutcome,
 };
 use pf_ports::{
     ActionEvent, ActionPoll, ActionSource, ActionSourceError, Deadline, GlyphResolver, GlyphResult,
@@ -113,6 +113,8 @@ pub struct EvdevActionSource {
     state_query: Option<Box<dyn ControlStateQuery>>,
     by_code: BTreeMap<u16, ShellAction>,
     control_by_code: BTreeMap<u16, String>,
+    context_maps: BTreeMap<String, BTreeMap<u16, ShellAction>>,
+    active_context: String,
     capture_next: bool,
     source: InputSourceId,
     announced: bool,
@@ -183,24 +185,8 @@ impl EvdevActionSource {
             .iter()
             .map(|(position, code)| (*code, position.clone()))
             .collect();
-        let mut by_code = BTreeMap::new();
-        for mapping in effective.mappings() {
-            if mapping.binding.shape != BindingShape::SinglePress {
-                continue;
-            }
-            let Some(code) = mapping
-                .binding
-                .controls
-                .first()
-                .and_then(|c| controls.get(c))
-            else {
-                continue;
-            };
-            if let Some(action) = semantic_action(&mapping.action) {
-                by_code.insert(*code, action);
-            }
-        }
-        add_room_shoulder_actions(&mut by_code);
+        let context_maps = build_context_maps(&effective, &controls);
+        let by_code = context_maps.get("shell").cloned().unwrap_or_default();
         let file = File::open(path)?;
         let is_character_device = file.metadata()?.file_type().is_char_device();
         let state_query: Option<Box<dyn ControlStateQuery>> = if evdev_grab_enabled(
@@ -227,6 +213,8 @@ impl EvdevActionSource {
                 state_query,
                 by_code,
                 control_by_code,
+                context_maps,
+                active_context: "shell".into(),
                 capture_next: false,
                 source: InputSourceId(effective.device_id().into()),
                 announced: false,
@@ -459,25 +447,82 @@ impl EvdevActionSource {
         self.capture_next = true;
     }
 
-    pub fn apply_effective_map(&mut self, map: &EffectiveMap) {
-        self.by_code.clear();
-        for mapping in map.mappings() {
-            if mapping.binding.shape != BindingShape::SinglePress {
-                continue;
-            }
-            let Some(code) = mapping.binding.controls.first().and_then(|control| {
-                self.control_by_code
-                    .iter()
-                    .find_map(|(code, position)| (position == control).then_some(*code))
-            }) else {
-                continue;
-            };
-            if let Some(action) = semantic_action(&mapping.action) {
-                self.by_code.insert(code, action);
-            }
+    /// Selects the semantic map for the shell route currently being reduced.
+    ///
+    /// Physical controls may intentionally be reused by the shell and search contexts. The
+    /// adapter therefore never flattens those rows into one contextless code table.
+    pub fn set_active_context(&mut self, context: &str) {
+        let context = if context == "search" {
+            "search"
+        } else {
+            "shell"
+        };
+        if self.active_context == context {
+            return;
         }
-        add_room_shoulder_actions(&mut self.by_code);
+        self.active_context = context.into();
+        self.by_code = self.context_maps.get(context).cloned().unwrap_or_default();
+        self.held_keys.clear();
+        self.queued.clear();
     }
+
+    pub fn apply_effective_map(&mut self, map: &EffectiveMap) {
+        self.context_maps = build_context_maps_from_reverse_codes(map, &self.control_by_code);
+        self.by_code = self
+            .context_maps
+            .get(&self.active_context)
+            .cloned()
+            .unwrap_or_default();
+    }
+}
+
+fn mapping_is_active(mapping: &Mapping, context: &str) -> bool {
+    mapping.context == "global"
+        || mapping.context == context
+        // Search.open is the shell's entry action; Search.submit is search-only.
+        || (context == "shell" && mapping.context == "search" && mapping.action == "Search.open")
+}
+
+fn build_context_maps(
+    map: &EffectiveMap,
+    controls: &BTreeMap<String, u16>,
+) -> BTreeMap<String, BTreeMap<u16, ShellAction>> {
+    let reverse_codes = controls
+        .iter()
+        .map(|(position, code)| (*code, position.clone()))
+        .collect::<BTreeMap<_, _>>();
+    build_context_maps_from_reverse_codes(map, &reverse_codes)
+}
+
+fn build_context_maps_from_reverse_codes(
+    map: &EffectiveMap,
+    control_by_code: &BTreeMap<u16, String>,
+) -> BTreeMap<String, BTreeMap<u16, ShellAction>> {
+    ["shell", "search"]
+        .into_iter()
+        .map(|context| {
+            let mut by_code = BTreeMap::new();
+            for mapping in map.mappings() {
+                if mapping.binding.shape != BindingShape::SinglePress
+                    || !mapping_is_active(mapping, context)
+                {
+                    continue;
+                }
+                let Some(code) = mapping.binding.controls.first().and_then(|control| {
+                    control_by_code
+                        .iter()
+                        .find_map(|(code, position)| (position == control).then_some(*code))
+                }) else {
+                    continue;
+                };
+                if let Some(action) = semantic_action(&mapping.action) {
+                    by_code.insert(code, action);
+                }
+            }
+            add_room_shoulder_actions(&mut by_code);
+            (context.into(), by_code)
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -984,6 +1029,59 @@ mod tests {
         assert_eq!(quick.binding.controls, vec!["north"]);
     }
 
+    #[test]
+    fn evdev_north_resolves_by_active_context_on_initial_and_rebuilt_maps() {
+        let initial = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
+            source.set_active_context("shell")
+        });
+        assert_eq!(
+            initial.last(),
+            Some(&EvdevInputEvent::Pressed {
+                code: 307,
+                action: Some(ShellAction::Custom("Quick".into())),
+            })
+        );
+
+        let search = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
+            source.set_active_context("search")
+        });
+        assert_eq!(
+            search.last(),
+            Some(&EvdevInputEvent::Pressed {
+                code: 307,
+                action: Some(ShellAction::Custom("Filter.next".into())),
+            })
+        );
+
+        let rebuilt = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
+            let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+            let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+            source.apply_effective_map(&map);
+            source.set_active_context("shell");
+        });
+        assert_eq!(
+            rebuilt.last(),
+            Some(&EvdevInputEvent::Pressed {
+                code: 307,
+                action: Some(ShellAction::Custom("Quick".into())),
+            })
+        );
+
+        let rebuilt_search = decode_raw_with(&[(EV_KEY, 307, 1)], |source| {
+            let contract = DeviceContract::parse_json(CONTRACT).unwrap();
+            let map = EffectiveMap::load(contract, &MemoryStore::default()).unwrap();
+            source.apply_effective_map(&map);
+            source.set_active_context("search");
+        });
+        assert_eq!(
+            rebuilt_search.last(),
+            Some(&EvdevInputEvent::Pressed {
+                code: 307,
+                action: Some(ShellAction::Custom("Filter.next".into())),
+            })
+        );
+    }
+
     fn thread_cpu_ticks() -> u64 {
         let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
         let fields = stat.rsplit_once(") ").unwrap().1.split_whitespace();
@@ -1000,6 +1098,8 @@ mod tests {
             state_query: None,
             by_code: BTreeMap::new(),
             control_by_code: BTreeMap::new(),
+            context_maps: BTreeMap::new(),
+            active_context: "shell".into(),
             capture_next: false,
             source: InputSourceId("idle-test".into()),
             announced: true,

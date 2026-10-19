@@ -1514,6 +1514,7 @@ trait InteractiveInput<H> {
     ) -> Result<DecodedActionPoll, String>;
     fn capture_next_button(&mut self);
     fn apply_effective_map(&mut self, map: &EffectiveMap);
+    fn set_active_context(&mut self, _context: &str) {}
     fn has_pending(&self) -> bool;
 }
 
@@ -1543,6 +1544,7 @@ trait EvdevEventSource {
     ) -> Result<Option<EvdevInputEvent>, pf_ports::ActionSourceError>;
     fn capture_next_button(&mut self) {}
     fn apply_effective_map(&mut self, _map: &EffectiveMap) {}
+    fn set_active_context(&mut self, _context: &str) {}
     /// Whether decoded transitions are waiting to be returned without another read.
     fn has_queued_events(&self) -> bool {
         false
@@ -1563,6 +1565,10 @@ impl EvdevEventSource for EvdevActionSource {
 
     fn apply_effective_map(&mut self, map: &EffectiveMap) {
         EvdevActionSource::apply_effective_map(self, map);
+    }
+
+    fn set_active_context(&mut self, context: &str) {
+        EvdevActionSource::set_active_context(self, context);
     }
 
     fn has_queued_events(&self) -> bool {
@@ -1620,6 +1626,12 @@ impl<'a, S> EvdevInteractiveInput<'a, S> {
 }
 
 impl<H: EvdevHost, S: EvdevEventSource> InteractiveInput<H> for EvdevInteractiveInput<'_, S> {
+    fn set_active_context(&mut self, context: &str) {
+        self.repeat.clear();
+        self.pending.clear();
+        self.source.set_active_context(context);
+    }
+
     fn next_action(
         &mut self,
         host: &mut H,
@@ -2070,6 +2082,11 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             input_source,
             actions.has_pending(),
         )?;
+        actions.set_active_context(if core.route() == pf_shell_core::Route::Search {
+            "search"
+        } else {
+            "shell"
+        });
         let poll = actions.next_action(host, deadline, latency_trace.as_ref())?;
         if Instant::now() >= next_device_status_refresh {
             core.load_device_status(device_status);

@@ -1085,6 +1085,10 @@ pub struct ShellCore {
     settings_saved_focus: [usize; 5],
     display_preferences: Vec<DisplayPreference>,
     first_run_complete: bool,
+    /// Preference keys already provided (seeded or explicitly stored); first-run skips their rows.
+    first_run_settled: Vec<String>,
+    /// Why preferences or the seed could not be read; shown on the first-run sheet.
+    health_line: Option<String>,
     safe_return_binding: String,
     safe_return_options: Vec<String>,
     controls_flow: ControlsFlow,
@@ -1256,6 +1260,8 @@ impl ShellCore {
             settings_saved_focus: [0; 5],
             display_preferences: Vec::new(),
             first_run_complete: true,
+            first_run_settled: Vec::new(),
+            health_line: None,
             safe_return_binding: "PF · the button below the d-pad".into(),
             safe_return_options: Vec::new(),
             controls_flow: ControlsFlow::Rows,
@@ -1565,7 +1571,20 @@ impl ShellCore {
         port: &dyn PreferencePort,
         first_run_complete: bool,
     ) -> Result<(), pf_ports::PreferenceError> {
+        self.load_preferences_settled(port, first_run_complete, &[])
+    }
+
+    /// Like [`Self::load_preferences`], but first-run omits rows for `settled` keys (already
+    /// seeded or explicitly set). With no row left the sheet is not shown and nothing is
+    /// written; Settings → reset shows every row again.
+    pub fn load_preferences_settled(
+        &mut self,
+        port: &dyn PreferencePort,
+        first_run_complete: bool,
+        settled: &[&str],
+    ) -> Result<(), pf_ports::PreferenceError> {
         self.bump_revision();
+        self.first_run_settled = settled.iter().map(|key| (*key).to_owned()).collect();
         self.display_preferences.clear();
         for (key, label, default) in [
             (
@@ -1605,7 +1624,12 @@ impl ShellCore {
         }
         self.first_run_complete = first_run_complete;
         if !first_run_complete {
-            self.enter_first_run();
+            if self.first_run_preferences().is_empty() && !settled.is_empty() {
+                // Everything first-run would ask is already provided: no sheet, no write.
+                self.first_run_complete = true;
+            } else {
+                self.enter_first_run();
+            }
         }
         Ok(())
     }
@@ -1762,11 +1786,21 @@ impl ShellCore {
     fn first_run_preferences(&self) -> Vec<&DisplayPreference> {
         self.display_preferences
             .iter()
-            .filter(|row| row.interactive)
+            .filter(|row| row.interactive && !self.first_run_settled.iter().any(|k| k == row.key))
             .collect()
+    }
+    /// Records that preferences or the seed were unreadable; the first-run sheet says so.
+    pub fn set_health_line(&mut self, line: Option<String>) {
+        self.bump_revision();
+        self.health_line = line;
+    }
+    #[must_use]
+    pub fn health_line(&self) -> Option<&str> {
+        self.health_line.as_deref()
     }
     pub fn reset_first_run(&mut self) {
         self.bump_revision();
+        self.first_run_settled.clear();
         self.first_run_complete = false;
         self.enter_first_run();
     }
@@ -6980,7 +7014,9 @@ impl ShellCore {
                 node(
                     "first-run-copy",
                     Role::Text,
-                    "All of this lives in Settings → Accessibility and can change any time.",
+                    self.health_line.as_deref().unwrap_or(
+                        "All of this lives in Settings → Accessibility and can change any time.",
+                    ),
                     content_left,
                     cursor,
                     content_width,

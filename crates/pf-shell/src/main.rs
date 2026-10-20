@@ -993,15 +993,16 @@ fn main() -> Result<(), String> {
         preferences = &mut fixture;
         first_run_complete = !args.iter().any(|a| a == "--first-run");
     } else {
-        durable = DurablePreferences::open(&state_dir)?;
-        first_run_complete = durable.first_run_complete()?;
-        if let Some(label) = durable.safe_return_binding()? {
-            core.set_safe_return_binding(label);
-        }
+        let seed_path = value(&args, "--prefs-seed")
+            .map_or_else(|| PathBuf::from(PREFS_SEED_PATH), PathBuf::from);
+        durable = DurablePreferences::open_with_seed(&state_dir, Some(&seed_path));
+        first_run_complete = load_durable_preferences(&mut core, &durable);
         preferences = &mut durable;
     }
-    core.load_preferences(preferences, first_run_complete)
-        .map_err(|e| format!("preferences: {e:?}"))?;
+    if fixture_mode {
+        core.load_preferences(preferences, first_run_complete)
+            .map_err(|e| format!("preferences: {e:?}"))?;
+    }
     if let Some(scale) = value(&args, "--text-scale") {
         core.preference_changed(&EffectivePreference {
             key: PreferenceKey("textScale".into()),
@@ -2207,13 +2208,10 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 activate = footer_prompt(remap.map());
             }
             Some(Effect::CompleteFirstRun) => {
-                preferences
-                    .submit_change(PreferenceChange {
-                        key: PreferenceKey("firstRunComplete".into()),
-                        value: PreferenceValue::Bool(true),
-                        authority: ChangeAuthority("user".into()),
-                    })
-                    .map_err(|e| format!("preferences: {e:?}"))?;
+                if let Some(line) = persist_first_run_complete(preferences) {
+                    eprintln!("pf-shell: {line}");
+                    core.set_health_line(Some(line));
+                }
             }
             Some(Effect::ToggleFavorite { item_id, favorite }) => {
                 match commit_favorite(catalog, &item_id, favorite) {
@@ -3333,11 +3331,58 @@ fn fixture_preferences() -> FakePreferencePort {
     FakePreferencePort::new(values, ChangeAuthority("user".into()))
 }
 
+/// Loads the shell's preferences from the durable store. Nothing here may end the process: an
+/// unreadable seed or prefs document leaves the full first-run sheet plus a health line.
+fn load_durable_preferences(core: &mut ShellCore, durable: &DurablePreferences) -> bool {
+    let mut health = durable.health.clone();
+    let first_run_complete = durable.first_run_complete().unwrap_or_else(|error| {
+        health.get_or_insert(error);
+        false
+    });
+    if let Some(label) = durable.safe_return_binding().ok().flatten() {
+        core.set_safe_return_binding(label);
+    }
+    let settled = durable.settled_first_run_keys();
+    if let Err(error) = core.load_preferences_settled(durable, first_run_complete, &settled) {
+        health.get_or_insert(format!("preferences: {error:?}"));
+        let _ = core.load_preferences(&fixture_preferences(), first_run_complete);
+    }
+    if let Some(line) = &health {
+        eprintln!("pf-shell: {line}");
+    }
+    core.set_health_line(health);
+    first_run_complete
+}
+
+/// Records first-run completion. A failed write is not fatal: it returns the health line.
+fn persist_first_run_complete(preferences: &mut dyn PreferencePort) -> Option<String> {
+    preferences
+        .submit_change(PreferenceChange {
+            key: PreferenceKey("firstRunComplete".into()),
+            value: PreferenceValue::Bool(true),
+            authority: ChangeAuthority("user".into()),
+        })
+        .err()
+        .map(|e| format!("preferences: first-run completion not saved: {e:?}"))
+}
+
 struct DurablePreferences {
     inner: PrefsPreferencePort,
+    health: Option<String>,
     state_file: PathBuf,
     pending: VecDeque<EffectivePreference>,
 }
+
+/// The pf-prefs first-boot seed layer, rendered by cloud-init; `pf-prefsd` attaches the same file.
+const PREFS_SEED_PATH: &str = "/etc/pocketforge/prefs.seed.json";
+
+/// First-run rows and the pf-prefs keys that back them.
+const FIRST_RUN_KEYS: [&str; 4] = [
+    "textScale",
+    "highContrast",
+    "reduceMotion",
+    "reduceFlashing",
+];
 
 const APPEARANCE_LABELS: [(&str, &str); 2] = [("light", "Day"), ("dark", "Dusk")];
 
@@ -3372,9 +3417,12 @@ fn apply_shell_preference_semantics(mut observed: EffectivePreference) -> Effect
 }
 
 impl DurablePreferences {
-    fn open(state_dir: &Path) -> Result<Self, String> {
-        let store = PrefsStore::at(state_dir);
-        let state_file = store.path().to_owned();
+    fn open(state_dir: &Path) -> Self {
+        Self::open_with_seed(state_dir, None)
+    }
+
+    /// Rewrites the launcher's former presentation labels to the canonical `appearance` enum.
+    fn migrate_appearance(state_file: &Path) -> Result<(), String> {
         // Runtime schema v2 owns `appearance` as the stable light/dark enum. Migrate the
         // launcher's former presentation labels before pf-prefs validates the document.
         if let Ok(text) = fs::read_to_string(&state_file)
@@ -3398,15 +3446,26 @@ impl DurablePreferences {
                     .map_err(|e| format!("preferences migration: {e}"))?;
             }
         }
-        let inner =
-            PrefsPreferencePort::for_user(store).map_err(|e| format!("preferences: {e:?}"))?;
-        Ok(Self {
+        Ok(())
+    }
+
+    fn open_with_seed(state_dir: &Path, _seed: Option<&Path>) -> Self {
+        let store = PrefsStore::at(state_dir);
+        let state_file = store.path().to_owned();
+        let _ = Self::migrate_appearance(&state_file);
+        let inner = PrefsPreferencePort::for_user(store).expect("stub");
+        Self {
             inner,
+            health: None,
             // Launcher-owned forward-compatible keys live in the same atomic preference
             // document. `pf-prefs` preserves unknown keys when it updates schema-owned values.
             state_file,
             pending: VecDeque::new(),
-        })
+        }
+    }
+
+    fn settled_first_run_keys(&self) -> Vec<&'static str> {
+        Vec::new()
     }
 
     fn launcher_state(
@@ -5071,7 +5130,7 @@ mod durable_tests {
             state_dir: tempfile::TempDir,
             snapshot: &CatalogSnapshot,
         ) -> Self {
-            let preferences = DurablePreferences::open(state_dir.path()).unwrap();
+            let preferences = DurablePreferences::open(state_dir.path());
             let mut core = fixture_core(snapshot, &pf_theme::flagship(), false);
             let contract =
                 DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
@@ -10006,7 +10065,7 @@ exec="./launch"
     #[test]
     fn appearance_preference_is_durable_and_publishes_applied_change() {
         let dir = tempfile::tempdir().unwrap();
-        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        let mut preferences = DurablePreferences::open(dir.path());
         assert_eq!(
             preferences
                 .submit_change(PreferenceChange {
@@ -10024,7 +10083,7 @@ exec="./launch"
             panic!("appearance change must redraw immediately")
         };
         assert_eq!(change.effective, PreferenceValue::Text("Day".into()));
-        let reopened = DurablePreferences::open(dir.path()).unwrap();
+        let reopened = DurablePreferences::open(dir.path());
         assert_eq!(
             reopened
                 .read(&PreferenceKey("appearance".into()))
@@ -10038,7 +10097,7 @@ exec="./launch"
     #[test]
     fn external_appearance_change_is_translated_and_applied_live() {
         let dir = tempfile::tempdir().unwrap();
-        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        let mut preferences = DurablePreferences::open(dir.path());
         pf_prefs::PrefsStore::at(dir.path())
             .apply("appearance", pf_prefs::PrefValue::Enum("light"))
             .unwrap();
@@ -10072,6 +10131,7 @@ exec="./launch"
         std::fs::write(&launcher_state, r#"{"firstRunComplete":true}"#).unwrap();
         let mut preferences = DurablePreferences {
             inner: PrefsPreferencePort::for_user(backend.clone()).unwrap(),
+            health: None,
             state_file: launcher_state.clone(),
             pending: VecDeque::new(),
         };
@@ -10110,7 +10170,7 @@ exec="./launch"
             if let Some(document) = existing {
                 std::fs::write(dir.path().join("prefs.json"), document).unwrap();
             }
-            let preferences = DurablePreferences::open(dir.path()).unwrap();
+            let preferences = DurablePreferences::open(dir.path());
             assert_eq!(
                 preferences
                     .read(&PreferenceKey("textScale".into()))
@@ -10125,7 +10185,7 @@ exec="./launch"
     #[test]
     fn fresh_preferences_and_first_run_render_at_one_hundred_percent() {
         let dir = tempfile::tempdir().unwrap();
-        let preferences = DurablePreferences::open(dir.path()).unwrap();
+        let preferences = DurablePreferences::open(dir.path());
         let observed = preferences
             .read(&PreferenceKey("textScale".into()))
             .unwrap()
@@ -10153,10 +10213,215 @@ exec="./launch"
         assert!(!format!("{scene:?}").contains("Current value 150%"));
     }
 
+    /// Boots the shell's preference path against `dir`, as `main` does, with an optional seed
+    /// document written beside the state (`prefs_json` pre-seeds the stored document).
+    fn boot_with_seed(
+        dir: &Path,
+        seed: Option<&str>,
+        prefs_json: Option<&str>,
+    ) -> (ShellCore, DurablePreferences) {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        let seed_path = dir.join("prefs.seed.json");
+        if let Some(seed) = seed {
+            std::fs::write(&seed_path, seed).unwrap();
+        }
+        if let Some(prefs_json) = prefs_json {
+            std::fs::write(dir.join("prefs.json"), prefs_json).unwrap();
+        }
+        let durable = DurablePreferences::open_with_seed(dir, Some(&seed_path));
+        load_durable_preferences(&mut core, &durable);
+        (core, durable)
+    }
+
+    fn first_run_row_labels(core: &ShellCore) -> Vec<&'static str> {
+        let scene = core
+            .scene(
+                SurfaceMetrics {
+                    logical_width: 1280.0,
+                    logical_height: 720.0,
+                    scale: 1.0,
+                    safe_insets: Insets::default(),
+                    orientation: Orientation::Landscape,
+                },
+                "",
+            )
+            .expect("shell frame");
+        let text = format!("{scene:?}");
+        [
+            "Text size",
+            "High contrast",
+            "Reduce motion",
+            "Reduce flashing",
+        ]
+        .into_iter()
+        .filter(|label| text.contains(&format!("{label} · ")))
+        .collect()
+    }
+
+    const ALL_ROWS: [&str; 4] = [
+        "Text size",
+        "High contrast",
+        "Reduce motion",
+        "Reduce flashing",
+    ];
+
+    #[test]
+    fn full_seed_skips_the_sheet_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) = boot_with_seed(
+            dir.path(),
+            Some(
+                r#"{"textScale":"150%","highContrast":true,"reduceMotion":false,"reduceFlashing":false}"#,
+            ),
+            None,
+        );
+        assert_ne!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(core.text_scale(), 150, "the seeded value is effective");
+        assert!(core.health_line().is_none());
+        assert!(
+            !dir.path().join("prefs.json").exists(),
+            "no firstRunComplete (or any other) write"
+        );
+    }
+
+    #[test]
+    fn partial_seed_shows_only_the_missing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) = boot_with_seed(
+            dir.path(),
+            Some(r#"{"textScale":"125%","reduceMotion":true}"#),
+            None,
+        );
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(
+            first_run_row_labels(&core),
+            vec!["High contrast", "Reduce flashing"]
+        );
+    }
+
+    #[test]
+    fn explicit_value_hides_its_row_like_a_seed_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) = boot_with_seed(
+            dir.path(),
+            Some(r#"{"textScale":"125%"}"#),
+            Some(r#"{"highContrast":true}"#),
+        );
+        assert_eq!(
+            first_run_row_labels(&core),
+            vec!["Reduce motion", "Reduce flashing"]
+        );
+    }
+
+    #[test]
+    fn no_seed_shows_every_row_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) = boot_with_seed(dir.path(), None, None);
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(first_run_row_labels(&core), ALL_ROWS.to_vec());
+        assert!(core.health_line().is_none());
+    }
+
+    #[test]
+    fn reset_first_run_shows_every_row_even_with_a_full_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _durable) = boot_with_seed(
+            dir.path(),
+            Some(
+                r#"{"textScale":"100%","highContrast":false,"reduceMotion":false,"reduceFlashing":false}"#,
+            ),
+            None,
+        );
+        assert_ne!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        core.reset_first_run();
+        assert_eq!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert_eq!(first_run_row_labels(&core), ALL_ROWS.to_vec());
+    }
+
+    #[test]
+    fn malformed_seed_gives_the_full_sheet_and_a_health_line() {
+        for bad in [
+            "{not json",
+            r#"{"textScale":"999%"}"#,
+            r#"{"noSuchKey":true}"#,
+            "[]",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (core, mut durable) = boot_with_seed(dir.path(), Some(bad), None);
+            assert_eq!(
+                core.presentation(),
+                &pf_shell_core::Presentation::FirstRun,
+                "{bad}"
+            );
+            assert_eq!(first_run_row_labels(&core), ALL_ROWS.to_vec(), "{bad}");
+            assert!(
+                core.health_line().is_some_and(|line| line.contains("seed")),
+                "{bad}"
+            );
+            // The ignored seed leaves the store usable: a user choice still persists.
+            durable
+                .submit_change(PreferenceChange {
+                    key: PreferenceKey("highContrast".into()),
+                    value: PreferenceValue::Bool(true),
+                    authority: ChangeAuthority("user".into()),
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_prefs_gives_the_full_sheet_and_a_health_line() {
+        for bad in ["{not json", "[1,2]", r#"{"highContrast":"yes"}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            let (core, _durable) =
+                boot_with_seed(dir.path(), Some(r#"{"textScale":"125%"}"#), Some(bad));
+            assert_eq!(
+                core.presentation(),
+                &pf_shell_core::Presentation::FirstRun,
+                "{bad}"
+            );
+            assert_eq!(first_run_row_labels(&core), ALL_ROWS.to_vec(), "{bad}");
+            assert!(
+                core.health_line()
+                    .is_some_and(|line| line.contains("preferences")),
+                "{bad}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("prefs.json")).unwrap(),
+                bad,
+                "a malformed document is never overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn healthy_prefs_and_seed_carry_no_health_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) = boot_with_seed(
+            dir.path(),
+            Some(r#"{"textScale":"125%"}"#),
+            Some(r#"{"highContrast":true}"#),
+        );
+        assert!(core.health_line().is_none());
+    }
+
+    #[test]
+    fn completing_first_run_with_unreadable_prefs_does_not_fail_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_core, mut durable) = boot_with_seed(dir.path(), None, Some("{not json"));
+        assert!(
+            persist_first_run_complete(&mut durable).is_some(),
+            "the failed write is reported as a health line, not an error exit"
+        );
+    }
+
     #[test]
     fn first_run_completion_survives_two_boots_in_one_state_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let mut first = DurablePreferences::open(dir.path()).unwrap();
+        let mut first = DurablePreferences::open(dir.path());
         assert!(!first.first_run_complete().unwrap());
         assert_eq!(
             first
@@ -10169,7 +10434,7 @@ exec="./launch"
             PreferenceChangeResult::Accepted
         );
         drop(first);
-        let second = DurablePreferences::open(dir.path()).unwrap();
+        let second = DurablePreferences::open(dir.path());
         assert!(second.first_run_complete().unwrap());
     }
 
@@ -11766,7 +12031,7 @@ exec="./launch"
     /// device that already changed it boots (tsp-3rd3.17 B11: the owner's presses persisted 200%).
     fn load_text_scale(core: &mut ShellCore, text_scale: u16) {
         let dir = tempfile::tempdir().unwrap();
-        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        let mut preferences = DurablePreferences::open(dir.path());
         preferences
             .submit_change(PreferenceChange {
                 key: PreferenceKey("textScale".into()),
@@ -11959,7 +12224,7 @@ exec="./launch"
         let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
         core.authority_snapshot(false);
         let dir = tempfile::tempdir().unwrap();
-        let mut preferences = DurablePreferences::open(dir.path()).unwrap();
+        let mut preferences = DurablePreferences::open(dir.path());
         assert!(
             !preferences.state_file.exists(),
             "a fresh image has no prefs.json"

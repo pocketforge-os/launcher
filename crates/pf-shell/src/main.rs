@@ -3377,6 +3377,11 @@ fn persist_first_run_complete(preferences: &mut dyn PreferencePort) -> Option<St
 /// The runtime preference store, or in-memory defaults when the stored document is unreadable.
 enum PrefsBackend {
     Store(PrefsPreferencePort),
+    /// Reads from the local store (seed layer attached); writes through the daemon port.
+    Split {
+        reader: PrefsStore,
+        writer: PrefsPreferencePort,
+    },
     Degraded(FakePreferencePort),
 }
 
@@ -3384,6 +3389,26 @@ impl PreferencePort for PrefsBackend {
     fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
         match self {
             Self::Store(port) => port.read(key),
+            Self::Split { reader, .. } => {
+                let Some(spec) = pf_prefs::spec(&key.0) else {
+                    return Ok(None);
+                };
+                let value = reader
+                    .load()
+                    .and_then(|prefs| prefs.value(spec.key))
+                    .map_err(|_| PreferenceError::BackendUnavailable)?;
+                let value = match value {
+                    pf_prefs::PrefValue::Bool(v) => PreferenceValue::Bool(v),
+                    pf_prefs::PrefValue::Scalar(v) => PreferenceValue::Integer(v),
+                    pf_prefs::PrefValue::Enum(v) => PreferenceValue::Text(v.into()),
+                };
+                Ok(Some(EffectivePreference {
+                    key: key.clone(),
+                    effective: value.clone(),
+                    stored: value,
+                    applied: false,
+                }))
+            }
             Self::Degraded(port) => port.read(key),
         }
     }
@@ -3391,6 +3416,7 @@ impl PreferencePort for PrefsBackend {
     fn next_change(&mut self, deadline: Deadline) -> Result<PreferencePoll, PreferenceError> {
         match self {
             Self::Store(port) => port.next_change(deadline),
+            Self::Split { writer, .. } => writer.next_change(deadline),
             Self::Degraded(port) => port.next_change(deadline),
         }
     }
@@ -3401,6 +3427,7 @@ impl PreferencePort for PrefsBackend {
     ) -> Result<PreferenceChangeResult, PreferenceError> {
         match self {
             Self::Store(port) => port.submit_change(change),
+            Self::Split { writer, .. } => writer.submit_change(change),
             Self::Degraded(port) => port.submit_change(change),
         }
     }
@@ -3528,34 +3555,50 @@ impl DurablePreferences {
         let plain = PrefsStore::at(state_dir);
         let state_file = plain.path().to_owned();
         let mut health = Self::migrate_appearance(&state_file).err();
-        // With PF_PREFSD_SOCK set, pf-prefs-port reads through the daemon and ignores the local
-        // store, so the daemon alone owns the seed: the override is not applied and settled keys
-        // cannot be derived locally (the full sheet shows, as before the seed existed).
-        let seed = seed.filter(|_| !daemon);
-        let store = seed.map_or_else(|| plain.clone(), |seed| plain.clone().with_seed(seed));
+        // Reads and first-run settlement always come from the local store with the seed layer
+        // (and any --prefs-seed override) attached. With PF_PREFSD_SOCK set, pf-prefs-port
+        // would read through the daemon and ignore that store, so the daemon port is kept for
+        // writes only: it is the write authority, not a second source of truth for reads.
+        let with_seed = seed.map(|seed| plain.clone().with_seed(seed));
         let mut settled = Vec::new();
-        let inner = match PrefsPreferencePort::for_user(store.clone()) {
-            Ok(port) => {
-                if !daemon && let Ok(prefs) = store.load() {
-                    settled = FIRST_RUN_KEYS
-                        .into_iter()
-                        .filter(|key| prefs.is_seeded(key) || prefs.is_explicit(key))
-                        .collect();
-                }
-                PrefsBackend::Store(port)
-            }
-            Err(seed_error) if seed.is_some() => match PrefsPreferencePort::for_user(plain) {
-                Ok(port) => {
+        let readable = match &with_seed {
+            Some(store) => match store.load() {
+                Ok(prefs) => Some((store.clone(), prefs)),
+                Err(seed_error) => {
                     health = Some(format!("preferences seed ignored: {seed_error:?}"));
-                    PrefsBackend::Store(port)
-                }
-                Err(error) => {
-                    health = Some(format!("preferences unreadable: {error:?}"));
-                    PrefsBackend::Degraded(fixture_preferences())
+                    plain.load().ok().map(|prefs| (plain.clone(), prefs))
                 }
             },
-            Err(error) => {
+            None => plain.load().ok().map(|prefs| (plain.clone(), prefs)),
+        };
+        let inner = match (readable, PrefsPreferencePort::for_user(plain.clone())) {
+            (Some((store, prefs)), Ok(port)) => {
+                settled = FIRST_RUN_KEYS
+                    .into_iter()
+                    .filter(|key| prefs.is_seeded(key) || prefs.is_explicit(key))
+                    .collect();
+                if daemon {
+                    PrefsBackend::Split {
+                        reader: store,
+                        writer: port,
+                    }
+                } else {
+                    // Locally the port must observe the same seed layer as the reads above.
+                    match PrefsPreferencePort::for_user(store) {
+                        Ok(port) => PrefsBackend::Store(port),
+                        Err(error) => {
+                            health = Some(format!("preferences unreadable: {error:?}"));
+                            PrefsBackend::Degraded(fixture_preferences())
+                        }
+                    }
+                }
+            }
+            (_, Err(error)) => {
                 health = Some(format!("preferences unreadable: {error:?}"));
+                PrefsBackend::Degraded(fixture_preferences())
+            }
+            (None, Ok(_)) => {
+                health = Some("preferences unreadable".to_owned());
                 PrefsBackend::Degraded(fixture_preferences())
             }
         };

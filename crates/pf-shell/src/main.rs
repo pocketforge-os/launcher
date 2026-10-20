@@ -3366,9 +3366,43 @@ fn persist_first_run_complete(preferences: &mut dyn PreferencePort) -> Option<St
         .map(|e| format!("preferences: first-run completion not saved: {e:?}"))
 }
 
+/// The runtime preference store, or in-memory defaults when the stored document is unreadable.
+enum PrefsBackend {
+    Store(PrefsPreferencePort),
+    Degraded(FakePreferencePort),
+}
+
+impl PreferencePort for PrefsBackend {
+    fn read(&self, key: &PreferenceKey) -> Result<Option<EffectivePreference>, PreferenceError> {
+        match self {
+            Self::Store(port) => port.read(key),
+            Self::Degraded(port) => port.read(key),
+        }
+    }
+
+    fn next_change(&mut self, deadline: Deadline) -> Result<PreferencePoll, PreferenceError> {
+        match self {
+            Self::Store(port) => port.next_change(deadline),
+            Self::Degraded(port) => port.next_change(deadline),
+        }
+    }
+
+    fn submit_change(
+        &mut self,
+        change: PreferenceChange,
+    ) -> Result<PreferenceChangeResult, PreferenceError> {
+        match self {
+            Self::Store(port) => port.submit_change(change),
+            Self::Degraded(port) => port.submit_change(change),
+        }
+    }
+}
+
 struct DurablePreferences {
-    inner: PrefsPreferencePort,
+    inner: PrefsBackend,
     health: Option<String>,
+    /// First-run keys already provided by the seed or an explicit stored value.
+    settled: Vec<&'static str>,
     state_file: PathBuf,
     pending: VecDeque<EffectivePreference>,
 }
@@ -3417,6 +3451,7 @@ fn apply_shell_preference_semantics(mut observed: EffectivePreference) -> Effect
 }
 
 impl DurablePreferences {
+    #[cfg(test)]
     fn open(state_dir: &Path) -> Self {
         Self::open_with_seed(state_dir, None)
     }
@@ -3425,7 +3460,7 @@ impl DurablePreferences {
     fn migrate_appearance(state_file: &Path) -> Result<(), String> {
         // Runtime schema v2 owns `appearance` as the stable light/dark enum. Migrate the
         // launcher's former presentation labels before pf-prefs validates the document.
-        if let Ok(text) = fs::read_to_string(&state_file)
+        if let Ok(text) = fs::read_to_string(state_file)
             && let Ok(mut state) =
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
             && let Some(appearance) = state.get_mut("appearance")
@@ -3442,21 +3477,54 @@ impl DurablePreferences {
                         .map_err(|e| format!("preferences migration: {e}"))?,
                 )
                 .map_err(|e| format!("preferences migration: {e}"))?;
-                fs::rename(temporary, &state_file)
+                fs::rename(temporary, state_file)
                     .map_err(|e| format!("preferences migration: {e}"))?;
             }
         }
         Ok(())
     }
 
-    fn open_with_seed(state_dir: &Path, _seed: Option<&Path>) -> Self {
-        let store = PrefsStore::at(state_dir);
-        let state_file = store.path().to_owned();
-        let _ = Self::migrate_appearance(&state_file);
-        let inner = PrefsPreferencePort::for_user(store).expect("stub");
+    /// Opens the durable store with the cloud-init seed layer attached, as `pf-prefsd` does.
+    /// Never fails: an unreadable seed is ignored, and an unreadable prefs document falls back
+    /// to in-memory defaults for this boot; both leave a health line and the full first-run
+    /// sheet. The malformed document itself is never rewritten.
+    fn open_with_seed(state_dir: &Path, seed: Option<&Path>) -> Self {
+        let plain = PrefsStore::at(state_dir);
+        let state_file = plain.path().to_owned();
+        let mut health = Self::migrate_appearance(&state_file).err();
+        let store = seed.map_or_else(|| plain.clone(), |seed| plain.clone().with_seed(seed));
+        let mut settled = Vec::new();
+        let inner = match PrefsPreferencePort::for_user(store.clone()) {
+            Ok(port) => {
+                // The daemon backend (PF_PREFSD_SOCK) reads the same files, so the store
+                // answers which keys are provided regardless of backend.
+                if let Ok(prefs) = store.load() {
+                    settled = FIRST_RUN_KEYS
+                        .into_iter()
+                        .filter(|key| prefs.is_seeded(key) || prefs.is_explicit(key))
+                        .collect();
+                }
+                PrefsBackend::Store(port)
+            }
+            Err(seed_error) if seed.is_some() => match PrefsPreferencePort::for_user(plain) {
+                Ok(port) => {
+                    health = Some(format!("preferences seed ignored: {seed_error:?}"));
+                    PrefsBackend::Store(port)
+                }
+                Err(error) => {
+                    health = Some(format!("preferences unreadable: {error:?}"));
+                    PrefsBackend::Degraded(fixture_preferences())
+                }
+            },
+            Err(error) => {
+                health = Some(format!("preferences unreadable: {error:?}"));
+                PrefsBackend::Degraded(fixture_preferences())
+            }
+        };
         Self {
             inner,
-            health: None,
+            health,
+            settled,
             // Launcher-owned forward-compatible keys live in the same atomic preference
             // document. `pf-prefs` preserves unknown keys when it updates schema-owned values.
             state_file,
@@ -3465,7 +3533,7 @@ impl DurablePreferences {
     }
 
     fn settled_first_run_keys(&self) -> Vec<&'static str> {
-        Vec::new()
+        self.settled.clone()
     }
 
     fn launcher_state(
@@ -10130,8 +10198,9 @@ exec="./launch"
         let launcher_state = launcher_dir.path().join("prefs.json");
         std::fs::write(&launcher_state, r#"{"firstRunComplete":true}"#).unwrap();
         let mut preferences = DurablePreferences {
-            inner: PrefsPreferencePort::for_user(backend.clone()).unwrap(),
+            inner: PrefsBackend::Store(PrefsPreferencePort::for_user(backend.clone()).unwrap()),
             health: None,
+            settled: Vec::new(),
             state_file: launcher_state.clone(),
             pending: VecDeque::new(),
         };

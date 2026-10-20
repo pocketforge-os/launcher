@@ -10695,7 +10695,7 @@ exec="./launch"
                 .as_deref()
                 .is_some_and(|h| h.contains("seed"))
         );
-        assert!(durable.settled_first_run_keys().is_empty());
+        assert_eq!(durable.settled_first_run_keys(), Vec::<&str>::new());
     }
 
     #[test]

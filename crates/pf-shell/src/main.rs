@@ -3342,16 +3342,24 @@ fn load_durable_preferences(core: &mut ShellCore, durable: &DurablePreferences) 
     if let Some(label) = durable.safe_return_binding().ok().flatten() {
         core.set_safe_return_binding(label);
     }
-    let settled = durable.settled_first_run_keys();
+    // A health-bearing boot always shows the complete sheet and its health line, whatever the
+    // completion flag says: the stored state cannot be trusted.
+    let first_run_complete = first_run_complete && health.is_none();
+    let settled = if health.is_some() {
+        Vec::new()
+    } else {
+        durable.settled_first_run_keys()
+    };
     if let Err(error) = core.load_preferences_settled(durable, first_run_complete, &settled) {
         health.get_or_insert(format!("preferences: {error:?}"));
-        let _ = core.load_preferences(&fixture_preferences(), first_run_complete);
+        let _ = core.load_preferences(&fixture_preferences(), false);
     }
     if let Some(line) = &health {
         eprintln!("pf-shell: {line}");
     }
+    let shown_complete = first_run_complete && health.is_none();
     core.set_health_line(health);
-    first_run_complete
+    shown_complete
 }
 
 /// Records first-run completion. A failed write is not fatal: it returns the health line.
@@ -3492,13 +3500,16 @@ impl DurablePreferences {
         let plain = PrefsStore::at(state_dir);
         let state_file = plain.path().to_owned();
         let mut health = Self::migrate_appearance(&state_file).err();
+        // With PF_PREFSD_SOCK set, pf-prefs-port reads through the daemon and ignores the local
+        // store, so the daemon alone owns the seed: the override is not applied and settled keys
+        // cannot be derived locally (the full sheet shows, as before the seed existed).
+        let daemon = std::env::var_os("PF_PREFSD_SOCK").is_some();
+        let seed = seed.filter(|_| !daemon);
         let store = seed.map_or_else(|| plain.clone(), |seed| plain.clone().with_seed(seed));
         let mut settled = Vec::new();
         let inner = match PrefsPreferencePort::for_user(store.clone()) {
             Ok(port) => {
-                // The daemon backend (PF_PREFSD_SOCK) reads the same files, so the store
-                // answers which keys are provided regardless of backend.
-                if let Ok(prefs) = store.load() {
+                if !daemon && let Ok(prefs) = store.load() {
                     settled = FIRST_RUN_KEYS
                         .into_iter()
                         .filter(|key| prefs.is_seeded(key) || prefs.is_explicit(key))
@@ -10464,6 +10475,37 @@ exec="./launch"
                 "a malformed document is never overwritten"
             );
         }
+    }
+
+    #[test]
+    fn health_bearing_boots_show_the_full_sheet_even_when_first_run_was_completed() {
+        let completed = r#"{"firstRunComplete":true}"#;
+        let cases: [(&str, Option<&str>, &str); 3] = [
+            ("malformed seed", Some("{not json"), completed),
+            (
+                "parseable-invalid prefs",
+                None,
+                r#"{"firstRunComplete":true,"highContrast":"yes"}"#,
+            ),
+            ("malformed prefs", None, "{not json"),
+        ];
+        for (name, seed, prefs) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (core, _durable) = boot_with_seed(dir.path(), seed, Some(prefs));
+            assert_eq!(
+                core.presentation(),
+                &pf_shell_core::Presentation::FirstRun,
+                "{name}"
+            );
+            assert_eq!(first_run_row_labels(&core), ALL_ROWS.to_vec(), "{name}");
+            assert!(core.health_line().is_some(), "{name}");
+        }
+        // Control: the same completed document with a healthy seed stays complete.
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _durable) =
+            boot_with_seed(dir.path(), Some(r#"{"textScale":"125%"}"#), Some(completed));
+        assert_ne!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
+        assert!(core.health_line().is_none());
     }
 
     #[test]

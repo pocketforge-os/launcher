@@ -3477,19 +3477,39 @@ impl DurablePreferences {
             if canonical != appearance.as_str() {
                 let canonical = canonical.expect("string appearance when translation differs");
                 *appearance = serde_json::Value::String(canonical.into());
+                let migrated = serde_json::to_vec_pretty(&state)
+                    .map_err(|e| format!("preferences migration: {e}"))?;
+                // Only a document pf-prefs accepts once migrated is rewritten; anything else
+                // stays byte-for-byte as found and is reported by the normal load path.
+                if !Self::validates_as_prefs(state_file, &migrated)? {
+                    return Ok(());
+                }
                 let temporary =
                     state_file.with_extension(format!("json.migrate.tmp.{}", std::process::id()));
-                fs::write(
-                    &temporary,
-                    serde_json::to_vec_pretty(&state)
-                        .map_err(|e| format!("preferences migration: {e}"))?,
-                )
-                .map_err(|e| format!("preferences migration: {e}"))?;
+                fs::write(&temporary, migrated)
+                    .map_err(|e| format!("preferences migration: {e}"))?;
                 fs::rename(temporary, state_file)
                     .map_err(|e| format!("preferences migration: {e}"))?;
             }
         }
         Ok(())
+    }
+
+    /// Whether pf-prefs loads `candidate` as a complete prefs document. The candidate is checked
+    /// in a scratch directory beside `state_file`, so the real document is never touched.
+    fn validates_as_prefs(state_file: &Path, candidate: &[u8]) -> Result<bool, String> {
+        let parent = state_file.parent().unwrap_or_else(|| Path::new("."));
+        let scratch = parent.join(format!(".migrate-validate.{}", std::process::id()));
+        let err = |e: std::io::Error| format!("preferences migration: {e}");
+        fs::create_dir_all(&scratch).map_err(err)?;
+        let scratch_store = PrefsStore::at(&scratch);
+        let written = fs::write(scratch_store.path(), candidate);
+        let valid = written.is_ok() && scratch_store.load().is_ok();
+        let _ = fs::remove_file(scratch_store.path());
+        let removed = fs::remove_dir(&scratch);
+        written.map_err(err)?;
+        removed.map_err(err)?;
+        Ok(valid)
     }
 
     /// Opens the durable store with the cloud-init seed layer attached, as `pf-prefsd` does.
@@ -10506,6 +10526,68 @@ exec="./launch"
             boot_with_seed(dir.path(), Some(r#"{"textScale":"125%"}"#), Some(completed));
         assert_ne!(core.presentation(), &pf_shell_core::Presentation::FirstRun);
         assert!(core.health_line().is_none());
+    }
+
+    fn sha256_of(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+    }
+
+    #[test]
+    fn invalid_documents_with_the_legacy_alias_are_never_rewritten() {
+        let cases = [
+            (
+                "invalid type",
+                r#"{"appearance":"Day","highContrast":"yes"}"#,
+            ),
+            ("out of range", r#"{"appearance":"Day","textScale":"999%"}"#),
+            (
+                "unknown schemaVersion",
+                r#"{"schemaVersion":9999,"appearance":"Day"}"#,
+            ),
+            (
+                "bad schemaVersion type",
+                r#"{"schemaVersion":"two","appearance":"Day"}"#,
+            ),
+            ("unparseable", r#"{"appearance":"Day","#),
+        ];
+        for (name, text) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("prefs.json");
+            std::fs::write(&file, text).unwrap();
+            let before = sha256_of(&file);
+            let (core, _durable) = boot_with_seed(dir.path(), None, None);
+            assert_eq!(sha256_of(&file), before, "{name}: bytes changed");
+            assert!(core.health_line().is_some(), "{name}: no health line");
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "{name}: scratch or temp files left behind"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_legacy_appearance_document_is_migrated_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prefs.json");
+        std::fs::write(&file, r#"{"appearance":"Day","firstRunComplete":true}"#).unwrap();
+        let before = sha256_of(&file);
+        let (core, _durable) = boot_with_seed(dir.path(), None, None);
+        assert!(core.health_line().is_none());
+        let migrated = sha256_of(&file);
+        assert_ne!(migrated, before, "the alias is rewritten");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(doc["appearance"], "light");
+        assert_eq!(doc["firstRunComplete"], true);
+        let (_core, _durable) = boot_with_seed(dir.path(), None, None);
+        assert_eq!(
+            sha256_of(&file),
+            migrated,
+            "the second boot rewrites nothing"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

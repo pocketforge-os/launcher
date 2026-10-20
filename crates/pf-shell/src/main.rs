@@ -3517,13 +3517,20 @@ impl DurablePreferences {
     /// to in-memory defaults for this boot; both leave a health line and the full first-run
     /// sheet. The malformed document itself is never rewritten.
     fn open_with_seed(state_dir: &Path, seed: Option<&Path>) -> Self {
+        Self::open_with_backend(
+            state_dir,
+            seed,
+            std::env::var_os("PF_PREFSD_SOCK").is_some(),
+        )
+    }
+
+    fn open_with_backend(state_dir: &Path, seed: Option<&Path>, daemon: bool) -> Self {
         let plain = PrefsStore::at(state_dir);
         let state_file = plain.path().to_owned();
         let mut health = Self::migrate_appearance(&state_file).err();
         // With PF_PREFSD_SOCK set, pf-prefs-port reads through the daemon and ignores the local
         // store, so the daemon alone owns the seed: the override is not applied and settled keys
         // cannot be derived locally (the full sheet shows, as before the seed existed).
-        let daemon = std::env::var_os("PF_PREFSD_SOCK").is_some();
         let seed = seed.filter(|_| !daemon);
         let store = seed.map_or_else(|| plain.clone(), |seed| plain.clone().with_seed(seed));
         let mut settled = Vec::new();
@@ -10588,6 +10595,64 @@ exec="./launch"
             "the second boot rewrites nothing"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn daemon_backend_honours_the_seed_override_and_settles_from_the_same_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("override.seed.json");
+        std::fs::write(&seed, r#"{"textScale":"150%","highContrast":true}"#).unwrap();
+        // `daemon = true` is the PF_PREFSD_SOCK branch (the port picks its own writer).
+        let mut durable = DurablePreferences::open_with_backend(dir.path(), Some(&seed), true);
+        assert!(durable.health.is_none());
+        assert_eq!(
+            durable.settled_first_run_keys(),
+            vec!["textScale", "highContrast"]
+        );
+        let seeded = durable
+            .read(&PreferenceKey("textScale".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(seeded.effective, PreferenceValue::Text("150%".into()));
+        // A write goes through the writer and is then visible to the reads and to a reopen.
+        durable
+            .submit_change(PreferenceChange {
+                key: PreferenceKey("reduceMotion".into()),
+                value: PreferenceValue::Bool(true),
+                authority: ChangeAuthority("user".into()),
+            })
+            .unwrap();
+        let written = durable
+            .read(&PreferenceKey("reduceMotion".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(written.effective, PreferenceValue::Bool(true));
+        let reopened = DurablePreferences::open_with_backend(dir.path(), Some(&seed), true);
+        assert_eq!(
+            reopened.settled_first_run_keys(),
+            vec!["textScale", "highContrast", "reduceMotion"]
+        );
+        // Control: the local backend with the same override agrees.
+        let local = DurablePreferences::open_with_backend(dir.path(), Some(&seed), false);
+        assert_eq!(
+            local.settled_first_run_keys(),
+            reopened.settled_first_run_keys()
+        );
+    }
+
+    #[test]
+    fn daemon_backend_with_a_malformed_seed_override_ignores_it_with_a_health_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("override.seed.json");
+        std::fs::write(&seed, "{not json").unwrap();
+        let durable = DurablePreferences::open_with_backend(dir.path(), Some(&seed), true);
+        assert!(
+            durable
+                .health
+                .as_deref()
+                .is_some_and(|h| h.contains("seed"))
+        );
+        assert!(durable.settled_first_run_keys().is_empty());
     }
 
     #[test]

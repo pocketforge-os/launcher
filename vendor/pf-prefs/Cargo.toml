@@ -30,6 +30,10 @@ repository = "https://github.com/pocketforge-os/runtime"
 name = "pf_prefs"
 path = "src/lib.rs"
 
+[[bin]]
+name = "pf-prefs-schema"
+path = "src/bin/pf-prefs-schema.rs"
+
 [dependencies.serde]
 version = "1"
 features = ["derive"]

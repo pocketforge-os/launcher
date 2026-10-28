@@ -68,7 +68,6 @@ use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const DEFAULT_POWER_SOCKET: &str = "/run/pocketforge-power/power.sock";
-const DEVICE_CAPABILITIES_PATH: &str = "/usr/share/pocketforge/device/capabilities.toml";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 const RUNTIME_FAMILY: &str = "pocketforge/native";
 const RUNTIME_ABI: &str = "1";
@@ -5010,9 +5009,10 @@ fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 }
 
 fn input_capabilities_path(args: &[String]) -> Result<PathBuf, String> {
-    input_capabilities_path_with(args, || {
-        pf_session_authority::orientation_source::production_descriptor_path()
-    })
+    input_capabilities_path_with(
+        args,
+        pf_session_authority::orientation_source::production_descriptor_path,
+    )
 }
 
 fn input_capabilities_path_with(
@@ -5022,8 +5022,7 @@ fn input_capabilities_path_with(
     if let Some(path) = value(args, "--input-capabilities") {
         return Ok(path.into());
     }
-    drop(default_descriptor);
-    Ok(DEVICE_CAPABILITIES_PATH.into())
+    default_descriptor()
 }
 
 fn parse_surface(value: &str) -> Result<(u16, u16), String> {

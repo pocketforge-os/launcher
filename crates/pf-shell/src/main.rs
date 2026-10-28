@@ -12253,7 +12253,7 @@ exec="./launch"
             .collect();
         fs::write(&path, bytes).unwrap();
         let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
-        let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map(path, contract, map).unwrap();
         let mut input = EvdevInteractiveInput::new(&mut source);
         let mut actions = Vec::new();
         // End of the recorded stream reads as device loss, which ends the loop.

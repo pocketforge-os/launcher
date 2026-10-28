@@ -67,7 +67,10 @@ fn hat_direction_code(axis: u16, position: i32) -> Option<u16> {
 
 /// The validated device-capability declaration that gives `ABS_HAT0X/Y` semantic authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DeclaredHatContract;
+struct DeclaredHatContract {
+    horizontal_axis: u16,
+    vertical_axis: u16,
+}
 
 impl DeclaredHatContract {
     fn parse(source: &str) -> Result<Self, AdapterError> {
@@ -105,15 +108,18 @@ impl DeclaredHatContract {
                 "dpad must declare hat/EV_ABS/ABS_HAT0X,ABS_HAT0Y".into(),
             ));
         }
-        Ok(Self)
+        Ok(Self {
+            horizontal_axis: ABS_HAT0X,
+            vertical_axis: ABS_HAT0Y,
+        })
     }
 
     fn action(self, axis: u16, position: i32) -> Option<ShellAction> {
         let direction = match (axis, position) {
-            (ABS_HAT0X, -1) => AxisMove::Left,
-            (ABS_HAT0X, 1) => AxisMove::Right,
-            (ABS_HAT0Y, -1) => AxisMove::Up,
-            (ABS_HAT0Y, 1) => AxisMove::Down,
+            (axis, -1) if axis == self.horizontal_axis => AxisMove::Left,
+            (axis, 1) if axis == self.horizontal_axis => AxisMove::Right,
+            (axis, -1) if axis == self.vertical_axis => AxisMove::Up,
+            (axis, 1) if axis == self.vertical_axis => AxisMove::Down,
             _ => return None,
         };
         Some(ShellAction::Move(direction))
@@ -121,10 +127,10 @@ impl DeclaredHatContract {
 
     fn control(self, axis: u16, position: i32) -> Option<&'static str> {
         match (axis, position) {
-            (ABS_HAT0X, -1) => Some("dpad_left"),
-            (ABS_HAT0X, 1) => Some("dpad_right"),
-            (ABS_HAT0Y, -1) => Some("dpad_up"),
-            (ABS_HAT0Y, 1) => Some("dpad_down"),
+            (axis, -1) if axis == self.horizontal_axis => Some("dpad_left"),
+            (axis, 1) if axis == self.horizontal_axis => Some("dpad_right"),
+            (axis, -1) if axis == self.vertical_axis => Some("dpad_up"),
+            (axis, 1) if axis == self.vertical_axis => Some("dpad_down"),
             _ => None,
         }
     }

@@ -1098,8 +1098,7 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
         let input = value(&args, "--input").unwrap_or("/dev/input/event0");
-        let input_capabilities =
-            value(&args, "--input-capabilities").unwrap_or(DEVICE_CAPABILITIES_PATH);
+        let input_capabilities = input_capabilities_path(&args)?;
         let rotation = value(&args, "--rotate").and_then(PresentRotation::from_degrees);
         let mut host =
             FbdevHost::open_with_rotation(framebuffer, rotation).map_err(|e| e.to_string())?;
@@ -1107,7 +1106,7 @@ fn main() -> Result<(), String> {
             input,
             &contract,
             glyphs.clone(),
-            input_capabilities,
+            &input_capabilities,
         )
         .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
@@ -1177,13 +1176,12 @@ fn main() -> Result<(), String> {
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut automation = automation_server(&args)?;
         if let Some(input_path) = value(&args, "--input") {
-            let input_capabilities =
-                value(&args, "--input-capabilities").unwrap_or(DEVICE_CAPABILITIES_PATH);
+            let input_capabilities = input_capabilities_path(&args)?;
             let (mut source, _) = EvdevActionSource::open_with_map_and_capabilities(
                 input_path,
                 &contract,
                 glyphs.clone(),
-                input_capabilities,
+                &input_capabilities,
             )
             .map_err(|e| format!("input adapter: {e:?}"))?;
             let mut input = EvdevInteractiveInput::new(&mut source);
@@ -5009,6 +5007,23 @@ fn ensure_action_labels(scene: &pf_scene::Scene) -> Result<(), String> {
 
 fn value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str())
+}
+
+fn input_capabilities_path(args: &[String]) -> Result<PathBuf, String> {
+    input_capabilities_path_with(args, || {
+        pf_session_authority::orientation_source::production_descriptor_path()
+    })
+}
+
+fn input_capabilities_path_with(
+    args: &[String],
+    default_descriptor: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = value(args, "--input-capabilities") {
+        return Ok(path.into());
+    }
+    drop(default_descriptor);
+    Ok(DEVICE_CAPABILITIES_PATH.into())
 }
 
 fn parse_surface(value: &str) -> Result<(u16, u16), String> {
@@ -9447,6 +9462,27 @@ exec="./launch"
         assert_eq!(
             status.attention_message.as_deref(),
             Some("Controller battery low")
+        );
+    }
+
+    #[test]
+    fn input_capabilities_default_to_selected_device_and_allow_explicit_override() {
+        let selected = PathBuf::from("/usr/share/pocketforge/devices/a133/capabilities.toml");
+        assert_eq!(
+            input_capabilities_path_with(&[], || Ok(selected.clone())).unwrap(),
+            selected
+        );
+
+        let args = vec![
+            "--input-capabilities".into(),
+            "/run/test-device/capabilities.toml".into(),
+        ];
+        assert_eq!(
+            input_capabilities_path_with(&args, || {
+                Err("explicit override must bypass device selection".into())
+            })
+            .unwrap(),
+            PathBuf::from("/run/test-device/capabilities.toml")
         );
     }
 

@@ -12226,19 +12226,17 @@ exec="./launch"
     impl EvdevHost for OpenEvdevHost {}
 
     /// Decodes a raw pf-gamepad stream through the production evdev input into shell actions.
-    fn pf_gamepad_actions(events: &[(u16, u16, i32)]) -> Vec<ShellAction> {
+    fn pf_gamepad_actions_exact_with_contract(
+        events: &[(u16, u16, i32)],
+        contract: &DeviceContract,
+    ) -> Vec<ShellAction> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pf-gamepad");
         let bytes: Vec<u8> = events
             .iter()
-            .flat_map(|&(event_type, code, value)| {
-                let mut frame = raw_input_event(event_type, code, value);
-                frame.extend(raw_input_event(0, 0, 0));
-                frame
-            })
+            .flat_map(|&(event_type, code, value)| raw_input_event(event_type, code, value))
             .collect();
         fs::write(&path, bytes).unwrap();
-        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
         let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
         let (mut source, _) = EvdevActionSource::open_with_map(path, &contract, map).unwrap();
         let mut input = EvdevInteractiveInput::new(&mut source);
@@ -12252,6 +12250,22 @@ exec="./launch"
             }
         }
         actions
+    }
+
+    fn pf_gamepad_actions_with_contract(
+        events: &[(u16, u16, i32)],
+        contract: &DeviceContract,
+    ) -> Vec<ShellAction> {
+        let framed: Vec<_> = events
+            .iter()
+            .flat_map(|&event| [event, (0, 0, 0)])
+            .collect();
+        pf_gamepad_actions_exact_with_contract(&framed, contract)
+    }
+
+    fn pf_gamepad_actions(events: &[(u16, u16, i32)]) -> Vec<ShellAction> {
+        let contract = DeviceContract::parse_json(include_str!("../fixtures/device.json")).unwrap();
+        pf_gamepad_actions_with_contract(events, &contract)
     }
 
     /// Feeds `taps` to `core` through the production evdev input, one press at a time, and
@@ -12308,6 +12322,46 @@ exec="./launch"
                 ShellAction::Move(Up),
             ]
         );
+    }
+
+    #[test]
+    fn declared_hat_down_moves_quick_focus_from_quick_0_to_quick_1() {
+        let mut contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        let mappings = contract["effective_map"].as_array_mut().unwrap();
+        let move_down = mappings
+            .iter_mut()
+            .find(|mapping| mapping["action"] == "Move.down")
+            .unwrap();
+        move_down["binding"]["controls"] = serde_json::json!(["south"]);
+        let contract = DeviceContract::parse_json(&contract.to_string()).unwrap();
+
+        assert!(
+            pf_gamepad_actions_with_contract(
+                &[(EV_KEY, 108, 1), (0, 0, 0), (EV_KEY, 108, 0), (0, 0, 0)],
+                &contract,
+            )
+            .is_empty(),
+            "a guessed KEY_DOWN is not declared by the device stream",
+        );
+
+        let actions = pf_gamepad_actions_exact_with_contract(
+            &[
+                (EV_ABS, ABS_HAT0Y, 1),
+                (0, 0, 0),
+                (EV_ABS, ABS_HAT0Y, 0),
+                (0, 0, 0),
+            ],
+            &contract,
+        );
+        assert_eq!(actions, vec![ShellAction::Move(pf_scene::AxisMove::Down)]);
+
+        let mut core = hat_core();
+        core.action(&ShellAction::Custom("Quick.open".into()));
+        assert_eq!(core.route(), pf_shell_core::Route::Quick);
+        assert_eq!(core.focus(), 0);
+        core.action(&actions[0]);
+        assert_eq!(core.focus(), 1, "quick-0 must move to quick-1");
     }
 
     #[test]

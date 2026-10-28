@@ -12234,6 +12234,7 @@ exec="./launch"
 
     const EV_KEY: u16 = 0x01;
     const EV_ABS: u16 = 0x03;
+    const ABS_Y: u16 = 0x01;
     const ABS_HAT0X: u16 = 0x10;
     const ABS_HAT0Y: u16 = 0x11;
 
@@ -12468,6 +12469,71 @@ code = "ABS_HAT0X,ABS_HAT0Y"
         assert_eq!(core.focus(), 0);
         core.action(&actions[0]);
         assert_eq!(core.focus(), 1, "quick-0 must move to quick-1");
+    }
+
+    #[test]
+    fn build50_receipt_stream_moves_quick_focus_from_quick_0_to_quick_1() {
+        let mut contract: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/device.json")).unwrap();
+        let mappings = contract["effective_map"].as_array_mut().unwrap();
+        let move_down = mappings
+            .iter_mut()
+            .find(|mapping| mapping["action"] == "Move.down")
+            .unwrap();
+        move_down["binding"]["controls"] = serde_json::json!(["south"]);
+        let contract = DeviceContract::parse_json(&contract.to_string()).unwrap();
+
+        let declared_hat = declared_pf_gamepad_actions_exact(
+            &[
+                (EV_ABS, ABS_HAT0Y, 1),
+                (0, 0, 0),
+                (EV_ABS, ABS_HAT0Y, 0),
+                (0, 0, 0),
+            ],
+            &contract,
+            DECLARED_HAT_CAPABILITIES,
+        )
+        .unwrap();
+        assert_eq!(
+            declared_hat,
+            vec![ShellAction::Move(pf_scene::AxisMove::Down)],
+            "code 17 is the declared ABS_HAT0Y positive control",
+        );
+        assert!(
+            declared_pf_gamepad_actions_exact(
+                &[(EV_KEY, 108, 1), (0, 0, 0), (EV_KEY, 108, 0), (0, 0, 0)],
+                &contract,
+                DECLARED_HAT_CAPABILITIES,
+            )
+            .unwrap()
+            .is_empty(),
+            "a guessed KEY_DOWN remains the negative control",
+        );
+
+        // Build 50 receipt 12db0085 records these exact numeric frames. Its proof labels code 1
+        // ABS_HAT0Y, but Linux input-event-codes.h defines code 1 as ABS_Y and ABS_HAT0Y as 17.
+        let receipt_actions = declared_pf_gamepad_actions_exact(
+            &[
+                (EV_ABS, ABS_Y, 1),
+                (0, 0, 0),
+                (EV_ABS, ABS_Y, 0),
+                (0, 0, 0),
+            ],
+            &contract,
+            DECLARED_HAT_CAPABILITIES,
+        )
+        .unwrap();
+        let mut core = hat_core();
+        core.action(&ShellAction::Custom("Quick.open".into()));
+        assert_eq!(core.focus(), 0);
+        for action in &receipt_actions {
+            core.action(action);
+        }
+        assert_eq!(
+            core.focus(),
+            1,
+            "Build 50 receipt stream must move quick-0 to quick-1; decoded actions: {receipt_actions:?}",
+        );
     }
 
     #[test]

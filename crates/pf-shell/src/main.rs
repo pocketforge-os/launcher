@@ -68,6 +68,7 @@ use compositor_session::{CompositorSession, DEFAULT_ENVIRONMENT};
 
 const DEFAULT_SESSION_SOCKET: &str = "/run/pocketforge/session-authority.sock";
 const DEFAULT_POWER_SOCKET: &str = "/run/pocketforge-power/power.sock";
+const DEVICE_CAPABILITIES_PATH: &str = "/usr/share/pocketforge/device/capabilities.toml";
 const MAX_CATALOG_ART_BYTES: u64 = 8 * 1024 * 1024;
 const RUNTIME_FAMILY: &str = "pocketforge/native";
 const RUNTIME_ABI: &str = "1";
@@ -203,7 +204,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
+const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --input-capabilities <path> device input capability contract\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
 #[cfg(feature = "desktop-sim")]
 const DESKTOP_SIM_AUTHORITY_HELP: &str =
     "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
@@ -1097,11 +1098,18 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--fbdev") {
         let framebuffer = value(&args, "--device").unwrap_or("/dev/fb0");
         let input = value(&args, "--input").unwrap_or("/dev/input/event0");
+        let input_capabilities =
+            value(&args, "--input-capabilities").unwrap_or(DEVICE_CAPABILITIES_PATH);
         let rotation = value(&args, "--rotate").and_then(PresentRotation::from_degrees);
         let mut host =
             FbdevHost::open_with_rotation(framebuffer, rotation).map_err(|e| e.to_string())?;
-        let (mut actions, _) = EvdevActionSource::open_with_map(input, &contract, glyphs.clone())
-            .map_err(|e| format!("input adapter: {e:?}"))?;
+        let (mut actions, _) = EvdevActionSource::open_with_map_and_capabilities(
+            input,
+            &contract,
+            glyphs.clone(),
+            input_capabilities,
+        )
+        .map_err(|e| format!("input adapter: {e:?}"))?;
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut input = EvdevInteractiveInput::new(&mut actions);
         let mut automation = automation_server(&args)?;
@@ -1169,9 +1177,15 @@ fn main() -> Result<(), String> {
         let session_socket = value(&args, "--session-socket").unwrap_or(DEFAULT_SESSION_SOCKET);
         let mut automation = automation_server(&args)?;
         if let Some(input_path) = value(&args, "--input") {
-            let (mut source, _) =
-                EvdevActionSource::open_with_map(input_path, &contract, glyphs.clone())
-                    .map_err(|e| format!("input adapter: {e:?}"))?;
+            let input_capabilities =
+                value(&args, "--input-capabilities").unwrap_or(DEVICE_CAPABILITIES_PATH);
+            let (mut source, _) = EvdevActionSource::open_with_map_and_capabilities(
+                input_path,
+                &contract,
+                glyphs.clone(),
+                input_capabilities,
+            )
+            .map_err(|e| format!("input adapter: {e:?}"))?;
             let mut input = EvdevInteractiveInput::new(&mut source);
             let mut latency_trace = latency_trace("wayland")?;
             return run_interactive(
@@ -5022,7 +5036,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 15] = [
+    const VALUE_FLAGS: [&str; 16] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -5030,6 +5044,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--desktop-sim-supervise",
         "--device",
         "--input",
+        "--input-capabilities",
         "--out",
         "--platform-capabilities",
         "--rotate",
@@ -12268,6 +12283,49 @@ exec="./launch"
         pf_gamepad_actions_with_contract(events, &contract)
     }
 
+    const DECLARED_HAT_CAPABILITIES: &str = r#"
+schema_version = 3
+[[inputs]]
+id = "dpad"
+kind = "hat"
+ev_type = "EV_ABS"
+code = "ABS_HAT0X,ABS_HAT0Y"
+"#;
+
+    fn declared_pf_gamepad_actions_exact(
+        events: &[(u16, u16, i32)],
+        contract: &DeviceContract,
+        capabilities: &str,
+    ) -> Result<Vec<ShellAction>, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("pf-gamepad");
+        let capabilities_path = dir.path().join("capabilities.toml");
+        let bytes: Vec<u8> = events
+            .iter()
+            .flat_map(|&(event_type, code, value)| raw_input_event(event_type, code, value))
+            .collect();
+        fs::write(&input_path, bytes).unwrap();
+        fs::write(&capabilities_path, capabilities).unwrap();
+        let map = EffectiveMap::load(contract.clone(), &MemoryStore::default()).unwrap();
+        let (mut source, _) = EvdevActionSource::open_with_map_and_capabilities(
+            input_path,
+            contract,
+            map,
+            capabilities_path,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let mut input = EvdevInteractiveInput::new(&mut source);
+        let mut actions = Vec::new();
+        while let Ok(poll) =
+            input.next_action(&mut OpenEvdevHost, Deadline(MonotonicTime::ZERO), None)
+        {
+            if let DecodedActionPoll::Event { action, .. } = poll {
+                actions.push(action);
+            }
+        }
+        Ok(actions)
+    }
+
     /// Feeds `taps` to `core` through the production evdev input, one press at a time, and
     /// returns the focus after each press.
     fn navigate(core: &mut ShellCore, taps: &[(u16, i32)], tap: Tap) -> Vec<usize> {
@@ -12337,15 +12395,26 @@ exec="./launch"
         let contract = DeviceContract::parse_json(&contract.to_string()).unwrap();
 
         assert!(
-            pf_gamepad_actions_with_contract(
+            declared_pf_gamepad_actions_exact(
                 &[(EV_KEY, 108, 1), (0, 0, 0), (EV_KEY, 108, 0), (0, 0, 0)],
                 &contract,
+                DECLARED_HAT_CAPABILITIES,
             )
+            .unwrap()
             .is_empty(),
             "a guessed KEY_DOWN is not declared by the device stream",
         );
+        assert!(
+            declared_pf_gamepad_actions_exact(
+                &[(EV_ABS, ABS_HAT0Y, 1), (0, 0, 0)],
+                &contract,
+                &DECLARED_HAT_CAPABILITIES.replace("ABS_HAT0Y", "ABS_Y"),
+            )
+            .is_err(),
+            "an undeclared hat contract must fail closed",
+        );
 
-        let actions = pf_gamepad_actions_exact_with_contract(
+        let actions = declared_pf_gamepad_actions_exact(
             &[
                 (EV_ABS, ABS_HAT0Y, 1),
                 (0, 0, 0),
@@ -12353,7 +12422,9 @@ exec="./launch"
                 (0, 0, 0),
             ],
             &contract,
-        );
+            DECLARED_HAT_CAPABILITIES,
+        )
+        .unwrap();
         assert_eq!(actions, vec![ShellAction::Move(pf_scene::AxisMove::Down)]);
 
         let mut core = hat_core();

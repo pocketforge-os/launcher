@@ -39,16 +39,21 @@ const ABS_HAT0Y: u16 = 0x11;
 /// kind="hat"`, emitted by `pf-input-decode`). Each axis position is presented to the rest of the
 /// shell as the matching d-pad direction control being held: the transition to -1 or +1 presses
 /// that direction's control, the return to centre releases it, and a direct -1/+1 flip releases
-/// the old direction before pressing the new one. The direction controls are the contract's own
-/// `KEY_LEFT`/`KEY_RIGHT`/`KEY_UP`/`KEY_DOWN` controls, so the effective map (including user
-/// remaps and capture) chooses the action and the key repeat policy applies unchanged.
+/// the old direction before pressing the new one. Production grants those positions semantic
+/// D-pad authority only after validating the installed device capability declaration. The
+/// direction's stable transition identity lets capture and key repeat share the key path without
+/// claiming that the device emitted substitute `EV_KEY` records.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HatPosition {
     x: i32,
     y: i32,
 }
 
-/// The d-pad direction control code for one hat axis position, or `None` at centre.
+/// Stable transition identity for one hat axis position, or `None` at centre.
+///
+/// These values identify holds to the repeat scheduler. They are not an assertion that the
+/// device emitted `EV_KEY KEY_*`; a validated [`DeclaredHatContract`] supplies the semantic
+/// action for a device that declares an `EV_ABS` hat.
 fn hat_direction_code(axis: u16, position: i32) -> Option<u16> {
     let name = match (axis, position) {
         (ABS_HAT0X, -1) => "KEY_LEFT",
@@ -58,6 +63,77 @@ fn hat_direction_code(axis: u16, position: i32) -> Option<u16> {
         _ => return None,
     };
     linux_key_code(name)
+}
+
+/// The validated device-capability declaration that gives `ABS_HAT0X/Y` semantic authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeclaredHatContract {
+    horizontal_axis: u16,
+    vertical_axis: u16,
+}
+
+impl DeclaredHatContract {
+    fn parse(source: &str) -> Result<Self, AdapterError> {
+        let document = source
+            .parse::<toml::Value>()
+            .map_err(|error| AdapterError::Map(format!("device capabilities TOML: {error}")))?;
+        if document
+            .get("schema_version")
+            .and_then(toml::Value::as_integer)
+            != Some(3)
+        {
+            return Err(AdapterError::Map(
+                "device capabilities must use schema_version = 3".into(),
+            ));
+        }
+        let inputs = document
+            .get("inputs")
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| AdapterError::Map("device capabilities have no inputs".into()))?;
+        let dpad_rows = inputs
+            .iter()
+            .filter_map(toml::Value::as_table)
+            .filter(|row| row.get("id").and_then(toml::Value::as_str) == Some("dpad"))
+            .collect::<Vec<_>>();
+        let [dpad] = dpad_rows.as_slice() else {
+            return Err(AdapterError::Map(
+                "device capabilities must declare exactly one dpad input".into(),
+            ));
+        };
+        let declared = dpad.get("kind").and_then(toml::Value::as_str) == Some("hat")
+            && dpad.get("ev_type").and_then(toml::Value::as_str) == Some("EV_ABS")
+            && dpad.get("code").and_then(toml::Value::as_str) == Some("ABS_HAT0X,ABS_HAT0Y");
+        if !declared {
+            return Err(AdapterError::Map(
+                "dpad must declare hat/EV_ABS/ABS_HAT0X,ABS_HAT0Y".into(),
+            ));
+        }
+        Ok(Self {
+            horizontal_axis: ABS_HAT0X,
+            vertical_axis: ABS_HAT0Y,
+        })
+    }
+
+    fn action(self, axis: u16, position: i32) -> Option<ShellAction> {
+        let direction = match (axis, position) {
+            (axis, -1) if axis == self.horizontal_axis => AxisMove::Left,
+            (axis, 1) if axis == self.horizontal_axis => AxisMove::Right,
+            (axis, -1) if axis == self.vertical_axis => AxisMove::Up,
+            (axis, 1) if axis == self.vertical_axis => AxisMove::Down,
+            _ => return None,
+        };
+        Some(ShellAction::Move(direction))
+    }
+
+    fn control(self, axis: u16, position: i32) -> Option<&'static str> {
+        match (axis, position) {
+            (axis, -1) if axis == self.horizontal_axis => Some("dpad_left"),
+            (axis, 1) if axis == self.horizontal_axis => Some("dpad_right"),
+            (axis, -1) if axis == self.vertical_axis => Some("dpad_up"),
+            (axis, 1) if axis == self.vertical_axis => Some("dpad_down"),
+            _ => None,
+        }
+    }
 }
 
 /// The real control state of the device, read from the kernel when the event stream cannot be
@@ -119,6 +195,7 @@ pub struct EvdevActionSource {
     source: InputSourceId,
     announced: bool,
     hat: HatPosition,
+    declared_hat: Option<DeclaredHatContract>,
     /// `EV_KEY` codes this source has reported pressed and not yet released.
     held_keys: BTreeSet<u16>,
     /// The kernel dropped events (`SYN_DROPPED`): records are discarded until the next
@@ -170,6 +247,32 @@ impl EvdevActionSource {
         contract: &DeviceContract,
         effective: EffectiveMap,
     ) -> Result<(Self, EffectiveMap), AdapterError> {
+        Self::open_with_map_inner(path, contract, effective, None)
+    }
+
+    /// Opens a device only after the device capability map declares the exact `EV_ABS` D-pad
+    /// hat consumed by this adapter.
+    ///
+    /// # Errors
+    /// Returns an error when the capability map cannot be read, is malformed, or does not
+    /// declare exactly one `ABS_HAT0X,ABS_HAT0Y` D-pad hat.
+    pub fn open_with_map_and_capabilities(
+        path: impl AsRef<Path>,
+        contract: &DeviceContract,
+        effective: EffectiveMap,
+        capabilities_path: impl AsRef<Path>,
+    ) -> Result<(Self, EffectiveMap), AdapterError> {
+        let source = std::fs::read_to_string(capabilities_path)?;
+        let declared_hat = DeclaredHatContract::parse(&source)?;
+        Self::open_with_map_inner(path, contract, effective, Some(declared_hat))
+    }
+
+    fn open_with_map_inner(
+        path: impl AsRef<Path>,
+        contract: &DeviceContract,
+        effective: EffectiveMap,
+        declared_hat: Option<DeclaredHatContract>,
+    ) -> Result<(Self, EffectiveMap), AdapterError> {
         let controls = contract
             .physical_controls
             .iter()
@@ -219,6 +322,7 @@ impl EvdevActionSource {
                 source: InputSourceId(effective.device_id().into()),
                 announced: false,
                 hat: HatPosition::default(),
+                declared_hat,
                 held_keys: BTreeSet::new(),
                 resyncing: false,
                 queued: VecDeque::new(),
@@ -436,7 +540,19 @@ impl EvdevActionSource {
             self.queued.push_back(EvdevInputEvent::Released { code });
         }
         if let Some(code) = hat_direction_code(axis, position) {
-            let pressed = self.pressed(code);
+            let pressed = if let Some(contract) = self.declared_hat {
+                let action = if self.capture_next {
+                    self.capture_next = false;
+                    contract
+                        .control(axis, position)
+                        .map(|control| ShellAction::Custom(format!("Capture.{control}")))
+                } else {
+                    contract.action(axis, position)
+                };
+                EvdevInputEvent::Pressed { code, action }
+            } else {
+                self.pressed(code)
+            };
             self.queued.push_back(pressed);
         }
     }
@@ -1239,6 +1355,7 @@ mod tests {
             source: InputSourceId("idle-test".into()),
             announced: true,
             hat: HatPosition::default(),
+            declared_hat: None,
             held_keys: BTreeSet::new(),
             resyncing: false,
             queued: VecDeque::new(),

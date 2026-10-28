@@ -12510,8 +12510,9 @@ code = "ABS_HAT0X,ABS_HAT0Y"
             "a guessed KEY_DOWN remains the negative control",
         );
 
-        // Build 50 receipt 12db0085 records these exact numeric frames. Its proof labels code 1
-        // ABS_HAT0Y, but Linux input-event-codes.h defines code 1 as ABS_Y and ABS_HAT0Y as 17.
+        // Build 50 receipt archive 12db008530feef8ba195d72e3c19ba6e2af9bda19f6cc56fb275419212a5d306
+        // records these exact numeric frames. Its proof labels code 1 ABS_HAT0Y, but Linux
+        // input-event-codes.h defines code 1 as ABS_Y and ABS_HAT0Y as 17.
         let receipt_actions = declared_pf_gamepad_actions_exact(
             &[
                 (EV_ABS, ABS_Y, 1),

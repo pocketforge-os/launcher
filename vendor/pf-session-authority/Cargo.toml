@@ -34,6 +34,10 @@ name = "pf-session-authorityd"
 path = "src/bin/pf-session-authorityd.rs"
 
 [[test]]
+name = "device_unit_contract"
+path = "tests/device_unit_contract.rs"
+
+[[test]]
 name = "orientation"
 path = "tests/orientation.rs"
 
@@ -47,6 +51,10 @@ path = "../pf-app-manifest"
 [dependencies.pf-hang-trigger]
 version = "0.0.1"
 path = "../pf-hang-trigger"
+
+[dependencies.pf-input-ipc]
+version = "0.0.1"
+path = "../pf-input-ipc"
 
 [dependencies.pf-peer-identity]
 version = "0.0.1"

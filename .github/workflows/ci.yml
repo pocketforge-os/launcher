@@ -30,6 +30,7 @@ jobs:
         run: |
           scripts/check-vendor.sh
           scripts/test-check-vendor.sh
+          scripts/test-vendored-runtime-contracts.sh
       - name: Host-route guards (canonical inventory, runtime#155/#154 port)
         run: |
           # Canonical tests/uinput_inventory.py ported from runtime

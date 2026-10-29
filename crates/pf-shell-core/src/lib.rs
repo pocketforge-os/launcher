@@ -746,6 +746,13 @@ enum PowerDialog {
     Confirm(PowerAction),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VariableQuickFocus {
+    Sleep,
+    Idle,
+    Screenshot,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LibraryFilter {
     #[default]
@@ -1095,10 +1102,13 @@ pub struct ShellCore {
     control_bindings: Vec<ControlBinding>,
     controls_status: Option<String>,
     power_capabilities: Vec<PowerCapability>,
+    power_capabilities_loaded: bool,
+    power_observation_loaded: bool,
     applied_idle_policy: IdlePolicy,
     idle_policy_loaded: bool,
     power_status: Option<String>,
     power_dialog: PowerDialog,
+    quick_focus_inert: bool,
     network_flow: NetworkFlow,
     network_state: Result<NetworkState, String>,
     wifi_networks: Vec<WifiNetwork>,
@@ -1268,10 +1278,13 @@ impl ShellCore {
             control_bindings: Vec::new(),
             controls_status: None,
             power_capabilities: Vec::new(),
+            power_capabilities_loaded: false,
+            power_observation_loaded: false,
             applied_idle_policy: IdlePolicy::default(),
             idle_policy_loaded: false,
             power_status: None,
             power_dialog: PowerDialog::Closed,
+            quick_focus_inert: false,
             network_flow: NetworkFlow::Rows,
             network_state: Err("Network status unavailable".into()),
             wifi_networks: Vec::new(),
@@ -1663,28 +1676,60 @@ impl ShellCore {
     }
 
     pub fn load_power(&mut self, port: &dyn PowerPort) {
+        let focused_variable_row = (self.route == Route::Quick
+            && self.power_dialog == PowerDialog::Closed
+            && !self.quick_focus_inert)
+            .then(|| self.variable_quick_focus())
+            .flatten();
         let capabilities = port.capabilities();
         let idle_policy = port.idle_policy();
         let next_capabilities = capabilities
             .as_ref()
             .map_or_else(|_| Vec::new(), Clone::clone);
+        let next_capabilities_loaded = capabilities.is_ok();
         let next_idle_policy_loaded = idle_policy.is_ok();
         let next_idle_policy = idle_policy.unwrap_or_else(|_| self.applied_idle_policy.clone());
-        let next_status = match (capabilities.is_err(), next_idle_policy_loaded) {
-            (false, true) => None,
-            (true, true) => Some("Power actions are unavailable".into()),
-            (false, false) => Some("Auto-sleep is unavailable".into()),
-            (true, false) => Some("Power controls are unavailable".into()),
+        let next_status = match (next_capabilities_loaded, next_idle_policy_loaded) {
+            (true, true) => None,
+            (false, true) => Some("Power actions are unavailable".into()),
+            (true, false) => Some("Auto-sleep is unavailable".into()),
+            (false, false) => Some("Power controls are unavailable".into()),
         };
-        if self.power_capabilities != next_capabilities
+        let observation_changed = !self.power_observation_loaded
+            || self.power_capabilities != next_capabilities
+            || self.power_capabilities_loaded != next_capabilities_loaded
             || self.idle_policy_loaded != next_idle_policy_loaded
-            || self.applied_idle_policy != next_idle_policy
-            || self.power_status != next_status
-        {
+            || self.applied_idle_policy != next_idle_policy;
+        let mut changed = observation_changed;
+        if observation_changed {
             self.power_capabilities = next_capabilities;
+            self.power_capabilities_loaded = next_capabilities_loaded;
+            self.power_observation_loaded = true;
             self.idle_policy_loaded = next_idle_policy_loaded;
             self.applied_idle_policy = next_idle_policy;
             self.power_status = next_status;
+            if self.route == Route::Quick && self.power_dialog == PowerDialog::Closed {
+                if self.quick_focus_inert {
+                    self.focus = self.focus_count();
+                } else if let Some(row) = focused_variable_row {
+                    if let Some(focus) = self.variable_quick_focus_row(row) {
+                        self.focus = focus;
+                    } else {
+                        self.quick_focus_inert = true;
+                        self.focus = self.focus_count();
+                    }
+                }
+            }
+        }
+        if let PowerDialog::Confirm(action) = self.power_dialog
+            && !self.supports_power(action)
+        {
+            self.power_dialog = PowerDialog::Closed;
+            self.quick_focus_inert = true;
+            self.focus = self.focus_count();
+            changed = true;
+        }
+        if changed {
             self.bump_revision();
         }
     }
@@ -1729,6 +1774,26 @@ impl ShellCore {
 
     fn screenshot_row(&self) -> usize {
         self.idle_row() + usize::from(self.idle_policy_loaded)
+    }
+
+    fn variable_quick_focus(&self) -> Option<VariableQuickFocus> {
+        if self.sleep_row() == Some(self.focus) {
+            Some(VariableQuickFocus::Sleep)
+        } else if self.idle_policy_loaded && self.idle_row() == self.focus {
+            Some(VariableQuickFocus::Idle)
+        } else if self.screenshot_row() == self.focus {
+            Some(VariableQuickFocus::Screenshot)
+        } else {
+            None
+        }
+    }
+
+    fn variable_quick_focus_row(&self, row: VariableQuickFocus) -> Option<usize> {
+        match row {
+            VariableQuickFocus::Sleep => self.sleep_row(),
+            VariableQuickFocus::Idle => self.idle_policy_loaded.then(|| self.idle_row()),
+            VariableQuickFocus::Screenshot => Some(self.screenshot_row()),
+        }
     }
 
     fn apply_effective(&mut self, key: &str, value: &PreferenceValue) {
@@ -2239,11 +2304,32 @@ impl ShellCore {
                 }
                 ShellAction::Activate => {
                     self.power_dialog = PowerDialog::Closed;
+                    if !self.supports_power(power_action) {
+                        self.quick_focus_inert = true;
+                        self.focus = self.focus_count();
+                        return None;
+                    }
                     self.focus = 0;
                     Some(Effect::RequestPower(power_action))
                 }
                 ShellAction::Custom(_) => None,
             };
+        }
+        if self.route == Route::Quick && self.quick_focus_inert {
+            match action {
+                ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
+                    self.quick_focus_inert = false;
+                    self.focus = 0;
+                    return None;
+                }
+                ShellAction::Move(AxisMove::Up | AxisMove::Left) => {
+                    self.quick_focus_inert = false;
+                    self.focus = self.focus_count().saturating_sub(1);
+                    return None;
+                }
+                ShellAction::Activate => return None,
+                ShellAction::Back | ShellAction::Custom(_) => {}
+            }
         }
         if self.presentation == Presentation::FirstRun {
             let rows = self.first_run_preferences();
@@ -3005,6 +3091,10 @@ impl ShellCore {
     }
 
     fn go(&mut self, route: Route) {
+        if self.route == Route::Quick && route != Route::Quick && self.quick_focus_inert {
+            self.focus = 0;
+            self.quick_focus_inert = false;
+        }
         self.saved_focus[self.route_index()] = self.focus;
         if route == Route::Quick {
             self.previous_route = self.route;
@@ -20470,16 +20560,8 @@ mod tests {
                 };
                 core.load_power(&power);
 
-                assert_eq!(
-                    core.power_dialog,
-                    PowerDialog::Closed,
-                    "{action:?}, backend_error={backend_error}"
-                );
-                assert_eq!(
-                    core.action(&ShellAction::Activate),
-                    None,
-                    "stale {action:?} confirmation dispatched, backend_error={backend_error}"
-                );
+                assert_eq!(core.power_dialog, PowerDialog::Closed);
+                assert_eq!(core.action(&ShellAction::Activate), None);
             }
         }
     }
@@ -20487,23 +20569,17 @@ mod tests {
     #[test]
     fn capability_refresh_preserves_quick_focus_identity_or_makes_it_inert() {
         let supported = || {
-            FakePowerPort::new(
-                vec![
-                    PowerCapability {
-                        action: PowerAction::PowerOff,
-                        support: Support::Supported,
-                    },
-                    PowerCapability {
-                        action: PowerAction::Restart,
-                        support: Support::Supported,
-                    },
-                    PowerCapability {
-                        action: PowerAction::Sleep,
-                        support: Support::Supported,
-                    },
-                ],
-                IdlePolicy::default(),
-            )
+            let capabilities = [
+                PowerAction::PowerOff,
+                PowerAction::Restart,
+                PowerAction::Sleep,
+            ]
+            .map(|action| PowerCapability {
+                action,
+                support: Support::Supported,
+            })
+            .to_vec();
+            FakePowerPort::new(capabilities, IdlePolicy::default())
         };
 
         let mut sleep_core = core();
@@ -20587,7 +20663,10 @@ mod tests {
                 }),
                 "Power action refused · policy",
             ),
-            (Err(PowerError::BackendUnavailable), "Power controls are unavailable"),
+            (
+                Err(PowerError::BackendUnavailable),
+                "Power controls are unavailable",
+            ),
         ] {
             core.power_request_result(result);
             core.load_power(&power);

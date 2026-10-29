@@ -2067,6 +2067,10 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     )?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
+    let mut power_capability_refresh = PowerCapabilityRefresher::new(
+        Instant::now(),
+        POWER_CAPABILITY_REFRESH_INTERVAL,
+    );
     loop {
         if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
             if let Err(error) = reload_catalog(
@@ -2105,6 +2109,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             core.load_device_status(device_status);
             next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
         }
+        power_capability_refresh.poll(Instant::now(), core, &*power);
         present_pending_reconnect_redraw(
             host,
             core,
@@ -3055,7 +3060,13 @@ impl PowerCapabilityRefresher {
         }
     }
 
-    fn poll(&mut self, _now: Instant, _core: &mut ShellCore, _power: &dyn PowerPort) {}
+    fn poll(&mut self, now: Instant, core: &mut ShellCore, power: &dyn PowerPort) {
+        if now < self.next_refresh {
+            return;
+        }
+        self.next_refresh = now + self.interval;
+        core.load_power(power);
+    }
 }
 
 impl SocketPowerPort {
@@ -5318,9 +5329,7 @@ mod durable_tests {
                 .children
                 .iter()
                 .find(|node| node.id.as_str() == id)
-                .unwrap()
-                .action
-                .clone()
+                .and_then(|node| node.action.clone())
         };
         for id in [
             "quick-power-power-off",
@@ -5334,6 +5343,12 @@ mod durable_tests {
         let interval = Duration::from_millis(10);
         let mut refresh = PowerCapabilityRefresher::new(started, interval);
         power.capabilities_result = Err(PowerError::BackendUnavailable);
+        refresh.poll(started + interval - Duration::from_nanos(1), &mut core, &power);
+        assert_eq!(
+            row_action(&core, "quick-power-power-off"),
+            Some(pf_scene::NodeAction::Activate),
+            "negative control: cached capability remains valid before the refresh deadline",
+        );
         refresh.poll(started + interval, &mut core, &power);
 
         for id in [
@@ -5361,6 +5376,13 @@ mod durable_tests {
                 "provider restoration must restore {id}",
             );
         }
+        let restored_revision = core.revision();
+        refresh.poll(started + interval + interval + interval, &mut core, &power);
+        assert_eq!(
+            core.revision(),
+            restored_revision,
+            "unchanged capability polls must not schedule redundant frames",
+        );
     }
 
     fn collect_focused<'a>(node: &'a Node, focused: &mut Vec<&'a Node>) {

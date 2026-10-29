@@ -1663,24 +1663,29 @@ impl ShellCore {
     }
 
     pub fn load_power(&mut self, port: &dyn PowerPort) {
-        self.bump_revision();
         let capabilities = port.capabilities();
         let idle_policy = port.idle_policy();
-
-        match &capabilities {
-            Ok(capabilities) => self.power_capabilities.clone_from(capabilities),
-            Err(_) => self.power_capabilities.clear(),
-        }
-        self.idle_policy_loaded = idle_policy.is_ok();
-        if let Ok(policy) = idle_policy {
-            self.applied_idle_policy = policy;
-        }
-        self.power_status = match (capabilities.is_err(), self.idle_policy_loaded) {
+        let next_capabilities = capabilities.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+        let next_idle_policy_loaded = idle_policy.is_ok();
+        let next_idle_policy = idle_policy
+            .unwrap_or_else(|_| self.applied_idle_policy.clone());
+        let next_status = match (capabilities.is_err(), next_idle_policy_loaded) {
             (false, true) => None,
             (true, true) => Some("Power actions are unavailable".into()),
             (false, false) => Some("Auto-sleep is unavailable".into()),
             (true, false) => Some("Power controls are unavailable".into()),
         };
+        if self.power_capabilities != next_capabilities
+            || self.idle_policy_loaded != next_idle_policy_loaded
+            || self.applied_idle_policy != next_idle_policy
+            || self.power_status != next_status
+        {
+            self.power_capabilities = next_capabilities;
+            self.idle_policy_loaded = next_idle_policy_loaded;
+            self.applied_idle_policy = next_idle_policy;
+            self.power_status = next_status;
+            self.bump_revision();
+        }
     }
 
     pub fn power_request_result(&mut self, result: Result<PowerRequestResult, PowerError>) {

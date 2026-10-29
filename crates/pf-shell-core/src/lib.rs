@@ -20587,11 +20587,13 @@ mod tests {
         sleep_core.load_power(&power);
         sleep_core.go(Route::Quick);
         sleep_core.focus = sleep_core.sleep_row().unwrap();
+        sleep_core.go(Route::Home);
         power.capabilities_result = Ok(vec![PowerCapability {
             action: PowerAction::Sleep,
             support: Support::Unsupported,
         }]);
         sleep_core.load_power(&power);
+        sleep_core.go(Route::Quick);
         assert_eq!(sleep_core.action(&ShellAction::Activate), None);
         assert_eq!(sleep_core.power_dialog, PowerDialog::Closed);
         power = supported();
@@ -20604,8 +20606,10 @@ mod tests {
         idle_core.load_power(&power);
         idle_core.go(Route::Quick);
         idle_core.focus = idle_core.idle_row();
+        idle_core.go(Route::Home);
         power.idle_policy_result = Err(PowerError::BackendUnavailable);
         idle_core.load_power(&power);
+        idle_core.go(Route::Quick);
         assert_eq!(idle_core.action(&ShellAction::Activate), None);
         power = supported();
         idle_core.load_power(&power);

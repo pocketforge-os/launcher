@@ -76,6 +76,7 @@ const EVDEV_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const EVDEV_REPEAT_INTERVAL: Duration = Duration::from_millis(80);
 const INTERACTIVE_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEVICE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const POWER_CAPABILITY_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const LOW_BATTERY_PERCENT: u8 = 20;
 static CATALOG_RELOAD_REQUESTED: LazyLock<Arc<AtomicBool>> =
     LazyLock::new(|| Arc::new(AtomicBool::new(false)));
@@ -3041,6 +3042,22 @@ struct SocketPowerPort {
     socket: PathBuf,
 }
 
+struct PowerCapabilityRefresher {
+    next_refresh: Instant,
+    interval: Duration,
+}
+
+impl PowerCapabilityRefresher {
+    fn new(now: Instant, interval: Duration) -> Self {
+        Self {
+            next_refresh: now + interval,
+            interval,
+        }
+    }
+
+    fn poll(&mut self, _now: Instant, _core: &mut ShellCore, _power: &dyn PowerPort) {}
+}
+
 impl SocketPowerPort {
     fn new(socket: PathBuf) -> Self {
         Self { socket }
@@ -5268,6 +5285,81 @@ mod durable_tests {
                 Err(PowerError::BackendUnavailable)
             );
             server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn power_capability_refresh_revokes_cached_actions_when_provider_disappears() {
+        let snapshot: CatalogSnapshot =
+            serde_json::from_str(include_str!("../fixtures/catalog.json")).unwrap();
+        let mut core = fixture_core(&snapshot, &pf_theme::flagship(), false);
+        let supported = vec![
+            PowerCapability {
+                action: PowerAction::PowerOff,
+                support: Support::Supported,
+            },
+            PowerCapability {
+                action: PowerAction::Restart,
+                support: Support::Supported,
+            },
+            PowerCapability {
+                action: PowerAction::Sleep,
+                support: Support::Supported,
+            },
+        ];
+        let mut power = FakePowerPort::new(supported.clone(), IdlePolicy::default());
+        core.load_power(&power);
+        core.action(&ShellAction::Custom("Quick.open".into()));
+
+        let row_action = |core: &ShellCore, id: &str| {
+            core.scene(offscreen_metrics(), "A Open")
+                .unwrap()
+                .root()
+                .children
+                .iter()
+                .find(|node| node.id.as_str() == id)
+                .unwrap()
+                .action
+                .clone()
+        };
+        for id in [
+            "quick-power-power-off",
+            "quick-power-restart",
+            "quick-power-sleep",
+        ] {
+            assert_eq!(row_action(&core, id), Some(pf_scene::NodeAction::Activate));
+        }
+
+        let started = Instant::now();
+        let interval = Duration::from_millis(10);
+        let mut refresh = PowerCapabilityRefresher::new(started, interval);
+        power.capabilities_result = Err(PowerError::BackendUnavailable);
+        refresh.poll(started + interval, &mut core, &power);
+
+        for id in [
+            "quick-power-power-off",
+            "quick-power-restart",
+            "quick-power-sleep",
+        ] {
+            assert_eq!(
+                row_action(&core, id),
+                None,
+                "provider loss must revoke cached semantic activation for {id}",
+            );
+        }
+
+        power.capabilities_result = Ok(supported);
+        refresh.poll(started + interval + interval, &mut core, &power);
+        for id in [
+            "quick-power-power-off",
+            "quick-power-restart",
+            "quick-power-sleep",
+        ] {
+            assert_eq!(
+                row_action(&core, id),
+                Some(pf_scene::NodeAction::Activate),
+                "provider restoration must restore {id}",
+            );
         }
     }
 

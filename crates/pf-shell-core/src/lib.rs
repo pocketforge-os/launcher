@@ -20438,6 +20438,171 @@ mod tests {
     }
 
     #[test]
+    fn capability_refresh_revokes_every_pending_power_confirmation() {
+        for (action, row) in [
+            (PowerAction::PowerOff, 2),
+            (PowerAction::Restart, 3),
+            (PowerAction::Sleep, 4),
+        ] {
+            for backend_error in [false, true] {
+                let mut core = core();
+                let mut power = FakePowerPort::new(
+                    vec![PowerCapability {
+                        action,
+                        support: Support::Supported,
+                    }],
+                    IdlePolicy::default(),
+                );
+                core.load_power(&power);
+                core.go(Route::Quick);
+                core.focus = row;
+                assert_eq!(core.action(&ShellAction::Activate), None);
+                core.action(&ShellAction::Move(AxisMove::Down));
+                assert_eq!(core.power_dialog, PowerDialog::Confirm(action));
+
+                power.capabilities_result = if backend_error {
+                    Err(PowerError::BackendUnavailable)
+                } else {
+                    Ok(vec![PowerCapability {
+                        action,
+                        support: Support::Unsupported,
+                    }])
+                };
+                core.load_power(&power);
+
+                assert_eq!(
+                    core.power_dialog,
+                    PowerDialog::Closed,
+                    "{action:?}, backend_error={backend_error}"
+                );
+                assert_eq!(
+                    core.action(&ShellAction::Activate),
+                    None,
+                    "stale {action:?} confirmation dispatched, backend_error={backend_error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn capability_refresh_preserves_quick_focus_identity_or_makes_it_inert() {
+        let supported = || {
+            FakePowerPort::new(
+                vec![
+                    PowerCapability {
+                        action: PowerAction::PowerOff,
+                        support: Support::Supported,
+                    },
+                    PowerCapability {
+                        action: PowerAction::Restart,
+                        support: Support::Supported,
+                    },
+                    PowerCapability {
+                        action: PowerAction::Sleep,
+                        support: Support::Supported,
+                    },
+                ],
+                IdlePolicy::default(),
+            )
+        };
+
+        let mut sleep_core = core();
+        let mut power = supported();
+        sleep_core.load_power(&power);
+        sleep_core.go(Route::Quick);
+        sleep_core.focus = sleep_core.sleep_row().unwrap();
+        power.capabilities_result = Ok(vec![PowerCapability {
+            action: PowerAction::Sleep,
+            support: Support::Unsupported,
+        }]);
+        sleep_core.load_power(&power);
+        assert_eq!(sleep_core.action(&ShellAction::Activate), None);
+        assert_eq!(sleep_core.power_dialog, PowerDialog::Closed);
+        power = supported();
+        sleep_core.load_power(&power);
+        assert_eq!(sleep_core.action(&ShellAction::Activate), None);
+        assert_eq!(sleep_core.power_dialog, PowerDialog::Closed);
+
+        let mut idle_core = core();
+        let mut power = supported();
+        idle_core.load_power(&power);
+        idle_core.go(Route::Quick);
+        idle_core.focus = idle_core.idle_row();
+        power.idle_policy_result = Err(PowerError::BackendUnavailable);
+        idle_core.load_power(&power);
+        assert_eq!(idle_core.action(&ShellAction::Activate), None);
+        power = supported();
+        idle_core.load_power(&power);
+        assert_eq!(idle_core.action(&ShellAction::Activate), None);
+
+        let mut capture_core = core();
+        let mut power = supported();
+        capture_core.load_power(&power);
+        capture_core.go(Route::Quick);
+        capture_core.focus = capture_core.screenshot_row();
+        power.capabilities_result = Ok(vec![]);
+        capture_core.load_power(&power);
+        assert_eq!(capture_core.focus, capture_core.screenshot_row());
+        assert_eq!(
+            capture_core.action(&ShellAction::Activate),
+            Some(Effect::CaptureScreenshot)
+        );
+
+        for (action, row) in [(PowerAction::PowerOff, 2), (PowerAction::Restart, 3)] {
+            let mut core = core();
+            let mut power = supported();
+            core.load_power(&power);
+            core.go(Route::Quick);
+            core.focus = row;
+            power.capabilities_result = Ok(vec![PowerCapability {
+                action,
+                support: Support::Unsupported,
+            }]);
+            core.load_power(&power);
+            assert_eq!(core.action(&ShellAction::Activate), None);
+            assert_eq!(core.power_dialog, PowerDialog::Closed);
+        }
+    }
+
+    #[test]
+    fn unchanged_capability_refresh_preserves_operation_feedback() {
+        let mut core = core();
+        let power = FakePowerPort::new(
+            vec![PowerCapability {
+                action: PowerAction::PowerOff,
+                support: Support::Supported,
+            }],
+            IdlePolicy::default(),
+        );
+        core.load_power(&power);
+
+        for (result, expected) in [
+            (
+                Ok(PowerRequestResult::Unsupported),
+                "That power action is unavailable",
+            ),
+            (
+                Ok(PowerRequestResult::Refused {
+                    reason: "policy".into(),
+                }),
+                "Power action refused · policy",
+            ),
+            (Err(PowerError::BackendUnavailable), "Power controls are unavailable"),
+        ] {
+            core.power_request_result(result);
+            core.load_power(&power);
+            assert_eq!(core.power_status.as_deref(), Some(expected));
+        }
+
+        core.idle_policy_result(Err(PowerError::BackendUnavailable));
+        core.load_power(&power);
+        assert_eq!(
+            core.power_status.as_deref(),
+            Some("Auto-sleep could not be changed")
+        );
+    }
+
+    #[test]
     fn destructive_power_defaults_to_cancel_and_cancel_has_no_effect() {
         let mut core = core();
         let power = FakePowerPort::new(

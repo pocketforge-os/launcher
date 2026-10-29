@@ -5342,7 +5342,9 @@ mod durable_tests {
         let mut refresh = PowerCapabilityRefresher::new(started, interval);
         power.capabilities_result = Err(PowerError::BackendUnavailable);
         refresh.poll(
-            started + interval - Duration::from_nanos(1),
+            (started + interval)
+                .checked_sub(Duration::from_nanos(1))
+                .expect("test interval exceeds one nanosecond"),
             &mut core,
             &power,
         );

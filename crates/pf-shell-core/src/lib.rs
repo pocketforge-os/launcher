@@ -1665,10 +1665,11 @@ impl ShellCore {
     pub fn load_power(&mut self, port: &dyn PowerPort) {
         let capabilities = port.capabilities();
         let idle_policy = port.idle_policy();
-        let next_capabilities = capabilities.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+        let next_capabilities = capabilities
+            .as_ref()
+            .map_or_else(|_| Vec::new(), Clone::clone);
         let next_idle_policy_loaded = idle_policy.is_ok();
-        let next_idle_policy = idle_policy
-            .unwrap_or_else(|_| self.applied_idle_policy.clone());
+        let next_idle_policy = idle_policy.unwrap_or_else(|_| self.applied_idle_policy.clone());
         let next_status = match (capabilities.is_err(), next_idle_policy_loaded) {
             (false, true) => None,
             (true, true) => Some("Power actions are unavailable".into()),

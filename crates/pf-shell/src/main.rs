@@ -2067,10 +2067,8 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     )?;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
-    let mut power_capability_refresh = PowerCapabilityRefresher::new(
-        Instant::now(),
-        POWER_CAPABILITY_REFRESH_INTERVAL,
-    );
+    let mut power_capability_refresh =
+        PowerCapabilityRefresher::new(Instant::now(), POWER_CAPABILITY_REFRESH_INTERVAL);
     loop {
         if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
             if let Err(error) = reload_catalog(
@@ -5343,7 +5341,11 @@ mod durable_tests {
         let interval = Duration::from_millis(10);
         let mut refresh = PowerCapabilityRefresher::new(started, interval);
         power.capabilities_result = Err(PowerError::BackendUnavailable);
-        refresh.poll(started + interval - Duration::from_nanos(1), &mut core, &power);
+        refresh.poll(
+            started + interval - Duration::from_nanos(1),
+            &mut core,
+            &power,
+        );
         assert_eq!(
             row_action(&core, "quick-power-power-off"),
             Some(pf_scene::NodeAction::Activate),

@@ -1676,10 +1676,16 @@ impl ShellCore {
     }
 
     pub fn load_power(&mut self, port: &dyn PowerPort) {
-        let focused_variable_row = (self.route == Route::Quick
-            && self.power_dialog == PowerDialog::Closed
+        let quick_slot = Self::route_slot(Route::Quick);
+        let quick_active = self.route == Route::Quick;
+        let quick_focus = if quick_active {
+            self.focus
+        } else {
+            self.saved_focus[quick_slot]
+        };
+        let focused_variable_row = (self.power_dialog == PowerDialog::Closed
             && !self.quick_focus_inert)
-            .then(|| self.variable_quick_focus())
+            .then(|| self.variable_quick_focus(quick_focus))
             .flatten();
         let capabilities = port.capabilities();
         let idle_policy = port.idle_policy();
@@ -1708,15 +1714,24 @@ impl ShellCore {
             self.idle_policy_loaded = next_idle_policy_loaded;
             self.applied_idle_policy = next_idle_policy;
             self.power_status = next_status;
-            if self.route == Route::Quick && self.power_dialog == PowerDialog::Closed {
-                if self.quick_focus_inert {
-                    self.focus = self.focus_count();
+            if self.power_dialog == PowerDialog::Closed {
+                let next_focus = if self.quick_focus_inert {
+                    Some(self.screenshot_row() + 1)
                 } else if let Some(row) = focused_variable_row {
                     if let Some(focus) = self.variable_quick_focus_row(row) {
-                        self.focus = focus;
+                        Some(focus)
                     } else {
                         self.quick_focus_inert = true;
-                        self.focus = self.focus_count();
+                        Some(self.screenshot_row() + 1)
+                    }
+                } else {
+                    None
+                };
+                if let Some(focus) = next_focus {
+                    if quick_active {
+                        self.focus = focus;
+                    } else {
+                        self.saved_focus[quick_slot] = focus;
                     }
                 }
             }
@@ -1776,12 +1791,12 @@ impl ShellCore {
         self.idle_row() + usize::from(self.idle_policy_loaded)
     }
 
-    fn variable_quick_focus(&self) -> Option<VariableQuickFocus> {
-        if self.sleep_row() == Some(self.focus) {
+    fn variable_quick_focus(&self, focus: usize) -> Option<VariableQuickFocus> {
+        if self.sleep_row() == Some(focus) {
             Some(VariableQuickFocus::Sleep)
-        } else if self.idle_policy_loaded && self.idle_row() == self.focus {
+        } else if self.idle_policy_loaded && self.idle_row() == focus {
             Some(VariableQuickFocus::Idle)
-        } else if self.screenshot_row() == self.focus {
+        } else if self.screenshot_row() == focus {
             Some(VariableQuickFocus::Screenshot)
         } else {
             None
@@ -3091,16 +3106,16 @@ impl ShellCore {
     }
 
     fn go(&mut self, route: Route) {
-        if self.route == Route::Quick && route != Route::Quick && self.quick_focus_inert {
-            self.focus = 0;
-            self.quick_focus_inert = false;
-        }
         self.saved_focus[self.route_index()] = self.focus;
         if route == Route::Quick {
             self.previous_route = self.route;
         }
         self.route = route;
-        self.focus = self.saved_focus[self.route_index()].min(self.focus_count().saturating_sub(1));
+        self.focus = if route == Route::Quick && self.quick_focus_inert {
+            self.focus_count()
+        } else {
+            self.saved_focus[self.route_index()].min(self.focus_count().saturating_sub(1))
+        };
         if route == Route::Search {
             self.search_key = Some(0);
         }

@@ -30,6 +30,10 @@ repository = "https://github.com/pocketforge-os/runtime"
 name = "pf_app_manifest"
 path = "src/lib.rs"
 
+[[test]]
+name = "runtime_root"
+path = "tests/runtime_root.rs"
+
 [dependencies.serde]
 version = "1"
 features = ["derive"]

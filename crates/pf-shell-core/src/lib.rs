@@ -2289,6 +2289,19 @@ impl ShellCore {
         if !self.has_shell_frame() {
             return None;
         }
+        if matches!(action, ShellAction::Custom(name) if name == "Power.open") {
+            // A physical press only presents controls. It cannot accept an existing
+            // confirmation or turn a queued gamepad Activate into a power command.
+            if self.presentation == Presentation::Ready {
+                self.power_dialog = PowerDialog::Closed;
+                if self.route != Route::Quick {
+                    self.go(Route::Quick);
+                }
+                self.quick_focus_inert = true;
+                self.focus = self.focus_count();
+            }
+            return None;
+        }
         if let PowerDialog::Confirm(power_action) = self.power_dialog {
             return match action {
                 ShellAction::Move(AxisMove::Down | AxisMove::Right) => {
@@ -4100,6 +4113,12 @@ impl ShellCore {
         #[cfg(test)]
         assert_eq!(semantic_snapshot(&root), semantics_before);
         apply_quiet_console_radius(&mut root, radius_scale);
+        if scene_core.route == Route::Quick && scene_core.quick_focus_inert {
+            return Some(
+                Scene::new_with_external_focus(root, NodeId::new("quiet-console").unwrap(), None)
+                    .expect("inert Quick sheet has no action selected"),
+            );
+        }
         Some(
             Scene::new(root, NodeId::new(focus_id).unwrap())
                 .expect("one deterministic focus owner"),
@@ -20171,6 +20190,74 @@ mod tests {
             "A Open · B Back",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn power_key_opens_quick_without_activating_or_confirming_power() {
+        let mut core = core();
+        core.load_power(&FakePowerPort::new(
+            vec![PowerCapability {
+                action: PowerAction::PowerOff,
+                support: Support::Supported,
+            }],
+            IdlePolicy::default(),
+        ));
+        assert_eq!(core.action(&ShellAction::Custom("Power.open".into())), None);
+        assert_eq!(core.route(), Route::Quick);
+        let scene = quick_scene(&core);
+        assert!(
+            scene
+                .root()
+                .children
+                .iter()
+                .any(|node| node.id.as_str() == "quick-panel-surface")
+        );
+        assert!(
+            scene
+                .root()
+                .children
+                .iter()
+                .filter(|node| node.id.as_str().starts_with("quick-"))
+                .all(|node| !node.state.focused)
+        );
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        core.power_dialog = PowerDialog::Confirm(PowerAction::PowerOff);
+        core.focus = 1;
+        assert_eq!(core.action(&ShellAction::Custom("Power.open".into())), None);
+        assert_eq!(core.power_dialog, PowerDialog::Closed);
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        core.action(&ShellAction::Back);
+        assert_eq!(core.route(), Route::Home);
+        core.action(&ShellAction::Custom("Power.open".into()));
+        for _ in 0..3 {
+            core.action(&ShellAction::Move(AxisMove::Down));
+        }
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(
+            core.power_dialog,
+            PowerDialog::Confirm(PowerAction::PowerOff)
+        );
+        core.action(&ShellAction::Move(AxisMove::Right));
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::RequestPower(PowerAction::PowerOff))
+        );
+    }
+
+    #[test]
+    fn power_key_cannot_replace_foreground_or_transition_screens() {
+        for presentation in [
+            Presentation::FirstRun,
+            Presentation::Starting,
+            Presentation::Running,
+            Presentation::RecoveryRequired,
+        ] {
+            let mut core = core();
+            core.presentation = presentation.clone();
+            assert_eq!(core.action(&ShellAction::Custom("Power.open".into())), None);
+            assert_eq!(core.route(), Route::Home);
+            assert_eq!(core.presentation, presentation);
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod power_key;
 #[cfg(feature = "desktop-sim")]
 use pf_app_manifest::Resolver;
 use pf_app_manifest::{
@@ -2065,6 +2066,14 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         &mut presented_revision,
         &mut session,
     )?;
+    // Enable only in the selected device shell. Desktop fixtures have no service
+    // identity and must not poll the privileged device endpoint.
+    let power_keys = std::env::var_os("PF_POWER_SOCK")
+        .map(PathBuf::from)
+        .map(power_key::Client::spawn)
+        .transpose()
+        .map_err(|error| format!("power key client: {error}"))?;
+    let mut pending_power_menu = None;
     let mut remap = GamepadRemap::with_store(map, remap_store);
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     let mut power_capability_refresh =
@@ -2087,6 +2096,29 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         let before = redraw_state(core);
         let before_metrics = host.metrics();
         drive_socket_session(core, &mut session)?;
+        if let Some(keys) = &power_keys {
+            if let Some(id) = keys.pending() {
+                pending_power_menu = Some(id);
+            }
+            // Never displace a running app or a recovery/first-run screen. Keep
+            // the request pending until the selected shell is ready to draw it.
+            if power_key::present_pending(
+                &mut pending_power_menu,
+                core.presentation() == &pf_shell_core::Presentation::Ready,
+                || {
+                    core.action(&ShellAction::Custom("Power.open".into()));
+                    let presented = present_interactive(host, core, &activate)?;
+                    if presented {
+                        frames.increment();
+                        presented_revision = core.revision();
+                    }
+                    Ok(presented)
+                },
+                |id| keys.presented(id),
+            )? {
+                continue;
+            }
+        }
         drive_automation(
             automation,
             host,

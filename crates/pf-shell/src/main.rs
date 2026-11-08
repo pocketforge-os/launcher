@@ -205,7 +205,7 @@ fn latency_trace(host: &str) -> Result<Option<LatencyTrace>, String> {
     .map_err(|error| format!("latency trace signal: {error}"))?;
     LatencyTrace::open(Path::new(&path), host).map(Some)
 }
-const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --input-capabilities <path> device input capability contract\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
+const HELP_BEFORE_DESKTOP_SIM_AUTHORITY: &str = "pf-shell modes:\n  --wayland                 interactive desktop window (--input uses evdev instead of keyboard)\n  --compositor              client-only compositor session from /run/pocketforge/session/environment\n  --fbdev                   interactive framebuffer\n  --rotate <0|90|180|270>   fbdev scene-to-buffer clockwise rotation\n  --input <evdev-node>      controller input (supported by fbdev and wayland)\n  --input-capabilities <path> device input capability contract\n  --session-environment <path> compositor publication path (test/fixture override)\n  --automation-socket <path> newline-JSON automation (interactive modes; requires PF_SHELL_AUTOMATION=1)\n  --catalog-root <dir>      scan installed app manifests\n  --state-root <dir>        per-app fetch state (default /var/lib/pocketforge/apps)\n  --catalog-snapshot <file> load an exact, read-only CatalogSnapshot JSON; relative art paths resolve beside the snapshot (conflicts with --catalog-root)\n  --platform-capabilities <path> platform runtime identity and capability contract\n";
 #[cfg(feature = "desktop-sim")]
 const DESKTOP_SIM_AUTHORITY_HELP: &str =
     "  --desktop-sim-authority   run the hermetic authority used by the desktop soak\n";
@@ -917,6 +917,8 @@ fn main() -> Result<(), String> {
     let state_dir = PathBuf::from(value(&args, "--state-dir").unwrap_or("./state"));
     let catalog_root =
         PathBuf::from(value(&args, "--catalog-root").unwrap_or("/opt/pocketforge/apps"));
+    let fetch_state_root =
+        PathBuf::from(value(&args, "--state-root").unwrap_or(pf_catalog::DEFAULT_FETCH_STATE_ROOT));
     let snapshot_path = value(&args, "--catalog-snapshot").map(PathBuf::from);
     let installed = if !fixture_mode && snapshot_path.is_none() {
         let platform_path = PathBuf::from(
@@ -926,11 +928,14 @@ fn main() -> Result<(), String> {
         if let Some(warning) = &platform.warning {
             eprintln!("{warning}");
         }
-        Some(installed_app_provider_for_platform(
-            &catalog_root,
-            state_dir.join("favorites.json"),
-            &platform.support,
-        ))
+        Some(
+            installed_app_provider_for_platform(
+                &catalog_root,
+                state_dir.join("favorites.json"),
+                &platform.support,
+            )
+            .with_state_root(fetch_state_root),
+        )
     } else {
         None
     };
@@ -5108,7 +5113,7 @@ fn device_status_root(override_root: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 fn validate_args(args: &[String]) -> Result<(), String> {
-    const VALUE_FLAGS: [&str; 16] = [
+    const VALUE_FLAGS: [&str; 17] = [
         "--automation-socket",
         "--authority-state-dir",
         "--catalog-root",
@@ -5123,6 +5128,7 @@ fn validate_args(args: &[String]) -> Result<(), String> {
         "--session-environment",
         "--session-socket",
         "--state-dir",
+        "--state-root",
         "--surface",
         "--text-scale",
     ];

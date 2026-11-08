@@ -198,8 +198,13 @@ pub enum ProviderError {
     Projection(#[from] serde_json::Error),
 }
 
+/// Default `pf-app-fetch --state-dir` parent (image unit `pf-app-fetch@.service`).
+pub const DEFAULT_FETCH_STATE_ROOT: &str = "/var/lib/pocketforge/apps";
+
 pub struct InstalledAppProvider {
     root: PathBuf,
+    /// Where `pf-app-fetch` keeps per-app state (`<state_root>/<app_id>/`).
+    state_root: PathBuf,
     favorites: PathBuf,
     runtime_family: String,
     runtime_abi: String,
@@ -217,6 +222,7 @@ impl InstalledAppProvider {
     ) -> Self {
         Self {
             root: root.into(),
+            state_root: PathBuf::from(DEFAULT_FETCH_STATE_ROOT),
             favorites: favorites.into(),
             runtime_family: family.into(),
             runtime_abi: abi.into(),
@@ -224,6 +230,13 @@ impl InstalledAppProvider {
             capabilities: BTreeSet::new(),
             observed_at: 0,
         }
+    }
+    /// Sets the root holding per-app fetch state (receipt, `.pf-fetch/`, dests),
+    /// separate from the read-only descriptor root.
+    #[must_use]
+    pub fn with_state_root(mut self, value: impl Into<PathBuf>) -> Self {
+        self.state_root = value.into();
+        self
     }
     #[must_use]
     pub fn with_supported_capabilities(mut self, values: impl IntoIterator<Item = String>) -> Self {
@@ -446,7 +459,7 @@ impl InstalledAppProvider {
             .fetch
             .as_ref()
             .filter(|fetch| fetch.enabled)
-            .map(|fetch| evaluate_fetch(dir, &m.app.id, fetch));
+            .map(|fetch| evaluate_fetch(&self.state_root.join(&m.app.id), &m.app.id, fetch));
         let incompatibility = if m.runtime.family != self.runtime_family {
             Some((
                 Availability::IncompatibleRuntime {
@@ -627,12 +640,12 @@ struct FetchEvaluation {
 /// setup surface consumed by the UI. The receipt's embedded manifest is only
 /// compared statistically (directory entries, file count, total bytes); no
 /// payload hashing happens here.
-fn evaluate_fetch(app_dir: &Path, app_id: &str, fetch: &Fetch) -> FetchEvaluation {
+fn evaluate_fetch(state_dir: &Path, app_id: &str, fetch: &Fetch) -> FetchEvaluation {
     let intent = FetchSetupIntent {
         app_id: app_id.to_owned(),
         unit: format!("pf-app-fetch@{app_id}.service"),
     };
-    let verdict = check_fetch_receipt(app_dir, fetch);
+    let verdict = check_fetch_receipt(state_dir, fetch);
     if verdict == ReceiptVerdict::Valid {
         return FetchEvaluation {
             ready: true,
@@ -647,7 +660,7 @@ fn evaluate_fetch(app_dir: &Path, app_id: &str, fetch: &Fetch) -> FetchEvaluatio
             },
         };
     }
-    let result = read_fetch_result(app_dir);
+    let result = read_fetch_result(state_dir);
     let outcome = result
         .as_ref()
         .and_then(|value| value.get("outcome"))
@@ -658,7 +671,7 @@ fn evaluate_fetch(app_dir: &Path, app_id: &str, fetch: &Fetch) -> FetchEvaluatio
         .and_then(Value::as_str)
         .map(str::to_owned);
     let setup = match outcome {
-        Some("running") => running_setup(intent, run_id, fetch_lock_held(app_dir)),
+        Some("running") => running_setup(intent, run_id, fetch_lock_held(state_dir)),
         Some("failed") => failed_setup(intent, result.as_ref(), run_id),
         _ => pending_setup(intent, fetch, verdict, run_id),
     };
@@ -765,8 +778,8 @@ fn pending_setup(
     }
 }
 
-fn check_fetch_receipt(app_dir: &Path, fetch: &Fetch) -> ReceiptVerdict {
-    let path = app_dir.join(".pf-fetch").join("receipt.json");
+fn check_fetch_receipt(state_dir: &Path, fetch: &Fetch) -> ReceiptVerdict {
+    let path = state_dir.join(".pf-fetch").join("receipt.json");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -793,13 +806,13 @@ fn check_fetch_receipt(app_dir: &Path, fetch: &Fetch) -> ReceiptVerdict {
     let Some(files) = receipt.get("files").and_then(Value::as_array) else {
         return ReceiptVerdict::Invalid;
     };
-    if files.is_empty() || !files.iter().all(|file| payload_matches(app_dir, file)) {
+    if files.is_empty() || !files.iter().all(|file| payload_matches(state_dir, file)) {
         return ReceiptVerdict::Invalid;
     }
     ReceiptVerdict::Valid
 }
 
-fn payload_matches(app_dir: &Path, file: &Value) -> bool {
+fn payload_matches(state_dir: &Path, file: &Value) -> bool {
     let Some(dest) = file.get("dest").and_then(Value::as_str) else {
         return false;
     };
@@ -836,7 +849,7 @@ fn payload_matches(app_dir: &Path, file: &Value) -> bool {
     let mut observed_count = 0_u64;
     let mut observed_bytes = 0_u64;
     stat_directory(
-        &app_dir.join(dest),
+        &state_dir.join(dest),
         &mut observed_count,
         &mut observed_bytes,
     ) && observed_count == file_count
@@ -885,15 +898,15 @@ fn stat_directory(dir: &Path, files: &mut u64, bytes: &mut u64) -> bool {
     true
 }
 
-fn read_fetch_result(app_dir: &Path) -> Option<Value> {
-    let text = fs::read_to_string(app_dir.join(".pf-fetch").join("result.json")).ok()?;
+fn read_fetch_result(state_dir: &Path) -> Option<Value> {
+    let text = fs::read_to_string(state_dir.join(".pf-fetch").join("result.json")).ok()?;
     serde_json::from_str(&text).ok()
 }
 
 /// Non-blocking flock probe. The lock file's content is never read: only
 /// whether a live pf-app-fetch run holds the flock matters.
-fn fetch_lock_held(app_dir: &Path) -> bool {
-    let path = app_dir.join(".pf-fetch").join("lock");
+fn fetch_lock_held(state_dir: &Path) -> bool {
+    let path = state_dir.join(".pf-fetch").join("lock");
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(error) => return error.kind() != std::io::ErrorKind::NotFound,

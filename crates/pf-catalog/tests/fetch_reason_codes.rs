@@ -11,13 +11,15 @@ use tempfile::tempdir;
 /// The fixture's two shapes, read without a TOML dependency (a new dev-dependency
 /// would force a vendor refresh): `[classes]` `name = "text"` lines and
 /// `[codes.<code>]` tables with a `class = "<name>"` line.
-fn parse_fixture() -> (Vec<(String, String)>, Vec<(String, String)>) {
+type Pairs = Vec<(String, String)>;
+
+fn parse_fixture() -> (Pairs, Pairs) {
     let (mut classes, mut codes) = (Vec::new(), Vec::new());
     let mut section = String::new();
     for line in TOML_TEXT.lines() {
         let line = line.trim();
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            section = name.to_owned();
+            name.clone_into(&mut section);
         } else if let Some((key, value)) = line.split_once(" = ") {
             let Some(value) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
                 continue;

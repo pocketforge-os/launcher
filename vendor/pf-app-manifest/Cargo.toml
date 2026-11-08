@@ -31,6 +31,14 @@ name = "pf_app_manifest"
 path = "src/lib.rs"
 
 [[test]]
+name = "fetch_v3"
+path = "tests/fetch_v3.rs"
+
+[[test]]
+name = "receipt_key"
+path = "tests/receipt_key.rs"
+
+[[test]]
 name = "runtime_root"
 path = "tests/runtime_root.rs"
 
@@ -47,3 +55,6 @@ version = "0.8"
 [dev-dependencies.pocketforge]
 version = "0.0.1"
 path = "../pocketforge"
+
+[dev-dependencies.serde_json]
+version = "1"

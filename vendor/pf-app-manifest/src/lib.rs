@@ -121,9 +121,10 @@ pub fn parse_capability_requirement(token: &str) -> CapabilityRequirement {
 pub struct Manifest {
     /// The app.toml schema version. Absent means 1 — the schema before
     /// `[display] orientations` existed; every manifest that was valid at 1
-    /// still parses unchanged and gets the defaults. The current version is
-    /// 2. Any other version is refused, mirroring the platform contract's
-    /// own version gate.
+    /// still parses unchanged and gets the defaults. Version 3 adds the
+    /// strict `[fetch]` rules (`source`, per-file `include`, `dest` and the
+    /// required `size`). Any other version is refused, mirroring the
+    /// platform contract's own version gate.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub app: App,
@@ -358,10 +359,29 @@ pub struct Fetch {
     pub enabled: bool,
     #[serde(default)]
     pub destination: Option<String>,
+    /// Where the archive bytes come from (schema_version 3). Absent or
+    /// `pinned` means the pinned URL and sha256 are the authority.
+    /// `vendor-signed-pointer` is reserved per owner decision D4 (on-device
+    /// latest-pointers only as vendor-signed pointers with a pinned key and a
+    /// floor): it parses, but validation refuses it until that is implemented.
+    #[serde(default)]
+    pub source: Option<FetchSource>,
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub files: Option<Vec<FetchFile>>,
+}
+
+/// The `[fetch] source` vocabulary (schema_version 3).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FetchSource {
+    /// The pinned URL and sha256 are the authority (the default).
+    #[default]
+    Pinned,
+    /// Reserved per owner decision D4 (vendor-signed pointers with a pinned key
+    /// and a floor); parsed but refused.
+    VendorSignedPointer,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -379,6 +399,13 @@ pub struct FetchFile {
     pub strip_components: Option<u64>,
     #[serde(default)]
     pub executable: Option<BTreeMap<String, String>>,
+    /// Only extract archive members matching one of these relative prefixes
+    /// (schema_version 3). A trailing `/` names a directory subtree; a bare
+    /// entry names one file. Prefixes match archive member names BEFORE
+    /// `strip_components` is applied (W0 contract, mission-control#709 §4.6
+    /// item 5).
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -425,8 +452,8 @@ pub fn parse_manifest(source: &str) -> Result<Manifest, ManifestError> {
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
-    if !matches!(manifest.schema_version, 1 | 2) {
-        return invalid_manifest("schema_version must be 1 or 2");
+    if !matches!(manifest.schema_version, 1..=3) {
+        return invalid_manifest("schema_version must be 1, 2 or 3");
     }
     if let Some(display) = &manifest.display {
         validate_display(display)?;
@@ -489,6 +516,16 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
     }
 
     if let Some(fetch) = &manifest.fetch {
+        if manifest.schema_version < 3 {
+            if fetch.source.is_some() {
+                return invalid_manifest("fetch.source requires schema_version 3");
+            }
+            for file in fetch.files.as_deref().unwrap_or_default() {
+                if file.include.is_some() {
+                    return invalid_manifest("fetch.include requires schema_version 3");
+                }
+            }
+        }
         if fetch.enabled && fetch.reason.as_deref().unwrap_or_default().is_empty() {
             return invalid_manifest("enabled fetch requires reason");
         }
@@ -502,8 +539,189 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
                 return invalid_manifest("invalid fetch sha256");
             }
         }
+        if manifest.schema_version == 3 {
+            if fetch.enabled
+                && fetch
+                    .files
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|file| file.size.is_none())
+            {
+                return invalid_manifest("v3 fetch file requires size when fetch is enabled");
+            }
+            for file in fetch.files.as_deref().unwrap_or_default() {
+                if let Some(include) = &file.include {
+                    validate_fetch_include(include)?;
+                }
+                if let Some(dest) = &file.dest {
+                    validate_fetch_dest(dest)?;
+                }
+            }
+            if fetch.source == Some(FetchSource::VendorSignedPointer) {
+                return invalid_manifest(
+                    "fetch.source vendor-signed-pointer is reserved; not supported yet",
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// Validate a v3 `[[fetch.files]] include` list: relative archive-member
+/// prefixes with no empty, `.` or `..` component. An entry either names a file
+/// or, with a trailing `/`, a directory subtree.
+fn validate_fetch_include(include: &[String]) -> Result<(), ManifestError> {
+    if include.is_empty() {
+        return invalid_manifest("invalid fetch include: empty list");
+    }
+    for entry in include {
+        let trimmed = entry.strip_suffix('/').unwrap_or(entry);
+        let valid = !entry.is_empty()
+            && !entry.starts_with('/')
+            && !entry.contains("//")
+            && !trimmed.is_empty()
+            && trimmed
+                .split('/')
+                .all(|component| !component.is_empty() && component != "." && component != "..");
+        if !valid {
+            return invalid_manifest("invalid fetch include entry");
+        }
+    }
+    Ok(())
+}
+
+/// Validate a v3 `[[fetch.files]] dest`: exactly one relative path component,
+/// outside the reserved per-app state directories.
+fn validate_fetch_dest(dest: &str) -> Result<(), ManifestError> {
+    let valid = !dest.is_empty()
+        && dest != "."
+        && dest != ".."
+        && !dest.contains('/')
+        && !matches!(dest, "config" | "state" | "cache");
+    if !valid {
+        return invalid_manifest(
+            "invalid fetch dest: must be one path component outside config, state and cache",
+        );
+    }
+    Ok(())
+}
+
+/// Canonical JSON of an enabled `[fetch]` block for the receipt key (infra-107.4 §4.6
+/// item 3, tsp-ziac.4.3.5). Compact JSON, keys sorted, UTF-8, decimal integers, built from
+/// the typed parsed values (never the raw TOML):
+///
+/// `{"destination":…,"files":[{"dest":…,"format":…,"include":…,"sha256":…,"size":…,
+/// "strip_components":…,"url":…},…],"source":…}`
+///
+/// - `source` absent encodes as `"pinned"`; `strip_components` absent as `0`; `include`
+///   absent as `null`. Any other absent optional (`destination`, `dest`, `format`, `size`)
+///   encodes as `null`.
+/// - Files stay in declared order.
+/// - Excluded: `reason` (a text change never forces a re-download), `enabled` (only an
+///   enabled block has a key), `executable` (refused by pf-app-fetch) and `schema_version`.
+///
+/// Strings are escaped exactly as `serde_json` does (`\"`, `\\`, `\b \f \n \r \t`, other
+/// controls as lowercase `\u00xx`, everything else raw UTF-8), so any sorted, compact
+/// serde_json rendering reproduces these bytes. `None` for a disabled block.
+pub fn fetch_receipt_canonical_json(fetch: &Fetch) -> Option<String> {
+    if !fetch.enabled {
+        return None;
+    }
+    let mut out = String::from("{\"destination\":");
+    json_opt_str(&mut out, fetch.destination.as_deref());
+    out.push_str(",\"files\":[");
+    for (index, file) in fetch
+        .files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"dest\":");
+        json_opt_str(&mut out, file.dest.as_deref());
+        out.push_str(",\"format\":");
+        json_opt_str(&mut out, file.format.as_deref());
+        out.push_str(",\"include\":");
+        match &file.include {
+            None => out.push_str("null"),
+            Some(entries) => {
+                out.push('[');
+                for (i, entry) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    json_str(&mut out, entry);
+                }
+                out.push(']');
+            }
+        }
+        out.push_str(",\"sha256\":");
+        json_str(&mut out, &file.sha256);
+        out.push_str(",\"size\":");
+        match file.size {
+            Some(size) => out.push_str(&size.to_string()),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"strip_components\":");
+        out.push_str(&file.strip_components.unwrap_or(0).to_string());
+        out.push_str(",\"url\":");
+        json_str(&mut out, &file.url);
+        out.push('}');
+    }
+    out.push_str("],\"source\":");
+    json_str(
+        &mut out,
+        match fetch.source.unwrap_or_default() {
+            FetchSource::Pinned => "pinned",
+            FetchSource::VendorSignedPointer => "vendor-signed-pointer",
+        },
+    );
+    out.push('}');
+    Some(out)
+}
+
+/// The ONE shared receipt key (infra-107.4 §4.6 item 3): lowercase hex SHA256 of
+/// [`fetch_receipt_canonical_json`]. pf-app-fetch (W3) writes it into
+/// `.pf-fetch/receipt.json`; the launcher (W4) recomputes it to decide Ready versus
+/// `receipt_stale`. The committed vector is `tests/receipt_key.rs`. `None` for a disabled
+/// block.
+pub fn fetch_receipt_key(fetch: &Fetch) -> Option<String> {
+    let json = fetch_receipt_canonical_json(fetch)?;
+    Some(
+        Sha256::digest(json.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+fn json_opt_str(out: &mut String, value: Option<&str>) {
+    match value {
+        Some(value) => json_str(out, value),
+        None => out.push_str("null"),
+    }
+}
+
+fn json_str(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 /// Validate the `[display]` table: a NON-EMPTY list of the typed

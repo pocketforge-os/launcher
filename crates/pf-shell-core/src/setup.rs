@@ -5,7 +5,7 @@
 //! `cancel_setup` answers to UI state, and re-checks the item while its unit runs (N6).
 
 use super::{Effect, ShellCore};
-use pf_catalog::{Availability, FetchRunProbe, FetchSetup, FetchSetupState};
+use pf_catalog::{Availability, FetchRunProbe, FetchSetup, FetchSetupIntent, FetchSetupState};
 use pf_session_authority::{SetupCancel, SetupStart};
 
 /// How often a watched item's `.pf-fetch/` state is re-read.
@@ -13,6 +13,18 @@ pub const SETUP_PROBE_INTERVAL_MS: u64 = 500;
 /// How long a start may take to show a run (the lock, or a new `result.json`) before the
 /// launcher stops watching and re-scans anyway.
 pub const SETUP_START_GRACE_MS: u64 = 15_000;
+/// pf-app-fetch drops its lock before it writes the final `result.json`: after the lock is
+/// gone, a `running` outcome is given this long to turn final before the run counts as
+/// crashed (review r1 P2-1).
+pub const SETUP_SETTLE_MS: u64 = 2_000;
+
+/// The setup effect awaiting the authority's answer, with the run seen before the call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingSetup {
+    pub(crate) intent: FetchSetupIntent,
+    pub(crate) baseline_run_id: Option<String>,
+    pub(crate) baseline_running: bool,
+}
 
 /// What the setup button does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +49,7 @@ pub struct SetupWatch {
     started_ms: u64,
     next_probe_ms: u64,
     lock_seen: bool,
+    baseline_running: bool,
 }
 
 impl SetupWatch {
@@ -48,7 +61,14 @@ impl SetupWatch {
             started_ms: now_ms,
             next_probe_ms: now_ms,
             lock_seen: false,
+            baseline_running: false,
         }
+    }
+    /// The run before the call was `running` (setting up or interrupted).
+    #[must_use]
+    pub const fn with_baseline_running(mut self, running: bool) -> Self {
+        self.baseline_running = running;
+        self
     }
     #[must_use]
     pub fn app_id(&self) -> &str {
@@ -128,7 +148,14 @@ impl ShellCore {
     pub(crate) fn setup_effect(&mut self, item: usize) -> Option<Effect> {
         let action = self.setup_view(item)?.action?;
         let setup = self.item_fetch_setup(item)?.clone();
-        self.pending_setup = Some((setup.intent.clone(), setup.run_id));
+        self.pending_setup = Some(PendingSetup {
+            intent: setup.intent.clone(),
+            baseline_run_id: setup.run_id,
+            baseline_running: matches!(
+                setup.state,
+                FetchSetupState::SettingUp | FetchSetupState::Interrupted
+            ),
+        });
         Some(match action {
             SetupAction::Start => Effect::StartSetup(setup.intent),
             SetupAction::Cancel => Effect::CancelSetup(setup.intent),
@@ -153,7 +180,12 @@ impl ShellCore {
     /// already-running both watch the item; not-enabled and unavailable leave no retry
     /// until the next catalog reload; busy and errors keep the retry.
     pub fn setup_start_result(&mut self, result: Result<SetupStart, &str>, now_ms: u64) {
-        let Some((intent, baseline)) = self.pending_setup.take() else {
+        let Some(PendingSetup {
+            intent,
+            baseline_run_id: baseline,
+            ..
+        }) = self.pending_setup.take()
+        else {
             return;
         };
         self.bump_revision();
@@ -184,7 +216,7 @@ impl ShellCore {
     /// Applies the authority's answer to the last [`Effect::CancelSetup`]. The watch stays:
     /// the run itself reports `cancelled` and releases the lock.
     pub fn setup_cancel_result(&mut self, result: Result<SetupCancel, &str>) {
-        let Some((intent, _)) = self.pending_setup.take() else {
+        let Some(PendingSetup { intent, .. }) = self.pending_setup.take() else {
             return;
         };
         self.bump_revision();
@@ -231,6 +263,9 @@ impl ShellCore {
         self.bump_revision();
         true
     }
+
+    /// Arms an N6 watch for every item whose run is live on catalog load (review r1 P2-2).
+    pub(crate) fn adopt_running_setups(&mut self) {}
 
     #[must_use]
     pub fn setup_watching(&self, app_id: &str) -> bool {

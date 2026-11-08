@@ -40,7 +40,8 @@ mod design_generated;
 mod design_manual;
 mod setup;
 pub use setup::{
-    SETUP_PROBE_INTERVAL_MS, SETUP_START_GRACE_MS, SetupAction, SetupView, SetupWatch,
+    SETUP_PROBE_INTERVAL_MS, SETUP_SETTLE_MS, SETUP_START_GRACE_MS, SetupAction, SetupView,
+    SetupWatch,
 };
 
 use design_generated::{
@@ -1080,7 +1081,7 @@ pub struct ShellCore {
     /// Items whose setup the authority refused with no retry, until the next catalog reload.
     setup_blocked: std::collections::BTreeSet<String>,
     /// The intent and pre-call `run_id` of the setup effect awaiting its answer.
-    pending_setup: Option<(pf_catalog::FetchSetupIntent, Option<String>)>,
+    pending_setup: Option<setup::PendingSetup>,
     safe_return_failed: bool,
     session_status: Option<String>,
     pending_ack: bool,
@@ -1233,7 +1234,7 @@ impl ShellCore {
         F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let items = Self::catalog_items(snapshot, &mut resolve_art);
-        Self {
+        let mut core = Self {
             revision: 0,
             route: Route::Home,
             previous_route: Route::Home,
@@ -1318,7 +1319,9 @@ impl ShellCore {
             attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
-        }
+        };
+        core.adopt_running_setups();
+        core
     }
 
     pub fn reload_catalog_with_art<F>(&mut self, snapshot: &CatalogSnapshot, resolve_art: F)
@@ -1333,6 +1336,7 @@ impl ShellCore {
         self.items = Self::catalog_items(snapshot, resolve_art);
         // A no-retry setup refusal holds only until the descriptor is read again.
         self.setup_blocked.clear();
+        self.adopt_running_setups();
         self.selected_item = selected_id
             .as_deref()
             .and_then(|id| self.items.iter().position(|item| item.id == id));

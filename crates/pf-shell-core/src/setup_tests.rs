@@ -1,6 +1,7 @@
 //! W4b setup-action tests (tsp-ziac.4.3.8): intent → effect, answer → UI state, N6 watch.
 
 use super::*;
+use crate::SETUP_SETTLE_MS;
 use crate::{Route, ShellAction};
 use pf_catalog::{
     AppKind, AppManifestRef, Availability, CatalogItem, CatalogSnapshot, FetchSetupIntent,
@@ -371,9 +372,13 @@ fn watch_ends_on_a_final_result_with_a_new_run_id_even_if_the_lock_was_never_see
             "{outcome}"
         );
     }
-    // An interrupted new run (running, no lock) is over too.
+    // A new run that reads running without the lock may be between dropping the lock and
+    // writing its final result (review r1 P2-1): it gets the settle, then counts as crashed.
     let mut watch = SetupWatch::new(APP, Some("run-0".into()), 0);
-    assert!(watch.observe(500, &probe(false, Some("running"), Some("run-1"))));
+    let unlocked = probe(false, Some("running"), Some("run-1"));
+    assert!(!watch.observe(500, &unlocked));
+    assert!(!watch.observe(500 + SETUP_SETTLE_MS - 1, &unlocked));
+    assert!(watch.observe(500 + SETUP_SETTLE_MS, &unlocked));
 }
 
 #[test]
@@ -407,8 +412,120 @@ fn core_rechecks_due_items_and_asks_for_one_rescan_when_the_run_ends() {
 fn a_running_answer_uses_the_current_run_id_as_the_baseline() {
     // setup_running while run-1 holds the lock: its own final result ends the watch.
     let mut core = details(FetchSetupState::SettingUp, Some("run-1"));
-    core.pending_setup = Some((intent(), Some("run-1".into())));
+    core.setup_watches.clear();
+    core.pending_setup = Some(PendingSetup {
+        intent: intent(),
+        baseline_run_id: Some("run-1".into()),
+        baseline_running: true,
+    });
     core.setup_start_result(Ok(SetupStart::AlreadyRunning), 0);
     assert!(!core.observe_setup(APP, 0, &probe(true, Some("running"), Some("run-1"))));
     assert!(core.observe_setup(APP, 500, &probe(false, Some("ready"), Some("run-1"))));
+}
+
+// --- review r1 --------------------------------------------------------------------------
+
+#[test]
+fn p2_1_a_released_lock_waits_for_the_final_result() {
+    // pf-app-fetch drops the flock before finish() writes the final result.json.
+    let mut watch = SetupWatch::new(APP, Some("run-0".into()), 0);
+    assert!(!watch.observe(0, &probe(true, Some("running"), Some("run-1"))));
+    let between = probe(false, Some("running"), Some("run-1"));
+    assert!(
+        !watch.observe(500, &between),
+        "lock gone, result not final yet"
+    );
+    assert!(!watch.observe(1_000, &between));
+    assert!(watch.observe(1_500, &probe(false, Some("failed"), Some("run-1"))));
+}
+
+#[test]
+fn p2_1_the_settle_ends_a_run_that_crashed_after_its_lock_was_seen() {
+    let mut watch = SetupWatch::new(APP, None, 0);
+    assert!(!watch.observe(0, &probe(true, Some("running"), Some("run-1"))));
+    let crashed = probe(false, Some("running"), Some("run-1"));
+    assert!(!watch.observe(500, &crashed));
+    assert!(!watch.observe(500 + SETUP_SETTLE_MS - 1, &crashed));
+    assert!(watch.observe(500 + SETUP_SETTLE_MS, &crashed));
+}
+
+#[test]
+fn p2_1_a_relocked_run_restarts_the_settle() {
+    let mut watch = SetupWatch::new(APP, None, 0);
+    assert!(!watch.observe(0, &probe(true, Some("running"), Some("run-1"))));
+    assert!(!watch.observe(500, &probe(false, Some("running"), Some("run-1"))));
+    assert!(!watch.observe(1_000, &probe(true, Some("running"), Some("run-2"))));
+    let unlocked = probe(false, Some("running"), Some("run-2"));
+    assert!(!watch.observe(1_000 + SETUP_SETTLE_MS, &unlocked));
+    assert!(watch.observe(1_500 + SETUP_SETTLE_MS, &unlocked));
+}
+
+#[test]
+fn n2_a_same_run_leaving_running_ends_the_watch_without_the_lock_ever_seen() {
+    let mut watch = SetupWatch::new(APP, Some("run-1".into()), 0).with_baseline_running(true);
+    assert!(!watch.observe(0, &probe(false, Some("running"), Some("run-1"))));
+    assert!(watch.observe(500, &probe(false, Some("failed"), Some("run-1"))));
+    // A baseline that was already final under that run_id is the stale verdict, not news.
+    let mut watch = SetupWatch::new(APP, Some("run-1".into()), 0);
+    assert!(!watch.observe(500, &probe(false, Some("failed"), Some("run-1"))));
+}
+
+#[test]
+fn n2_a_start_from_an_interrupted_run_carries_the_running_baseline() {
+    let mut core = details(FetchSetupState::Interrupted, Some("run-1"));
+    assert!(matches!(
+        core.action(&ShellAction::Activate),
+        Some(Effect::StartSetup(_))
+    ));
+    core.setup_start_result(Ok(SetupStart::AlreadyRunning), 0);
+    assert!(core.observe_setup(APP, 0, &probe(false, Some("ready"), Some("run-1"))));
+}
+
+#[test]
+fn p2_2_setting_up_items_are_adopted_on_boot_and_reload_once() {
+    let mut core = details(FetchSetupState::SettingUp, Some("run-1"));
+    assert!(
+        core.setup_watching(APP),
+        "a run started before boot is watched"
+    );
+    core.reload_catalog_with_art(
+        &snapshot(vec![item(
+            Some(setup(FetchSetupState::SettingUp, Some("run-1"))),
+            needs_setup(),
+        )]),
+        |_, _| None,
+    );
+    assert_eq!(core.setup_probes_due(0), vec![APP.to_owned()], "one watch");
+    // Idle items are not adopted.
+    let idle = details(FetchSetupState::Failed, Some("run-1"));
+    assert!(!idle.setup_watching(APP));
+}
+
+#[test]
+fn p2_2_cancelling_an_adopted_run_ends_with_exactly_one_rescan() {
+    let mut core = details(FetchSetupState::SettingUp, Some("run-1"));
+    assert_eq!(
+        core.action(&ShellAction::Activate),
+        Some(Effect::CancelSetup(intent()))
+    );
+    core.setup_cancel_result(Ok(SetupCancel::Requested));
+    assert!(!core.observe_setup(APP, 0, &probe(true, Some("running"), Some("run-1"))));
+    let cancelled = probe(false, Some("failed"), Some("run-1"));
+    assert!(core.observe_setup(APP, 500, &cancelled), "one re-scan");
+    assert!(!core.setup_watching(APP));
+    assert!(!core.observe_setup(APP, 1_000, &cancelled));
+    assert_eq!(core.setup_probes_due(10_000), Vec::<String>::new());
+}
+
+#[test]
+fn p2_2_a_cancel_arms_a_watch_when_none_exists() {
+    let mut core = details(FetchSetupState::SettingUp, Some("run-1"));
+    core.setup_watches.clear();
+    assert_eq!(
+        core.action(&ShellAction::Activate),
+        Some(Effect::CancelSetup(intent()))
+    );
+    core.setup_cancel_result(Ok(SetupCancel::Requested));
+    assert!(core.setup_watching(APP));
+    assert!(core.observe_setup(APP, 0, &probe(false, Some("failed"), Some("run-1"))));
 }

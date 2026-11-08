@@ -14682,6 +14682,43 @@ mod setup_wiring_tests {
     }
 
     #[test]
+    fn review_r1_p2_2_cancelling_a_run_started_elsewhere_rescans_exactly_once() {
+        // The run was live before the launcher booted: no start_setup from this launcher.
+        let mut core = details_core("setting_up");
+        let effect = core.action(&ShellAction::Activate).expect("cancel effect");
+        let mut setup = FakeSetup {
+            cancel: VecDeque::from([Ok(SetupCancel::Requested)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        let cancelled = FetchRunProbe {
+            lock_held: false,
+            outcome: Some("failed".into()),
+            run_id: Some("run-0".into()),
+        };
+        let catalog = ProbeCatalog {
+            snapshot: fetch_snapshot("setting_up"),
+            probes: RefCell::new(VecDeque::from([
+                FetchRunProbe {
+                    lock_held: true,
+                    outcome: Some("running".into()),
+                    run_id: Some("run-0".into()),
+                },
+                cancelled.clone(),
+                cancelled,
+            ])),
+            probed: RefCell::new(Vec::new()),
+        };
+        let step = pf_shell_core::SETUP_PROBE_INTERVAL_MS;
+        let rescans = [0, step, 2 * step, 3 * step]
+            .into_iter()
+            .filter(|&now| drive_setup_watches(&mut core, &catalog, now))
+            .count();
+        assert_eq!(rescans, 1);
+        assert_eq!(catalog.probed.borrow().len(), 2);
+    }
+
+    #[test]
     fn a_catalog_without_fetch_state_ends_the_watch_at_the_start_grace() {
         let mut core = details_core("not_started");
         let effect = core.action(&ShellAction::Activate).unwrap();

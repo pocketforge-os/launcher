@@ -747,6 +747,11 @@ pub trait FavoriteCatalog {
     /// # Errors
     /// Returns a provider diagnostic when the catalog cannot be read.
     fn snapshot(&self) -> Result<CatalogSnapshot, String>;
+    /// Probes one app's `[fetch]` setup run for the W4b re-check (tsp-ziac.4.3.8).
+    /// Catalogs without fetch state (fixtures) answer `None`.
+    fn probe_fetch_run(&self, _app_id: &str) -> Option<pf_catalog::FetchRunProbe> {
+        None
+    }
     /// Commits a favorite value against the expected catalog revision.
     ///
     /// # Errors
@@ -775,6 +780,9 @@ pub trait FavoriteCatalog {
 impl FavoriteCatalog for InstalledAppProvider {
     fn snapshot(&self) -> Result<CatalogSnapshot, String> {
         InstalledAppProvider::snapshot(self).map_err(|error| format!("{error:?}"))
+    }
+    fn probe_fetch_run(&self, app_id: &str) -> Option<pf_catalog::FetchRunProbe> {
+        Some(InstalledAppProvider::probe_fetch_run(self, app_id))
     }
     fn set_favorite(
         &self,

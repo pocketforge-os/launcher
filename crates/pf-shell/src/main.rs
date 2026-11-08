@@ -35,7 +35,7 @@ use pf_scene::{Insets, Node, Orientation, Role, SurfaceMetrics};
 use pf_session_authority::{
     Authority, CommandSystem, CommandTemplates, FileStore, serve_connection,
 };
-use pf_session_authority::{EndPrecision, EndStamp, HistoryEntry};
+use pf_session_authority::{EndPrecision, EndStamp, FetchSetupApi, HistoryEntry};
 use pf_session_client::{SessionClient, SocketTransport};
 use pf_shell::{
     EvdevActionSource, EvdevInputEvent, FavoriteCatalog, GamepadRemap, commit_favorite,
@@ -2083,6 +2083,7 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     let mut next_device_status_refresh = Instant::now() + DEVICE_STATUS_REFRESH_INTERVAL;
     let mut power_capability_refresh =
         PowerCapabilityRefresher::new(Instant::now(), POWER_CAPABILITY_REFRESH_INTERVAL);
+    let setup_clock = Instant::now();
     loop {
         if CATALOG_RELOAD_REQUESTED.swap(false, Ordering::AcqRel) {
             if let Err(error) = reload_catalog(
@@ -2101,6 +2102,9 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
         let before = redraw_state(core);
         let before_metrics = host.metrics();
         drive_socket_session(core, &mut session)?;
+        if drive_setup_watches(core, catalog, elapsed_ms(setup_clock)) {
+            CATALOG_RELOAD_REQUESTED.store(true, Ordering::Release);
+        }
         if let Some(keys) = &power_keys {
             if let Some(id) = keys.pending() {
                 pending_power_menu = Some(id);
@@ -2216,6 +2220,9 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
                 Err(SessionError::BackendUnavailable) => core.session_backend_unavailable(),
                 Err(error) => return Err(format!("session: {error:?}")),
             },
+            Some(effect @ (Effect::StartSetup(_) | Effect::CancelSetup(_))) => {
+                handle_setup_effect(core, &mut session, &effect, elapsed_ms(setup_clock));
+            }
             Some(Effect::EnterRecovery) => return Ok(()),
             Some(Effect::ChangePreference(change)) => {
                 preferences
@@ -2363,6 +2370,48 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
             &mut session,
         )?;
     }
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// W4b (tsp-ziac.4.3.8): the W4 setup intent becomes the session authority's
+/// `start_setup` / `cancel_setup` call, and the answer becomes UI state.
+fn handle_setup_effect(
+    core: &mut ShellCore,
+    setup: &mut impl FetchSetupApi,
+    effect: &Effect,
+    now_ms: u64,
+) {
+    let describe = |error: pf_session_authority::AuthorityError| {
+        let message = format!("{error:?}");
+        eprintln!("pf-shell: setup request failed: {message}");
+        message
+    };
+    match effect {
+        Effect::StartSetup(intent) => {
+            let result = setup.start_setup(&intent.app_id).map_err(describe);
+            core.setup_start_result(result.as_ref().copied().map_err(String::as_str), now_ms);
+        }
+        Effect::CancelSetup(intent) => {
+            let result = setup.cancel_setup(&intent.app_id).map_err(describe);
+            core.setup_cancel_result(result.as_ref().copied().map_err(String::as_str));
+        }
+        _ => {}
+    }
+}
+
+/// W4b N6: re-check each watched item's `.pf-fetch/` state on the tick. `true`
+/// means a run ended and the catalog must be re-scanned once. A catalog without
+/// fetch state (fixtures) reads as "no run", so the watch ends at the start grace.
+fn drive_setup_watches(core: &mut ShellCore, catalog: &dyn FavoriteCatalog, now_ms: u64) -> bool {
+    let mut rescan = false;
+    for app_id in core.setup_probes_due(now_ms) {
+        let probe = catalog.probe_fetch_run(&app_id).unwrap_or_default();
+        rescan |= core.observe_setup(&app_id, now_ms, &probe);
+    }
+    rescan
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14416,5 +14465,278 @@ code = "ABS_HAT0X,ABS_HAT0Y"
                 (1280.0, 720.0)
             );
         }
+    }
+}
+
+/// W4b (tsp-ziac.4.3.8): the setup intent becomes the client call, and the N6 tick re-check.
+#[cfg(test)]
+mod setup_wiring_tests {
+    use super::*;
+    use pf_catalog::{FetchRunProbe, FetchSetupIntent};
+    use pf_session_authority::{AuthorityError, SetupCancel, SetupStart};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    const APP: &str = "com.example.fetch";
+
+    #[derive(Default)]
+    struct FakeSetup {
+        calls: Vec<String>,
+        start: VecDeque<Result<SetupStart, AuthorityError>>,
+        cancel: VecDeque<Result<SetupCancel, AuthorityError>>,
+    }
+    impl FetchSetupApi for FakeSetup {
+        fn start_setup(&mut self, item_id: &str) -> Result<SetupStart, AuthorityError> {
+            self.calls.push(format!("start_setup {item_id}"));
+            self.start.pop_front().expect("scripted start answer")
+        }
+        fn cancel_setup(&mut self, item_id: &str) -> Result<SetupCancel, AuthorityError> {
+            self.calls.push(format!("cancel_setup {item_id}"));
+            self.cancel.pop_front().expect("scripted cancel answer")
+        }
+    }
+
+    struct ProbeCatalog {
+        snapshot: CatalogSnapshot,
+        probes: RefCell<VecDeque<FetchRunProbe>>,
+        probed: RefCell<Vec<String>>,
+    }
+    impl FavoriteCatalog for ProbeCatalog {
+        fn snapshot(&self) -> Result<CatalogSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+        fn probe_fetch_run(&self, app_id: &str) -> Option<FetchRunProbe> {
+            self.probed.borrow_mut().push(app_id.to_owned());
+            self.probes.borrow_mut().pop_front()
+        }
+        fn set_favorite(
+            &self,
+            _: &str,
+            _: bool,
+            _: CatalogRevision,
+        ) -> Result<FavoriteCommitResult, String> {
+            Err("unused".into())
+        }
+    }
+
+    fn fetch_snapshot(state: &str) -> CatalogSnapshot {
+        let mut snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "observed_at_unix_seconds": 0,
+            "provider_results": [],
+            "user_projection": {"favorite_item_ids": [], "pinned_variant_ids": {}},
+            "items": [{
+                "id": format!("installed:{APP}"),
+                "title": "Fetched",
+                "kind": "game",
+                "presentation": {"icon_reference": null, "icon_decodable": false},
+                "tags": [],
+                "variants": [{
+                    "id": "default",
+                    "provider_id": "installed",
+                    "availability": {"state": "needs_setup", "reason": "Download game data"},
+                    "needs_network": false,
+                    "requirements": [],
+                    "provenance": {
+                        "provider_id": "installed",
+                        "app_version": null,
+                        "upstream_version": null,
+                        "runtime_family": "pocketforge/a133-powervr",
+                        "runtime_abi": "1",
+                        "platform_version": null
+                    },
+                    "launch_target": {
+                        "app_id": APP,
+                        "descriptor_path": "app.toml",
+                        "observed_digest": "x"
+                    },
+                    "fetch_setup": {
+                        "intent": {"app_id": APP, "unit": format!("pf-app-fetch@{APP}.service")},
+                        "state": state,
+                        "reason": null,
+                        "class": null,
+                        "message": "Download game data",
+                        "retry_offered": state != "not_started" && state != "setting_up",
+                        "run_id": "run-0"
+                    }
+                }]
+            }]
+        }))
+        .expect("fixture snapshot");
+        snapshot.revision = 1;
+        snapshot
+    }
+
+    /// The fetch item's Details page with the setup button focused.
+    fn details_core(state: &str) -> ShellCore {
+        let mut core = ShellCore::boot(&fetch_snapshot(state), &pf_theme::flagship(), false);
+        core.authority_snapshot(false);
+        // The Home shelf lists Ready items only: Library → the item → Details, where focus
+        // lands on the setup button.
+        core.action(&ShellAction::Custom("Room.next".into()));
+        assert_eq!(core.route(), pf_shell_core::Route::Library);
+        for _ in 0..6 {
+            if core.focus() >= 5 {
+                break;
+            }
+            core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        }
+        assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.route(), pf_shell_core::Route::Details);
+        assert_eq!(core.focus(), 0);
+        core
+    }
+
+    fn intent() -> FetchSetupIntent {
+        FetchSetupIntent {
+            app_id: APP.into(),
+            unit: format!("pf-app-fetch@{APP}.service"),
+        }
+    }
+
+    #[test]
+    fn the_setup_intent_becomes_one_start_setup_call() {
+        let mut core = details_core("not_started");
+        let effect = core.action(&ShellAction::Activate).expect("setup effect");
+        assert_eq!(effect, Effect::StartSetup(intent()));
+        let mut setup = FakeSetup {
+            start: VecDeque::from([Ok(SetupStart::Started)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        assert_eq!(setup.calls, [format!("start_setup {APP}")]);
+        assert!(core.setup_watching(APP));
+        assert_eq!(core.session_status(), Some("Setting up Fetched…"));
+    }
+
+    #[test]
+    fn a_running_setup_becomes_one_cancel_setup_call() {
+        let mut core = details_core("setting_up");
+        let effect = core.action(&ShellAction::Activate).expect("cancel effect");
+        assert_eq!(effect, Effect::CancelSetup(intent()));
+        let mut setup = FakeSetup {
+            cancel: VecDeque::from([Ok(SetupCancel::Requested)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        assert_eq!(setup.calls, [format!("cancel_setup {APP}")]);
+        assert_eq!(core.session_status(), Some("Cancelling setup for Fetched…"));
+    }
+
+    #[test]
+    fn a_transport_error_is_a_retryable_setup_error() {
+        let mut core = details_core("not_started");
+        let effect = core.action(&ShellAction::Activate).unwrap();
+        let mut setup = FakeSetup {
+            start: VecDeque::from([Err(AuthorityError::Backend("connect refused".into()))]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        assert!(!core.setup_watching(APP));
+        assert_eq!(
+            core.session_status(),
+            Some("Setup couldn't start for Fetched. Try again.")
+        );
+        assert_eq!(
+            core.action(&ShellAction::Activate),
+            Some(Effect::StartSetup(intent()))
+        );
+    }
+
+    #[test]
+    fn the_tick_rechecks_the_watched_item_and_rescans_once_when_its_run_ends() {
+        let mut core = details_core("not_started");
+        let effect = core.action(&ShellAction::Activate).unwrap();
+        let mut setup = FakeSetup {
+            start: VecDeque::from([Ok(SetupStart::Started)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        let catalog = ProbeCatalog {
+            snapshot: fetch_snapshot("not_started"),
+            probes: RefCell::new(VecDeque::from([
+                FetchRunProbe {
+                    lock_held: true,
+                    outcome: Some("running".into()),
+                    run_id: Some("run-1".into()),
+                },
+                FetchRunProbe {
+                    lock_held: false,
+                    outcome: Some("ready".into()),
+                    run_id: Some("run-1".into()),
+                },
+            ])),
+            probed: RefCell::new(Vec::new()),
+        };
+        assert!(!drive_setup_watches(&mut core, &catalog, 0));
+        // Not due again until the probe interval passes: no extra filesystem reads.
+        assert!(!drive_setup_watches(&mut core, &catalog, 100));
+        assert!(drive_setup_watches(
+            &mut core,
+            &catalog,
+            pf_shell_core::SETUP_PROBE_INTERVAL_MS
+        ));
+        assert_eq!(*catalog.probed.borrow(), [APP, APP]);
+        assert!(!core.setup_watching(APP));
+        assert!(!drive_setup_watches(&mut core, &catalog, 60_000));
+    }
+
+    #[test]
+    fn review_r1_p2_2_cancelling_a_run_started_elsewhere_rescans_exactly_once() {
+        // The run was live before the launcher booted: no start_setup from this launcher.
+        let mut core = details_core("setting_up");
+        let effect = core.action(&ShellAction::Activate).expect("cancel effect");
+        let mut setup = FakeSetup {
+            cancel: VecDeque::from([Ok(SetupCancel::Requested)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        let cancelled = FetchRunProbe {
+            lock_held: false,
+            outcome: Some("failed".into()),
+            run_id: Some("run-0".into()),
+        };
+        let catalog = ProbeCatalog {
+            snapshot: fetch_snapshot("setting_up"),
+            probes: RefCell::new(VecDeque::from([
+                FetchRunProbe {
+                    lock_held: true,
+                    outcome: Some("running".into()),
+                    run_id: Some("run-0".into()),
+                },
+                cancelled.clone(),
+                cancelled,
+            ])),
+            probed: RefCell::new(Vec::new()),
+        };
+        let step = pf_shell_core::SETUP_PROBE_INTERVAL_MS;
+        let rescans = [0, step, 2 * step, 3 * step]
+            .into_iter()
+            .filter(|&now| drive_setup_watches(&mut core, &catalog, now))
+            .count();
+        assert_eq!(rescans, 1);
+        assert_eq!(catalog.probed.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_catalog_without_fetch_state_ends_the_watch_at_the_start_grace() {
+        let mut core = details_core("not_started");
+        let effect = core.action(&ShellAction::Activate).unwrap();
+        let mut setup = FakeSetup {
+            start: VecDeque::from([Ok(SetupStart::AlreadyRunning)]),
+            ..FakeSetup::default()
+        };
+        handle_setup_effect(&mut core, &mut setup, &effect, 0);
+        let catalog = ProbeCatalog {
+            snapshot: fetch_snapshot("not_started"),
+            probes: RefCell::new(VecDeque::new()),
+            probed: RefCell::new(Vec::new()),
+        };
+        assert!(!drive_setup_watches(&mut core, &catalog, 0));
+        assert!(drive_setup_watches(
+            &mut core,
+            &catalog,
+            pf_shell_core::SETUP_START_GRACE_MS
+        ));
     }
 }

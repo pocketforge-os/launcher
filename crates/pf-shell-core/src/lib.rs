@@ -38,6 +38,11 @@ use std::time::{Duration, SystemTime};
 
 mod design_generated;
 mod design_manual;
+mod setup;
+pub use setup::{
+    SETUP_PROBE_INTERVAL_MS, SETUP_SETTLE_MS, SETUP_START_GRACE_MS, SetupAction, SetupView,
+    SetupWatch,
+};
 
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
@@ -701,6 +706,10 @@ pub enum Presentation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Launch(LaunchRequest),
+    /// Run the item's `pf-app-fetch@<id>` through the session authority (W4b).
+    StartSetup(pf_catalog::FetchSetupIntent),
+    /// Ask the session authority to stop the item's running setup unit.
+    CancelSetup(pf_catalog::FetchSetupIntent),
     SafeReturn,
     EnterRecovery,
     ChangePreference(PreferenceChange),
@@ -1067,6 +1076,12 @@ pub struct ShellCore {
     crash_exit_detail: String,
     recovery_available: bool,
     authority_unavailable: bool,
+    /// N6 re-checks of items whose setup unit was started (W4b).
+    setup_watches: Vec<SetupWatch>,
+    /// Items whose setup the authority refused with no retry, until the next catalog reload.
+    setup_blocked: std::collections::BTreeSet<String>,
+    /// The intent and pre-call `run_id` of the setup effect awaiting its answer.
+    pending_setup: Option<setup::PendingSetup>,
     safe_return_failed: bool,
     session_status: Option<String>,
     pending_ack: bool,
@@ -1219,7 +1234,7 @@ impl ShellCore {
         F: FnMut(&pf_catalog::CatalogItem, &str) -> Option<Arc<[u8]>>,
     {
         let items = Self::catalog_items(snapshot, &mut resolve_art);
-        Self {
+        let mut core = Self {
             revision: 0,
             route: Route::Home,
             previous_route: Route::Home,
@@ -1244,6 +1259,9 @@ impl ShellCore {
             crash_exit_detail: String::new(),
             recovery_available: false,
             authority_unavailable: false,
+            setup_watches: Vec::new(),
+            setup_blocked: std::collections::BTreeSet::new(),
+            pending_setup: None,
             safe_return_failed: false,
             session_status: None,
             pending_ack: false,
@@ -1301,7 +1319,9 @@ impl ShellCore {
             attention_message: None,
             playtime: HashMap::new(),
             recent_use: HashMap::new(),
-        }
+        };
+        core.adopt_running_setups();
+        core
     }
 
     pub fn reload_catalog_with_art<F>(&mut self, snapshot: &CatalogSnapshot, resolve_art: F)
@@ -1314,6 +1334,9 @@ impl ShellCore {
             .map(|index| self.items[index].id.clone());
         let selected_id = self.selected_item.map(|index| self.items[index].id.clone());
         self.items = Self::catalog_items(snapshot, resolve_art);
+        // A no-retry setup refusal holds only until the descriptor is read again.
+        self.setup_blocked.clear();
+        self.adopt_running_setups();
         self.selected_item = selected_id
             .as_deref()
             .and_then(|id| self.items.iter().position(|item| item.id == id));
@@ -2687,6 +2710,12 @@ impl ShellCore {
                     self.focus = play;
                 }
             }
+            ShellAction::Move(AxisMove::Down)
+                if self.route == Route::Details
+                    && self.detail_setup_focus() == Some(self.focus) =>
+            {
+                self.focus = self.detail_pin_focus();
+            }
             ShellAction::Move(AxisMove::Down) if self.route == Route::Details => {
                 let variant_count = self.detail_focusable_variants().len();
                 if self.focus < variant_count {
@@ -2901,6 +2930,9 @@ impl ShellCore {
         }
         if self.route == Route::Details {
             let item = self.selected_item?;
+            if self.detail_setup_focus() == Some(self.focus) {
+                return self.setup_effect(item);
+            }
             let variants = self.detail_focusable_variants();
             if let Some(&variant) = variants.get(self.focus) {
                 return self.launch_variant(item, variant);
@@ -3010,7 +3042,15 @@ impl ShellCore {
 
     fn detail_pin_focus(&self) -> usize {
         self.detail_play_focus()
-            .map_or_else(|| self.detail_focusable_variants().len(), |play| play + 1)
+            .or_else(|| self.detail_setup_focus())
+            .map_or_else(|| self.detail_focusable_variants().len(), |slot| slot + 1)
+    }
+
+    /// The W4b setup button takes the first Details slot of an item with no Ready variant.
+    fn detail_setup_focus(&self) -> Option<usize> {
+        self.selected_item
+            .and_then(|item| self.setup_view(item))
+            .map(|_| 0)
     }
 
     fn launch_variant(&mut self, item: usize, variant: usize) -> Option<Effect> {
@@ -4014,7 +4054,11 @@ impl ShellCore {
                 } else if ready {
                     Some("Play")
                 } else {
-                    None
+                    scene_core
+                        .selected_item
+                        .and_then(|index| scene_core.setup_view(index))
+                        .filter(|view| view.action.is_some())
+                        .map(|view| view.label)
                 };
                 if let Some(prompt) =
                     activate_label.and_then(|label| scene_core.binding_prompt("Activate", label))
@@ -5960,18 +6004,60 @@ impl ShellCore {
                     out.push(pin);
                     buttons_top + if stack_buttons { 124.0 } else { 54.0 }
                 } else {
-                    let unavailable = node(
-                        "detail-unavailable",
-                        Role::Text,
-                        "No launch action is available",
-                        detail_column_left,
-                        detail_wrap_top + 318.0,
-                        detail_column_width,
-                        60.0,
-                        COLOR_SURFACE_CANVAS_TOKEN,
-                    )
-                    .with_ink_token(STATE_UNAVAILABLE_TEXT_TOKEN);
-                    out.push(unavailable);
+                    let setup_view = self.selected_item.and_then(|index| self.setup_view(index));
+                    if let Some(view) = &setup_view {
+                        // W4b: the fetch setup action takes the unavailable line's place.
+                        let mut setup = node(
+                            "detail-setup",
+                            Role::Button,
+                            view.label,
+                            detail_column_left,
+                            detail_wrap_top + 318.0,
+                            detail_column_width,
+                            54.0,
+                            STATE_REST_SURFACE_TOKEN,
+                        )
+                        .with_corner_radius(RADIUS_M)
+                        .with_border(COLOR_FOCUS_RING_TOKEN, 1.0)
+                        .with_ink_token(SCENE_TRANSPARENT_TOKEN);
+                        setup.state.focused = self.detail_setup_focus() == Some(self.focus);
+                        if view.action.is_some() {
+                            setup.action = Some(NodeAction::Activate);
+                        }
+                        setup.children.push(
+                            node(
+                                "detail-setup-label",
+                                Role::Text,
+                                view.label,
+                                setup.bounds.x + 24.0,
+                                setup.bounds.y + 13.0,
+                                setup.bounds.width - 48.0,
+                                28.0,
+                                STATE_REST_SURFACE_TOKEN,
+                            )
+                            .with_type_role(TypeRole::Label)
+                            .with_text_align(TextAlign::Center)
+                            .with_ink_token(if view.action.is_some() {
+                                COLOR_TEXT_PRIMARY_TOKEN
+                            } else {
+                                STATE_UNAVAILABLE_TEXT_TOKEN
+                            }),
+                        );
+                        out.push(setup);
+                    } else {
+                        let unavailable = node(
+                            "detail-unavailable",
+                            Role::Text,
+                            "No launch action is available",
+                            detail_column_left,
+                            detail_wrap_top + 318.0,
+                            detail_column_width,
+                            60.0,
+                            COLOR_SURFACE_CANVAS_TOKEN,
+                        )
+                        .with_ink_token(STATE_UNAVAILABLE_TEXT_TOKEN);
+                        out.push(unavailable);
+                    }
                     let mut pin = node(
                         "detail-pin",
                         Role::Button,
@@ -5989,7 +6075,8 @@ impl ShellCore {
                     .with_corner_radius(RADIUS_M)
                     .with_border(COLOR_BORDER_HAIRLINE_TOKEN, 1.0)
                     .with_ink_token(SCENE_TRANSPARENT_TOKEN);
-                    pin.state.focused = true;
+                    pin.state.focused =
+                        setup_view.is_none() || self.focus == self.detail_pin_focus();
                     pin.action = Some(NodeAction::Activate);
                     pin.children.push(
                         node(

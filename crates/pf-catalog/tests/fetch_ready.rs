@@ -138,8 +138,9 @@ struct Observed {
     setup: Option<pf_catalog::FetchSetup>,
 }
 
-fn observe(root: &Path) -> Observed {
+fn observe(root: &Path, state_root: &Path) -> Observed {
     let snapshot = provider(root, &root.join("favorites.json"))
+        .with_state_root(state_root)
         .snapshot()
         .unwrap();
     let item = snapshot
@@ -165,9 +166,10 @@ fn needs_setup_reason(availability: &Availability) -> &str {
 fn receipt_absent_is_needs_setup() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
     let app = install(&root, &manifest(URL, "Download"));
     assert!(app.is_dir());
-    let seen = observe(&root);
+    let seen = observe(&root, &state_root);
     assert_eq!(needs_setup_reason(&seen.availability), "Download");
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::NotStarted);
@@ -180,11 +182,13 @@ fn receipt_absent_is_needs_setup() {
 fn valid_receipt_is_ready() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let text = manifest(URL, "Download");
-    let app = install(&root, &text);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&text), &[record]);
-    let seen = observe(&root);
+    install(&root, &text);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&text), &[record]);
+    let seen = observe(&root, &state_root);
     assert!(matches!(seen.availability, Availability::Ready));
     assert!(seen.setup.is_none());
 }
@@ -193,12 +197,14 @@ fn valid_receipt_is_ready() {
 fn stale_key_after_block_change_is_needs_setup() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let before = manifest(URL, "Download");
     let app = install(&root, &before);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&before), &[record]);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&before), &[record]);
     fs::write(app.join("app.toml"), manifest(URL_CHANGED, "Download")).unwrap();
-    let seen = observe(&root);
+    let seen = observe(&root, &state_root);
     assert_eq!(needs_setup_reason(&seen.availability), SETUP_REQUIRED_CLASS);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::NotStarted);
@@ -211,12 +217,14 @@ fn stale_key_after_block_change_is_needs_setup() {
 fn reason_only_change_stays_ready() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let before = manifest(URL, "Download");
     let app = install(&root, &before);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&before), &[record]);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&before), &[record]);
     fs::write(app.join("app.toml"), manifest(URL, "Fetching game data")).unwrap();
-    let seen = observe(&root);
+    let seen = observe(&root, &state_root);
     assert!(
         matches!(seen.availability, Availability::Ready),
         "{:?}",
@@ -228,12 +236,14 @@ fn reason_only_change_stays_ready() {
 fn missing_dest_is_needs_setup() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let text = manifest(URL, "Download");
-    let app = install(&root, &text);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&text), &[record]);
-    fs::remove_dir_all(app.join("data")).unwrap();
-    let seen = observe(&root);
+    install(&root, &text);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&text), &[record]);
+    fs::remove_dir_all(st.join("data")).unwrap();
+    let seen = observe(&root, &state_root);
     assert_eq!(needs_setup_reason(&seen.availability), SETUP_REQUIRED_CLASS);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.reason.as_deref(), Some("state_invalid"));
@@ -244,12 +254,14 @@ fn missing_dest_is_needs_setup() {
 fn file_count_mismatch_is_needs_setup() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let text = manifest(URL, "Download");
-    let app = install(&root, &text);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&text), &[record]);
-    fs::write(app.join("data/extra.txt"), b"extra").unwrap();
-    let seen = observe(&root);
+    install(&root, &text);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&text), &[record]);
+    fs::write(st.join("data/extra.txt"), b"extra").unwrap();
+    let seen = observe(&root, &state_root);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.reason.as_deref(), Some("state_invalid"));
     assert!(!matches!(seen.availability, Availability::Ready));
@@ -259,12 +271,14 @@ fn file_count_mismatch_is_needs_setup() {
 fn bytes_mismatch_is_needs_setup() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     let text = manifest(URL, "Download");
-    let app = install(&root, &text);
-    let record = write_payload(&app, &[("one.txt", b"abc")]);
-    write_receipt(&app, &shared_key(&text), &[record]);
-    fs::write(app.join("data/one.txt"), b"abcd").unwrap();
-    let seen = observe(&root);
+    install(&root, &text);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&text), &[record]);
+    fs::write(st.join("data/one.txt"), b"abcd").unwrap();
+    let seen = observe(&root, &state_root);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.reason.as_deref(), Some("state_invalid"));
     assert!(!matches!(seen.availability, Availability::Ready));
@@ -274,9 +288,11 @@ fn bytes_mismatch_is_needs_setup() {
 fn failed_result_maps_reason_to_class_text() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
     install(&root, &manifest(URL, "Download"));
     write_result(
-        &root.join(APP_ID),
+        &st,
         &json!({
             "schema_version": 1,
             "run_id": "run-7",
@@ -290,7 +306,7 @@ fn failed_result_maps_reason_to_class_text() {
             "gets": 1,
         }),
     );
-    let seen = observe(&root);
+    let seen = observe(&root, &state_root);
     assert_eq!(needs_setup_reason(&seen.availability), NETWORK_CLASS);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::Failed);
@@ -305,9 +321,11 @@ fn failed_result_maps_reason_to_class_text() {
 fn running_with_lock_held_is_setting_up() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
-    let app = install(&root, &manifest(URL, "Download"));
-    write_result(&app, &running_result());
-    let lock_path = app.join(".pf-fetch/lock");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    install(&root, &manifest(URL, "Download"));
+    write_result(&st, &running_result());
+    let lock_path = st.join(".pf-fetch/lock");
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -316,7 +334,7 @@ fn running_with_lock_held_is_setting_up() {
         .open(&lock_path)
         .unwrap();
     lock.lock_exclusive().unwrap();
-    let seen = observe(&root);
+    let seen = observe(&root, &state_root);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::SettingUp);
     assert!(!setup.retry_offered);
@@ -328,14 +346,52 @@ fn running_with_lock_held_is_setting_up() {
 fn running_with_lock_free_is_interrupted_with_retry() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
-    let app = install(&root, &manifest(URL, "Download"));
-    write_result(&app, &running_result());
-    fs::create_dir_all(app.join(".pf-fetch")).unwrap();
-    fs::write(app.join(".pf-fetch/lock"), b"").unwrap();
-    let seen = observe(&root);
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    install(&root, &manifest(URL, "Download"));
+    write_result(&st, &running_result());
+    fs::create_dir_all(st.join(".pf-fetch")).unwrap();
+    fs::write(st.join(".pf-fetch/lock"), b"").unwrap();
+    let seen = observe(&root, &state_root);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::Interrupted);
     assert!(setup.retry_offered);
     assert_eq!(setup.message, "Setup was interrupted.");
     assert!(!matches!(seen.availability, Availability::Ready));
+}
+
+#[test]
+fn state_under_descriptor_dir_does_not_count() {
+    // The producer keeps state under the state root; a payload and receipt
+    // placed next to app.toml must never make the app Ready.
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let text = manifest(URL, "Download");
+    let app = install(&root, &text);
+    let record = write_payload(&app, &[("one.txt", b"abc")]);
+    write_receipt(&app, &shared_key(&text), &[record]);
+    let seen = observe(&root, &state_root);
+    assert_eq!(needs_setup_reason(&seen.availability), "Download");
+    let setup = seen.setup.expect("fetch setup intent");
+    assert_eq!(setup.state, FetchSetupState::NotStarted);
+}
+
+#[test]
+fn default_state_root_is_var_lib_pocketforge_apps() {
+    // Without with_state_root the provider must not look next to app.toml.
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let text = manifest(URL, "Download");
+    let app = install(&root, &text);
+    let record = write_payload(&app, &[("one.txt", b"abc")]);
+    write_receipt(&app, &shared_key(&text), &[record]);
+    let snapshot = provider(&root, &root.join("favorites.json"))
+        .snapshot()
+        .unwrap();
+    let variant = &snapshot.items[0].variants[0];
+    assert!(matches!(
+        variant.availability,
+        Availability::NeedsSetup { .. }
+    ));
 }

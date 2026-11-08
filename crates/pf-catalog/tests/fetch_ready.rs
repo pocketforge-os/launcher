@@ -447,3 +447,93 @@ fn receipt_missing_a_declared_dest_is_needs_setup() {
         Some("state_invalid")
     );
 }
+
+// W4b (tsp-ziac.4.3.8) N8: the dest-set comparison itself, not only the empty-files guard.
+fn two_dest_manifest() -> String {
+    manifest(URL, "Download").replace(
+        "dest = \"data\"\nstrip_components = 0\n",
+        "dest = \"data\"\nstrip_components = 0\n\n[[fetch.files]]\n\
+         url = \"https://example.com/music.tar.gz\"\n\
+         sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n\
+         size = 3\nformat = \"tar.gz\"\ndest = \"music\"\nstrip_components = 0\n",
+    )
+}
+
+#[test]
+fn two_dest_receipt_missing_one_declared_dest_is_state_invalid() {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    let text = two_dest_manifest();
+    assert_eq!(
+        parse_manifest(&text)
+            .unwrap()
+            .fetch
+            .unwrap()
+            .files
+            .unwrap()
+            .len(),
+        2
+    );
+    install(&root, &text);
+    // The one recorded dest is a perfect payload: only the set comparison can refuse it.
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    write_receipt(&st, &shared_key(&text), &[record]);
+    let seen = observe(&root, &state_root);
+    assert_eq!(needs_setup_reason(&seen.availability), SETUP_REQUIRED_CLASS);
+    let setup = seen.setup.expect("fetch setup intent");
+    assert_eq!(setup.reason.as_deref(), Some("state_invalid"));
+    assert_eq!(setup.state, FetchSetupState::NotStarted);
+}
+
+// W4b N6: the launcher's re-check reads only the lock and result.json.
+#[test]
+fn probe_reports_lock_outcome_and_run_id() {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    let provider = provider(&root, &root.join("favorites.json")).with_state_root(&state_root);
+
+    // Nothing yet: no run.
+    assert_eq!(
+        provider.probe_fetch_run(APP_ID),
+        pf_catalog::FetchRunProbe::default()
+    );
+
+    write_result(&st, &running_result());
+    let lock = fs::File::create(st.join(".pf-fetch").join("lock")).unwrap();
+    lock.try_lock_exclusive().unwrap();
+    let held = provider.probe_fetch_run(APP_ID);
+    assert!(held.lock_held);
+    assert_eq!(held.outcome.as_deref(), Some("running"));
+    assert_eq!(held.run_id.as_deref(), Some("run-1"));
+
+    FileExt::unlock(&lock).unwrap();
+    let mut done = running_result();
+    done["outcome"] = json!("ready");
+    write_result(&st, &done);
+    let released = provider.probe_fetch_run(APP_ID);
+    assert!(!released.lock_held);
+    assert_eq!(released.outcome.as_deref(), Some("ready"));
+    assert_eq!(released.run_id.as_deref(), Some("run-1"));
+    assert_eq!(pf_catalog::probe_fetch_run(&st), released);
+}
+
+#[test]
+fn probe_never_joins_an_unsafe_app_id() {
+    let t = tempdir().unwrap();
+    let state_root = t.path().join("state");
+    // A lock + result one level above the state root must stay invisible.
+    write_result(t.path(), &running_result());
+    let provider =
+        provider(t.path(), &t.path().join("favorites.json")).with_state_root(&state_root);
+    for id in ["..", "../state", "a/b", "", "."] {
+        assert_eq!(
+            provider.probe_fetch_run(id),
+            pf_catalog::FetchRunProbe::default(),
+            "{id:?}"
+        );
+    }
+}

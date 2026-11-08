@@ -38,6 +38,10 @@ use std::time::{Duration, SystemTime};
 
 mod design_generated;
 mod design_manual;
+mod setup;
+pub use setup::{
+    SETUP_PROBE_INTERVAL_MS, SETUP_START_GRACE_MS, SetupAction, SetupView, SetupWatch,
+};
 
 use design_generated::{
     CARD_ART_HEIGHT, CARD_ART_WIDTH, CHIP_BORDER_WIDTH, CHIP_HEIGHT, CHIP_HORIZONTAL_PADDING,
@@ -701,6 +705,10 @@ pub enum Presentation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Launch(LaunchRequest),
+    /// Run the item's `pf-app-fetch@<id>` through the session authority (W4b).
+    StartSetup(pf_catalog::FetchSetupIntent),
+    /// Ask the session authority to stop the item's running setup unit.
+    CancelSetup(pf_catalog::FetchSetupIntent),
     SafeReturn,
     EnterRecovery,
     ChangePreference(PreferenceChange),
@@ -1067,6 +1075,12 @@ pub struct ShellCore {
     crash_exit_detail: String,
     recovery_available: bool,
     authority_unavailable: bool,
+    /// N6 re-checks of items whose setup unit was started (W4b).
+    setup_watches: Vec<SetupWatch>,
+    /// Items whose setup the authority refused with no retry, until the next catalog reload.
+    setup_blocked: std::collections::BTreeSet<String>,
+    /// The intent and pre-call run_id of the setup effect awaiting its answer.
+    pending_setup: Option<(pf_catalog::FetchSetupIntent, Option<String>)>,
     safe_return_failed: bool,
     session_status: Option<String>,
     pending_ack: bool,
@@ -1244,6 +1258,9 @@ impl ShellCore {
             crash_exit_detail: String::new(),
             recovery_available: false,
             authority_unavailable: false,
+            setup_watches: Vec::new(),
+            setup_blocked: std::collections::BTreeSet::new(),
+            pending_setup: None,
             safe_return_failed: false,
             session_status: None,
             pending_ack: false,

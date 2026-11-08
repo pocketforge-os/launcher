@@ -135,6 +135,21 @@ pub struct FetchSetup {
     pub retry_offered: bool,
     pub run_id: Option<String>,
 }
+/// What the launcher can see of a setup run without the journal: whether a run
+/// holds `.pf-fetch/lock`, and `result.json`'s outcome and run_id. W4b
+/// (tsp-ziac.4.3.8, N6) polls this for one item after starting its setup unit.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FetchRunProbe {
+    pub lock_held: bool,
+    pub outcome: Option<String>,
+    pub run_id: Option<String>,
+}
+
+/// Probe one app's `.pf-fetch/` state directory (see [`FetchRunProbe`]).
+#[must_use]
+pub fn probe_fetch_run(_state_dir: &Path) -> FetchRunProbe {
+    FetchRunProbe::default()
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProviderItemResult {
@@ -237,6 +252,12 @@ impl InstalledAppProvider {
     pub fn with_state_root(mut self, value: impl Into<PathBuf>) -> Self {
         self.state_root = value.into();
         self
+    }
+    /// Probe `app_id`'s setup run under the state root. An id that is not one
+    /// plain path component is never joined and reads as "no run".
+    #[must_use]
+    pub fn probe_fetch_run(&self, _app_id: &str) -> FetchRunProbe {
+        FetchRunProbe::default()
     }
     #[must_use]
     pub fn with_supported_capabilities(mut self, values: impl IntoIterator<Item = String>) -> Self {

@@ -1,0 +1,230 @@
+# Vendored copy. Source: mission-control .planning/infra/infra-107.4-fetch-reason-codes.toml @ 43c34a0b (MC#713).
+# Do not edit here; re-copy when the contract changes.
+# Fetch reason codes for [fetch] assets (tsp-ziac.4.3.4, W0 of the E8 fetched-assets track).
+#
+# Contract: .planning/infra/infra-107.4-distribution-delivery-sideload.md, section 4.6
+# "Fetched assets (E8, W0)". The doc's reason-code table and [codes] below hold the same set.
+#
+# Consumers: pf-app-fetch (W3) emits `reason=<code>`; the launcher (W4) shows the class
+# text; Steam Link (W6) maps its existing codes through [steamlink].
+#
+# retryable = true: the cause is outside the pin (network, server load, storage space, a
+# cancel), so the same descriptor and image can succeed once it clears.
+# retryable = false: the cause is the pin or what the source serves for it, so a retry
+# repeats the result and only a new descriptor (an app or image update) fixes it.
+# Exception: a Wi-Fi sign-in page can make a good pin look like size_mismatch or
+# digest_mismatch, so the launcher offers a user-initiated retry for every code.
+#
+# scope = "all": any fetcher. scope = "vendor-signed-pointer": emitted only by a
+# vendor-signed-pointer fetcher (today only Steam Link, image#335). pf-app-fetch refuses
+# that source as descriptor_invalid until a later bead builds it (owner D4).
+#
+# Evidence refs, read 2026-11-08:
+#   steamlink = pocketforge-os/image apps/steamlink/steamlink-fetch.py@f2dff1fb
+#               (installed by scripts/install-steamlink-first-run.sh@f2dff1fb:93)
+#   mbhaxe    = pocketforge-os/MBHaxe pocketforge/app/pf-fetch.py@362fe951 (branch pocketforge)
+
+schema_version = 1
+
+[classes]
+network = "Can't reach the download server. Check the Wi-Fi connection and try again."
+server = "The download server refused the request. Try again later."
+source_mismatch = "The download didn't match what this app expects. If you're on public Wi-Fi, sign in to it and try again; otherwise the app needs an update."
+source_gone = "The download is no longer available from its source. The app needs an update."
+source_moved = "The download moved to a server this system doesn't allow yet. A system update is needed."
+app_defect = "This app's download setup is broken. The app needs an update."
+storage = "Not enough storage space. Free some space and try again."
+cancelled = "Setup was cancelled."
+setup_required = "This app needs to finish setup."
+unsupported = "This app needs a newer system version."
+
+[codes.offline]
+meaning = "No response: DNS, connect, TLS handshake or timeout before an HTTP status."
+class = "network"
+retryable = true
+scope = "all"
+steamlink = "offline at :178-179"
+mbhaxe = "URLError class name at :280-281"
+
+[codes.http_error]
+meaning = "HTTP 5xx, 429 or 408: the server is failing or busy."
+class = "server"
+retryable = true
+scope = "all"
+steamlink = "none: HTTPError is a URLError subclass, so :178-179 reports offline"
+mbhaxe = "HTTPError class name at :280-281"
+
+[codes.http_refused]
+meaning = "Any other HTTP 4xx (404, 410, 403, ...): the source no longer serves the pinned file."
+class = "source_gone"
+retryable = false
+scope = "all"
+steamlink = "none: reported as offline at :178-179"
+mbhaxe = "HTTPError class name at :280-281"
+
+[codes.redirect_refused]
+# W3 (tsp-ziac.4.3.5) remapped this from source_gone to source_moved: the redirect-host
+# scope is a platform-owned table in pf-app-fetch, so a CDN move needs a system update,
+# not an app update (W0 review note N9).
+meaning = "A redirect hop leaves https or the fetch host scope (the declared host plus pf-app-fetch's platform redirect table), or redirects loop or exceed 5 hops."
+class = "source_moved"
+retryable = false
+scope = "all"
+steamlink = "none"
+mbhaxe = "free text at :150-151 (checks the final URL only)"
+
+[codes.download_too_large]
+meaning = "Content-Length or the received body exceeds the pinned size."
+class = "source_mismatch"
+retryable = false
+scope = "all"
+steamlink = "download_too_large at :156-157 and :164-165"
+mbhaxe = "free text at :157-158 (download) and :136-137 (hash)"
+
+[codes.download_truncated]
+meaning = "The connection ended before Content-Length was received."
+class = "network"
+retryable = true
+scope = "all"
+steamlink = "download_truncated at :169-172 and :176-177"
+mbhaxe = "none distinct: a short body is refused by the size check at :270-271"
+
+[codes.size_mismatch]
+meaning = "A complete body whose length differs from the pinned size."
+class = "source_mismatch"
+retryable = false
+scope = "all"
+steamlink = "none: its pointer source has no pinned size"
+mbhaxe = "free text at :270-271"
+
+[codes.digest_mismatch]
+meaning = "The size matches but the SHA256 differs from the pin."
+class = "source_mismatch"
+retryable = false
+scope = "all"
+steamlink = "digest_mismatch at :673-674 (bootstrap pin)"
+mbhaxe = "free text at :272-273"
+
+[codes.archive_invalid]
+meaning = "The verified archive is unreadable or corrupt, exceeds the member or expansion limit, or the strip/include filter leaves no files."
+class = "app_defect"
+retryable = false
+scope = "all"
+steamlink = "archive_invalid at :304, :334 and :355-356"
+mbhaxe = "free text at :212-213; TarError class name at :280-281"
+
+[codes.archive_member_unsafe]
+meaning = "A member with an absolute or .. path, a symlink or hardlink, a device or FIFO, or a duplicate name."
+class = "app_defect"
+retryable = false
+scope = "all"
+steamlink = "folded into archive_invalid: first pass :312, :324-326, :331, :348-351; second pass :388, :393, :397, :401, :435"
+mbhaxe = "free text at :170-174, :189-192 and :200-201"
+
+[codes.disk_full]
+meaning = "ENOSPC or EDQUOT while staging, extracting or committing."
+class = "storage"
+retryable = true
+scope = "all"
+steamlink = "none: reported as offline at :178-179 (download) or archive_invalid at :355-356 (extract)"
+mbhaxe = "OSError class name at :280-281"
+
+[codes.cancelled]
+meaning = "The user cancelled or the unit was stopped before the commit; staging is discarded."
+class = "cancelled"
+retryable = true
+scope = "all"
+steamlink = "none"
+mbhaxe = "none: BaseException cleanup only at :161-164 and :239-245"
+
+[codes.receipt_stale]
+meaning = "A receipt exists but its key is not the SHA256 of the current canonical [fetch] block."
+class = "setup_required"
+retryable = true
+scope = "all"
+steamlink = "none: its receipt is keyed by archive digest at :686-694"
+mbhaxe = "none: it writes no receipt"
+
+[codes.state_invalid]
+meaning = "The receipt or payload is missing, the payload differs from the receipt's manifest, or the fetch state tree is unsafe."
+class = "setup_required"
+retryable = true
+scope = "all"
+steamlink = "state_invalid at :137-146"
+mbhaxe = "free text at :223-228 (dest symlink or not a directory)"
+
+[codes.descriptor_invalid]
+meaning = "The [fetch] block fails pf-app-manifest validation, or uses the reserved source or the executable map."
+class = "app_defect"
+retryable = false
+scope = "all"
+steamlink = "digest_invalid at :787-789 (malformed configured pin)"
+mbhaxe = "free text in load_fetch at :62-106"
+
+[codes.signature_invalid]
+meaning = "The vendor's detached signature is missing, invalid or from another key."
+class = "source_mismatch"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "signature_invalid at :232 and :240"
+mbhaxe = "n/a"
+
+[codes.trust_key_invalid]
+meaning = "The sealed vendor keyring or fingerprint is missing or differs from its pin."
+class = "app_defect"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "trust_key_invalid at :206-215 and :781-786"
+mbhaxe = "n/a"
+
+[codes.version_invalid]
+meaning = "The pointer is not canonical, or its archive URL leaves the configured origin."
+class = "source_mismatch"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "version_invalid at :75, :90-122 and :194"
+mbhaxe = "n/a"
+
+[codes.version_below_floor]
+meaning = "The pointer names a version below the floor or older than the current build."
+class = "source_mismatch"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "version_below_floor at :801 and :805"
+mbhaxe = "n/a"
+
+[codes.version_mismatch]
+meaning = "The archive's own version differs from the pointer."
+class = "source_mismatch"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "version_mismatch at :364 and :430"
+mbhaxe = "n/a"
+
+[codes.abi_mismatch]
+meaning = "The payload needs a platform runtime ABI that the image does not provide."
+class = "unsupported"
+retryable = false
+scope = "vendor-signed-pointer"
+steamlink = "abi_mismatch at :250-291"
+mbhaxe = "n/a"
+
+# Every reason Steam Link's fetcher emits today, mapped onto the codes above (input for W6).
+# archive_invalid splits: its unsafe-path, duplicate, symlink and non-regular refusals
+# (first pass :312, :324-326, :331, :348-351; second pass :388, :393, :397, :401, :435)
+# become archive_member_unsafe in W6. Its single-component relative symlinks (:317-328)
+# are an executable-class exception, not archive_member_unsafe.
+[steamlink]
+offline = "offline"
+download_too_large = "download_too_large"
+download_truncated = "download_truncated"
+digest_mismatch = "digest_mismatch"
+digest_invalid = "descriptor_invalid"
+archive_invalid = "archive_invalid"
+state_invalid = "state_invalid"
+signature_invalid = "signature_invalid"
+trust_key_invalid = "trust_key_invalid"
+version_invalid = "version_invalid"
+version_below_floor = "version_below_floor"
+version_mismatch = "version_mismatch"
+abi_mismatch = "abi_mismatch"

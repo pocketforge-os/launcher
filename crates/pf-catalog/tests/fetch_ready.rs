@@ -4,7 +4,7 @@
 use fs2::FileExt;
 use pf_app_manifest::{fetch_receipt_key, parse_manifest};
 use pf_catalog::{Availability, FetchSetupState, InstalledAppProvider};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 use tempfile::tempdir;
@@ -70,10 +70,7 @@ fn shared_key(text: &str) -> String {
 }
 
 fn hex_sha(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn write_payload(app: &Path, files: &[(&str, &[u8])]) -> Value {
@@ -115,7 +112,7 @@ fn write_receipt(app: &Path, key: &str, files: &[Value]) {
     fs::write(dir.join("receipt.json"), receipt.to_string()).unwrap();
 }
 
-fn write_result(app: &Path, value: Value) {
+fn write_result(app: &Path, value: &Value) {
     let dir = app.join(".pf-fetch");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("result.json"), value.to_string()).unwrap();
@@ -202,10 +199,7 @@ fn stale_key_after_block_change_is_needs_setup() {
     write_receipt(&app, &shared_key(&before), &[record]);
     fs::write(app.join("app.toml"), manifest(URL_CHANGED, "Download")).unwrap();
     let seen = observe(&root);
-    assert_eq!(
-        needs_setup_reason(&seen.availability),
-        SETUP_REQUIRED_CLASS
-    );
+    assert_eq!(needs_setup_reason(&seen.availability), SETUP_REQUIRED_CLASS);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.state, FetchSetupState::NotStarted);
     assert_eq!(setup.reason.as_deref(), Some("receipt_stale"));
@@ -240,10 +234,7 @@ fn missing_dest_is_needs_setup() {
     write_receipt(&app, &shared_key(&text), &[record]);
     fs::remove_dir_all(app.join("data")).unwrap();
     let seen = observe(&root);
-    assert_eq!(
-        needs_setup_reason(&seen.availability),
-        SETUP_REQUIRED_CLASS
-    );
+    assert_eq!(needs_setup_reason(&seen.availability), SETUP_REQUIRED_CLASS);
     let setup = seen.setup.expect("fetch setup intent");
     assert_eq!(setup.reason.as_deref(), Some("state_invalid"));
     assert_eq!(setup.state, FetchSetupState::NotStarted);
@@ -286,7 +277,7 @@ fn failed_result_maps_reason_to_class_text() {
     install(&root, &manifest(URL, "Download"));
     write_result(
         &root.join(APP_ID),
-        json!({
+        &json!({
             "schema_version": 1,
             "run_id": "run-7",
             "app_id": APP_ID,
@@ -315,7 +306,7 @@ fn running_with_lock_held_is_setting_up() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
     let app = install(&root, &manifest(URL, "Download"));
-    write_result(&app, running_result());
+    write_result(&app, &running_result());
     let lock_path = app.join(".pf-fetch/lock");
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -338,7 +329,7 @@ fn running_with_lock_free_is_interrupted_with_retry() {
     let t = tempdir().unwrap();
     let root = t.path().join("apps");
     let app = install(&root, &manifest(URL, "Download"));
-    write_result(&app, running_result());
+    write_result(&app, &running_result());
     fs::create_dir_all(app.join(".pf-fetch")).unwrap();
     fs::write(app.join(".pf-fetch/lock"), b"").unwrap();
     let seen = observe(&root);

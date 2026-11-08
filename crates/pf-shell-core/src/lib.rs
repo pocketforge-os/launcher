@@ -10206,6 +10206,7 @@ mod tests {
                             descriptor_path: PathBuf::from("app.toml"),
                             observed_digest: "x".into(),
                         },
+                        fetch_setup: None,
                     }],
                 })
                 .collect(),
@@ -13051,6 +13052,7 @@ mod tests {
                 descriptor_path: PathBuf::from(format!("fixtures/{id}.toml")),
                 observed_digest: "fixture".into(),
             },
+            fetch_setup: None,
         }
     }
 

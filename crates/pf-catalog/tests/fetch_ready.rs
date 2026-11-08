@@ -395,3 +395,55 @@ fn default_state_root_is_var_lib_pocketforge_apps() {
         Availability::NeedsSetup { .. }
     ));
 }
+
+#[test]
+fn running_with_unopenable_lock_is_interrupted_with_retry() {
+    // A lock that cannot be opened (here a symlink loop, ELOOP, which also fails
+    // as root) is not proof of a live run: never "setting up forever".
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    install(&root, &manifest(URL, "Download"));
+    write_result(&st, &running_result());
+    std::os::unix::fs::symlink("lock", st.join(".pf-fetch/lock")).unwrap();
+    let seen = observe(&root, &state_root);
+    let setup = seen.setup.expect("fetch setup intent");
+    assert_eq!(setup.state, FetchSetupState::Interrupted);
+    assert!(setup.retry_offered);
+}
+
+#[test]
+fn receipt_missing_a_declared_dest_is_needs_setup() {
+    let t = tempdir().unwrap();
+    let root = t.path().join("apps");
+    let state_root = t.path().join("state");
+    let st = state_root.join(APP_ID);
+    let text = manifest(URL, "Download");
+    install(&root, &text);
+    let record = write_payload(&st, &[("one.txt", b"abc")]);
+    let mut other = record.clone();
+    other["dest"] = json!("other");
+    // Receipt carries an extra entry whose payload is valid but undeclared.
+    fs::create_dir_all(st.join("other")).unwrap();
+    fs::write(st.join("other/one.txt"), b"abc").unwrap();
+    write_receipt(&st, &shared_key(&text), &[record.clone(), other]);
+    let seen = observe(&root, &state_root);
+    assert_eq!(
+        seen.setup.expect("fetch setup intent").reason.as_deref(),
+        Some("state_invalid")
+    );
+    // And the opposite: a receipt with no entry for the declared dest.
+    write_receipt(&st, &shared_key(&text), &[]);
+    let seen = observe(&root, &state_root);
+    assert!(!matches!(seen.availability, Availability::Ready));
+    // A receipt entry under a different dest than declared.
+    let mut renamed = record;
+    renamed["dest"] = json!("other");
+    write_receipt(&st, &shared_key(&text), &[renamed]);
+    let seen = observe(&root, &state_root);
+    assert_eq!(
+        seen.setup.expect("fetch setup intent").reason.as_deref(),
+        Some("state_invalid")
+    );
+}

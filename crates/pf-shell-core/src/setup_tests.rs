@@ -394,11 +394,11 @@ fn core_rechecks_due_items_and_asks_for_one_rescan_when_the_run_ends() {
     let mut core = answered(Ok(SetupStart::Started));
     assert_eq!(core.setup_probes_due(1_000), vec![APP.to_owned()]);
     assert!(!core.observe_setup(APP, 1_000, &probe(true, Some("running"), Some("run-1"))));
-    assert!(core.setup_probes_due(1_200).is_empty());
+    assert_eq!(core.setup_probes_due(1_200), Vec::<String>::new());
     assert_eq!(core.setup_probes_due(1_500), vec![APP.to_owned()]);
     assert!(core.observe_setup(APP, 1_500, &probe(false, Some("ready"), Some("run-1"))));
     assert!(!core.setup_watching(APP));
-    assert!(core.setup_probes_due(10_000).is_empty());
+    assert_eq!(core.setup_probes_due(10_000), Vec::<String>::new());
     // The watch is gone, so later probes ask for nothing.
     assert!(!core.observe_setup(APP, 10_000, &FetchRunProbe::default()));
 }

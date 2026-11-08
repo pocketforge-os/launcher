@@ -809,6 +809,23 @@ fn check_fetch_receipt(state_dir: &Path, fetch: &Fetch) -> ReceiptVerdict {
     if files.is_empty() || !files.iter().all(|file| payload_matches(state_dir, file)) {
         return ReceiptVerdict::Invalid;
     }
+    // The receipt must cover exactly the descriptor's declared dests.
+    let mut recorded: Vec<&str> = files
+        .iter()
+        .filter_map(|file| file.get("dest").and_then(Value::as_str))
+        .collect();
+    let mut declared: Vec<&str> = fetch
+        .files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|file| file.dest.as_deref())
+        .collect();
+    recorded.sort_unstable();
+    declared.sort_unstable();
+    if recorded != declared {
+        return ReceiptVerdict::Invalid;
+    }
     ReceiptVerdict::Valid
 }
 
@@ -907,16 +924,16 @@ fn read_fetch_result(state_dir: &Path) -> Option<Value> {
 /// whether a live pf-app-fetch run holds the flock matters.
 fn fetch_lock_held(state_dir: &Path) -> bool {
     let path = state_dir.join(".pf-fetch").join("lock");
-    let file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+    // Only WouldBlock proves a live run owns the flock. Any open or lock error
+    // is "not held", which yields Interrupted plus a retry rather than a
+    // "setting up" that can never clear.
+    let Ok(file) = fs::File::open(&path) else {
+        return false;
     };
-    match file.try_lock_exclusive() {
-        Ok(()) => false,
-        // WouldBlock means a live run owns the flock; any other failure is
-        // conservatively treated as a held lock so we never claim interrupted.
-        Err(_) => true,
-    }
+    matches!(
+        file.try_lock_exclusive(),
+        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+    )
 }
 
 fn fetch_reason_class(reason: &str) -> Option<&'static str> {

@@ -50,6 +50,8 @@ pub struct SetupWatch {
     next_probe_ms: u64,
     lock_seen: bool,
     baseline_running: bool,
+    /// The first lock-free probe after evidence of a run (the settle start).
+    unlocked_since: Option<u64>,
 }
 
 impl SetupWatch {
@@ -62,7 +64,19 @@ impl SetupWatch {
             next_probe_ms: now_ms,
             lock_seen: false,
             baseline_running: false,
+            unlocked_since: None,
         }
+    }
+    /// A watch for a run that is already live (adopted on catalog load or on a cancel): its
+    /// lock counts as seen, so only the run's own end, never the start grace, ends the watch.
+    fn adopted(setup: &FetchSetup, now_ms: u64) -> Self {
+        let mut watch = Self::new(setup.intent.app_id.clone(), setup.run_id.clone(), now_ms)
+            .with_baseline_running(matches!(
+                setup.state,
+                FetchSetupState::SettingUp | FetchSetupState::Interrupted
+            ));
+        watch.lock_seen = setup.state == FetchSetupState::SettingUp;
+        watch
     }
     /// The run before the call was `running` (setting up or interrupted).
     #[must_use]
@@ -80,20 +94,33 @@ impl SetupWatch {
     }
     /// Feeds one probe; `true` means the run is over and the catalog must be re-scanned.
     ///
-    /// Over means: the lock this watch saw is released; or a `result.json` from a run other
-    /// than the one before the call is there without the lock (ready, failed, or an
-    /// interrupted `running`); or no run showed itself within [`SETUP_START_GRACE_MS`]. A
-    /// held lock keeps the watch alive for as long as the download takes.
+    /// A held lock keeps the watch alive however long the download takes. Once there is
+    /// evidence of a run (the lock was seen, or a `result.json` from a different run is
+    /// there) and the lock is free, a final outcome ends the watch at once. A `running` or
+    /// missing outcome gets [`SETUP_SETTLE_MS`], because pf-app-fetch drops its lock before
+    /// it writes the final result; after that the run counts as crashed (review r1 P2-1).
+    /// The baseline run leaving `running` under the same `run_id` also ends it (N2). With no
+    /// evidence of a run, [`SETUP_START_GRACE_MS`] ends it.
     pub fn observe(&mut self, now_ms: u64, probe: &FetchRunProbe) -> bool {
         self.next_probe_ms = now_ms.saturating_add(SETUP_PROBE_INTERVAL_MS);
         if probe.lock_held {
             self.lock_seen = true;
+            self.unlocked_since = None;
             return false;
         }
-        if self.lock_seen {
-            return true;
+        let final_outcome = probe
+            .outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome != "running");
+        let new_run = probe.run_id.is_some() && probe.run_id != self.baseline_run_id;
+        if self.lock_seen || new_run {
+            if final_outcome {
+                return true;
+            }
+            let since = *self.unlocked_since.get_or_insert(now_ms);
+            return now_ms.saturating_sub(since) >= SETUP_SETTLE_MS;
         }
-        if probe.run_id.is_some() && probe.run_id != self.baseline_run_id {
+        if self.baseline_running && probe.run_id.is_some() && final_outcome {
             return true;
         }
         now_ms.saturating_sub(self.started_ms) >= SETUP_START_GRACE_MS
@@ -183,7 +210,7 @@ impl ShellCore {
         let Some(PendingSetup {
             intent,
             baseline_run_id: baseline,
-            ..
+            baseline_running,
         }) = self.pending_setup.take()
         else {
             return;
@@ -194,8 +221,10 @@ impl ShellCore {
         self.session_status = Some(match result {
             Ok(SetupStart::Started | SetupStart::AlreadyRunning) => {
                 self.setup_watches.retain(|watch| watch.app_id() != app_id);
-                self.setup_watches
-                    .push(SetupWatch::new(app_id, baseline, now_ms));
+                self.setup_watches.push(
+                    SetupWatch::new(app_id, baseline, now_ms)
+                        .with_baseline_running(baseline_running),
+                );
                 format!("Setting up {title}…")
             }
             Ok(SetupStart::NotFetchEnabled) => {
@@ -223,7 +252,15 @@ impl ShellCore {
         let app_id = intent.app_id;
         let title = self.setup_title(&app_id);
         self.session_status = Some(match result {
-            Ok(SetupCancel::Requested) => format!("Cancelling setup for {title}…"),
+            Ok(SetupCancel::Requested) => {
+                // A run this launcher did not start still needs its end re-scanned (P2-2).
+                if !self.setup_watching(&app_id) {
+                    if let Some(setup) = self.fetch_setup_for(&app_id).cloned() {
+                        self.setup_watches.push(SetupWatch::adopted(&setup, 0));
+                    }
+                }
+                format!("Cancelling setup for {title}…")
+            }
             Ok(SetupCancel::NotFetchEnabled) => {
                 self.setup_blocked.insert(app_id);
                 format!("Setup isn't available for {title}")
@@ -265,7 +302,29 @@ impl ShellCore {
     }
 
     /// Arms an N6 watch for every item whose run is live on catalog load (review r1 P2-2).
-    pub(crate) fn adopt_running_setups(&mut self) {}
+    pub(crate) fn adopt_running_setups(&mut self) {
+        let live: Vec<FetchSetup> = self
+            .items
+            .iter()
+            .flat_map(|item| &item.variants)
+            .filter_map(|variant| variant.fetch_setup.as_ref())
+            .filter(|setup| setup.state == FetchSetupState::SettingUp)
+            .cloned()
+            .collect();
+        for setup in live {
+            if !self.setup_watching(&setup.intent.app_id) {
+                self.setup_watches.push(SetupWatch::adopted(&setup, 0));
+            }
+        }
+    }
+
+    fn fetch_setup_for(&self, app_id: &str) -> Option<&FetchSetup> {
+        self.items
+            .iter()
+            .flat_map(|item| &item.variants)
+            .filter_map(|variant| variant.fetch_setup.as_ref())
+            .find(|setup| setup.intent.app_id == app_id)
+    }
 
     #[must_use]
     pub fn setup_watching(&self, app_id: &str) -> bool {

@@ -455,8 +455,10 @@ fn p2_1_a_relocked_run_restarts_the_settle() {
     assert!(!watch.observe(0, &probe(true, Some("running"), Some("run-1"))));
     assert!(!watch.observe(500, &probe(false, Some("running"), Some("run-1"))));
     assert!(!watch.observe(1_000, &probe(true, Some("running"), Some("run-2"))));
+    // The settle counts from the first lock-free probe after the re-lock (1_500), not 500.
     let unlocked = probe(false, Some("running"), Some("run-2"));
-    assert!(!watch.observe(1_000 + SETUP_SETTLE_MS, &unlocked));
+    assert!(!watch.observe(1_500, &unlocked));
+    assert!(!watch.observe(1_500 + SETUP_SETTLE_MS - 1, &unlocked));
     assert!(watch.observe(1_500 + SETUP_SETTLE_MS, &unlocked));
 }
 

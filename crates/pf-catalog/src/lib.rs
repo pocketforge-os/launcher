@@ -2,10 +2,11 @@
 
 use fs2::FileExt;
 use pf_app_manifest::{
-    AppCategory, ManifestErrorKind as SharedManifestErrorKind, ReasonCode,
-    parse_capability_requirement, parse_manifest,
+    AppCategory, Fetch, ManifestErrorKind as SharedManifestErrorKind, ReasonCode,
+    fetch_receipt_key, parse_capability_requirement, parse_manifest,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,6 +63,10 @@ pub struct Variant {
     pub requirements: Vec<Requirement>,
     pub provenance: Provenance,
     pub launch_target: AppManifestRef,
+    /// Present for a fetch-enabled app that is not yet Ready; carries the typed
+    /// setup intent plus receipt/result-derived state. `None` once Ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_setup: Option<FetchSetup>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppManifestRef {
@@ -91,6 +96,44 @@ pub enum Availability {
     NeedsSetup { reason: String },
     UnsupportedCapability { capability: String },
     IncompatibleRuntime { required: String, available: String },
+}
+/// A typed, data-only request to run `pf-app-fetch@<id>`. W4 emits the intent;
+/// W4b (tsp-ziac.4.3.8) wires it to the session authority. pf-catalog never
+/// starts a unit itself.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FetchSetupIntent {
+    pub app_id: String,
+    pub unit: String,
+}
+/// The launcher-visible liveness/outcome of a `[fetch]` app's setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchSetupState {
+    /// No run is live: the receipt is absent, stale or invalid, or a retry is due.
+    NotStarted,
+    /// `result.json` says running and a run holds `.pf-fetch/lock`.
+    SettingUp,
+    /// `result.json` says running but no run holds the lock (SIGKILL/OOM/power loss).
+    Interrupted,
+    /// The last run wrote `outcome = "failed"`.
+    Failed,
+}
+/// The setup surface for one fetch-enabled variant, built from the W3 receipt and
+/// `result.json`. `message` is the text the existing `Availability::NeedsSetup`
+/// UI renders (the W0 class text for a failed run).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FetchSetup {
+    pub intent: FetchSetupIntent,
+    pub state: FetchSetupState,
+    /// The W0 reason code for a failed or stale/invalid receipt.
+    pub reason: Option<String>,
+    /// The W0 reason-code class.
+    pub class: Option<String>,
+    /// The user-visible class text (or the descriptor's setup reason when idle).
+    pub message: String,
+    /// A retry is always offered for a non-live run, whatever the reason code.
+    pub retry_offered: bool,
+    pub run_id: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -155,8 +198,13 @@ pub enum ProviderError {
     Projection(#[from] serde_json::Error),
 }
 
+/// Default `pf-app-fetch --state-dir` parent (image unit `pf-app-fetch@.service`).
+pub const DEFAULT_FETCH_STATE_ROOT: &str = "/var/lib/pocketforge/apps";
+
 pub struct InstalledAppProvider {
     root: PathBuf,
+    /// Where `pf-app-fetch` keeps per-app state (`<state_root>/<app_id>/`).
+    state_root: PathBuf,
     favorites: PathBuf,
     runtime_family: String,
     runtime_abi: String,
@@ -174,6 +222,7 @@ impl InstalledAppProvider {
     ) -> Self {
         Self {
             root: root.into(),
+            state_root: PathBuf::from(DEFAULT_FETCH_STATE_ROOT),
             favorites: favorites.into(),
             runtime_family: family.into(),
             runtime_abi: abi.into(),
@@ -181,6 +230,13 @@ impl InstalledAppProvider {
             capabilities: BTreeSet::new(),
             observed_at: 0,
         }
+    }
+    /// Sets the root holding per-app fetch state (receipt, `.pf-fetch/`, dests),
+    /// separate from the read-only descriptor root.
+    #[must_use]
+    pub fn with_state_root(mut self, value: impl Into<PathBuf>) -> Self {
+        self.state_root = value.into();
+        self
     }
     #[must_use]
     pub fn with_supported_capabilities(mut self, values: impl IntoIterator<Item = String>) -> Self {
@@ -399,7 +455,11 @@ impl InstalledAppProvider {
                 && !self.capabilities.contains(&requirement.base))
             .then_some(requirement.base)
         });
-        let setup = m.fetch.as_ref().is_some_and(|f| f.enabled);
+        let fetch_evaluation = m
+            .fetch
+            .as_ref()
+            .filter(|fetch| fetch.enabled)
+            .map(|fetch| evaluate_fetch(&self.state_root.join(&m.app.id), &m.app.id, fetch));
         let incompatibility = if m.runtime.family != self.runtime_family {
             Some((
                 Availability::IncompatibleRuntime {
@@ -449,16 +509,23 @@ impl InstalledAppProvider {
         };
         let availability = if let Some((availability, _, _)) = &incompatibility {
             availability.clone()
-        } else if setup {
-            Availability::NeedsSetup {
-                reason: m
-                    .fetch
-                    .as_ref()
-                    .and_then(|f| f.reason.clone())
-                    .unwrap_or_else(|| "setup required".into()),
+        } else if let Some(evaluation) = &fetch_evaluation {
+            if evaluation.ready {
+                Availability::Ready
+            } else {
+                Availability::NeedsSetup {
+                    reason: evaluation.setup.message.clone(),
+                }
             }
         } else {
             Availability::Ready
+        };
+        let fetch_setup = if matches!(availability, Availability::NeedsSetup { .. }) {
+            fetch_evaluation
+                .as_ref()
+                .map(|evaluation| evaluation.setup.clone())
+        } else {
+            None
         };
         let result = if let Some((_, required, reason)) = incompatibility {
             ProviderItemResult::Incompatible {
@@ -511,6 +578,7 @@ impl InstalledAppProvider {
                 descriptor_path: path,
                 observed_digest: digest,
             },
+            fetch_setup,
         };
         let icon_reference = m.app.icon;
         items.push(CatalogItem {
@@ -552,5 +620,367 @@ fn result_key(r: &ProviderItemResult) -> String {
         ProviderItemResult::Invalid {
             descriptor_path, ..
         } => descriptor_path.display().to_string(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceiptVerdict {
+    Valid,
+    Absent,
+    Stale,
+    Invalid,
+}
+
+struct FetchEvaluation {
+    ready: bool,
+    setup: FetchSetup,
+}
+
+/// Decides whether a fetch-enabled app is Ready and, when it is not, builds the
+/// setup surface consumed by the UI. The receipt's embedded manifest is only
+/// compared statistically (directory entries, file count, total bytes); no
+/// payload hashing happens here.
+fn evaluate_fetch(state_dir: &Path, app_id: &str, fetch: &Fetch) -> FetchEvaluation {
+    let intent = FetchSetupIntent {
+        app_id: app_id.to_owned(),
+        unit: format!("pf-app-fetch@{app_id}.service"),
+    };
+    let verdict = check_fetch_receipt(state_dir, fetch);
+    if verdict == ReceiptVerdict::Valid {
+        return FetchEvaluation {
+            ready: true,
+            setup: FetchSetup {
+                intent,
+                state: FetchSetupState::NotStarted,
+                reason: None,
+                class: None,
+                message: String::new(),
+                retry_offered: false,
+                run_id: None,
+            },
+        };
+    }
+    let result = read_fetch_result(state_dir);
+    let outcome = result
+        .as_ref()
+        .and_then(|value| value.get("outcome"))
+        .and_then(Value::as_str);
+    let run_id = result
+        .as_ref()
+        .and_then(|value| value.get("run_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let setup = match outcome {
+        Some("running") => running_setup(intent, run_id, fetch_lock_held(state_dir)),
+        Some("failed") => failed_setup(intent, result.as_ref(), run_id),
+        _ => pending_setup(intent, fetch, verdict, run_id),
+    };
+    FetchEvaluation {
+        ready: false,
+        setup,
+    }
+}
+
+fn running_setup(intent: FetchSetupIntent, run_id: Option<String>, lock_held: bool) -> FetchSetup {
+    FetchSetup {
+        intent,
+        state: if lock_held {
+            FetchSetupState::SettingUp
+        } else {
+            FetchSetupState::Interrupted
+        },
+        reason: None,
+        class: None,
+        message: if lock_held {
+            "Setting up…".into()
+        } else {
+            "Setup was interrupted.".into()
+        },
+        retry_offered: !lock_held,
+        run_id,
+    }
+}
+
+fn failed_setup(
+    intent: FetchSetupIntent,
+    result: Option<&Value>,
+    run_id: Option<String>,
+) -> FetchSetup {
+    let reason = result
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let class = reason
+        .as_deref()
+        .and_then(fetch_reason_class)
+        .map(str::to_owned)
+        .or_else(|| {
+            result
+                .and_then(|value| value.get("class"))
+                .and_then(Value::as_str)
+                .filter(|class| fetch_class_text(class).is_some())
+                .map(str::to_owned)
+        });
+    let message = class
+        .as_deref()
+        .and_then(fetch_class_text)
+        .unwrap_or("Setup failed. Try again.")
+        .to_owned();
+    FetchSetup {
+        intent,
+        state: FetchSetupState::Failed,
+        reason,
+        class,
+        message,
+        retry_offered: true,
+        run_id,
+    }
+}
+
+fn pending_setup(
+    intent: FetchSetupIntent,
+    fetch: &Fetch,
+    verdict: ReceiptVerdict,
+    run_id: Option<String>,
+) -> FetchSetup {
+    let (reason, class, message) = match verdict {
+        ReceiptVerdict::Stale => (
+            Some("receipt_stale".into()),
+            Some("setup_required".into()),
+            fetch_class_text("setup_required")
+                .unwrap_or_default()
+                .into(),
+        ),
+        ReceiptVerdict::Invalid => (
+            Some("state_invalid".into()),
+            Some("setup_required".into()),
+            fetch_class_text("setup_required")
+                .unwrap_or_default()
+                .into(),
+        ),
+        ReceiptVerdict::Absent | ReceiptVerdict::Valid => (
+            None,
+            None,
+            fetch
+                .reason
+                .clone()
+                .unwrap_or_else(|| "setup required".into()),
+        ),
+    };
+    FetchSetup {
+        intent,
+        state: FetchSetupState::NotStarted,
+        reason,
+        class,
+        message,
+        retry_offered: true,
+        run_id,
+    }
+}
+
+fn check_fetch_receipt(state_dir: &Path, fetch: &Fetch) -> ReceiptVerdict {
+    let path = state_dir.join(".pf-fetch").join("receipt.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ReceiptVerdict::Absent;
+        }
+        Err(_) => return ReceiptVerdict::Invalid,
+    };
+    let receipt: Value = match serde_json::from_str(&text) {
+        Ok(receipt) => receipt,
+        Err(_) => return ReceiptVerdict::Invalid,
+    };
+    if receipt.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return ReceiptVerdict::Invalid;
+    }
+    let Some(expected_key) = fetch_receipt_key(fetch) else {
+        return ReceiptVerdict::Invalid;
+    };
+    let Some(recorded_key) = receipt.get("key").and_then(Value::as_str) else {
+        return ReceiptVerdict::Invalid;
+    };
+    if recorded_key != expected_key.as_str() {
+        return ReceiptVerdict::Stale;
+    }
+    let Some(files) = receipt.get("files").and_then(Value::as_array) else {
+        return ReceiptVerdict::Invalid;
+    };
+    if files.is_empty() || !files.iter().all(|file| payload_matches(state_dir, file)) {
+        return ReceiptVerdict::Invalid;
+    }
+    // The receipt must cover exactly the descriptor's declared dests.
+    let mut recorded: Vec<&str> = files
+        .iter()
+        .filter_map(|file| file.get("dest").and_then(Value::as_str))
+        .collect();
+    let mut declared: Vec<&str> = fetch
+        .files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|file| file.dest.as_deref())
+        .collect();
+    recorded.sort_unstable();
+    declared.sort_unstable();
+    if recorded != declared {
+        return ReceiptVerdict::Invalid;
+    }
+    ReceiptVerdict::Valid
+}
+
+fn payload_matches(state_dir: &Path, file: &Value) -> bool {
+    let Some(dest) = file.get("dest").and_then(Value::as_str) else {
+        return false;
+    };
+    if !is_safe_receipt_dest(dest) {
+        return false;
+    }
+    let Some(file_count) = file.get("file_count").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(total_bytes) = file.get("total_bytes").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(manifest) = file.get("manifest").and_then(Value::as_array) else {
+        return false;
+    };
+    if u64::try_from(manifest.len()).ok() != Some(file_count) {
+        return false;
+    }
+    let mut recorded_bytes = 0_u64;
+    for entry in manifest {
+        let Some(size) = entry.get("size").and_then(Value::as_u64) else {
+            return false;
+        };
+        if entry.get("path").and_then(Value::as_str).is_none()
+            || entry.get("sha256").and_then(Value::as_str).is_none()
+        {
+            return false;
+        }
+        recorded_bytes = recorded_bytes.saturating_add(size);
+    }
+    if recorded_bytes != total_bytes {
+        return false;
+    }
+    let mut observed_count = 0_u64;
+    let mut observed_bytes = 0_u64;
+    stat_directory(
+        &state_dir.join(dest),
+        &mut observed_count,
+        &mut observed_bytes,
+    ) && observed_count == file_count
+        && observed_bytes == total_bytes
+}
+
+/// A receipt dest must be a single normal component: `pf-app-fetch` refuses
+/// absolute paths, `..`, and its own `.`-prefixed state directory.
+fn is_safe_receipt_dest(dest: &str) -> bool {
+    !dest.is_empty()
+        && !dest.starts_with('.')
+        && !dest.contains('/')
+        && !matches!(dest, "config" | "state" | "cache")
+}
+
+/// Stat-only recursive walk. Symlinks and non-regular files fail the walk:
+/// the receipt promises a fully materialized payload, not a link farm.
+fn stat_directory(dir: &Path, files: &mut u64, bytes: &mut u64) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            return false;
+        };
+        if metadata.is_dir() {
+            if !stat_directory(&entry.path(), files, bytes) {
+                return false;
+            }
+        } else if metadata.is_file() {
+            *files += 1;
+            *bytes = bytes.saturating_add(metadata.len());
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn read_fetch_result(state_dir: &Path) -> Option<Value> {
+    let text = fs::read_to_string(state_dir.join(".pf-fetch").join("result.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Non-blocking flock probe. The lock file's content is never read: only
+/// whether a live pf-app-fetch run holds the flock matters.
+fn fetch_lock_held(state_dir: &Path) -> bool {
+    let path = state_dir.join(".pf-fetch").join("lock");
+    // Only WouldBlock proves a live run owns the flock. Any open or lock error
+    // is "not held", which yields Interrupted plus a retry rather than a
+    // "setting up" that can never clear.
+    let Ok(file) = fs::File::open(&path) else {
+        return false;
+    };
+    matches!(
+        file.try_lock_exclusive(),
+        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn fetch_reason_class(reason: &str) -> Option<&'static str> {
+    match reason {
+        "offline" | "download_truncated" => Some("network"),
+        "http_error" => Some("server"),
+        "http_refused" => Some("source_gone"),
+        "redirect_refused" => Some("source_moved"),
+        "download_too_large"
+        | "size_mismatch"
+        | "digest_mismatch"
+        | "signature_invalid"
+        | "version_invalid"
+        | "version_below_floor"
+        | "version_mismatch" => Some("source_mismatch"),
+        "archive_invalid"
+        | "archive_member_unsafe"
+        | "descriptor_invalid"
+        | "trust_key_invalid" => Some("app_defect"),
+        "disk_full" => Some("storage"),
+        "cancelled" => Some("cancelled"),
+        "receipt_stale" | "state_invalid" => Some("setup_required"),
+        "abi_mismatch" => Some("unsupported"),
+        _ => None,
+    }
+}
+
+fn fetch_class_text(class: &str) -> Option<&'static str> {
+    match class {
+        "network" => {
+            Some("Can't reach the download server. Check the Wi-Fi connection and try again.")
+        }
+        "server" => Some("The download server refused the request. Try again later."),
+        "source_mismatch" => Some(
+            "The download didn't match what this app expects. If you're on public Wi-Fi, sign in to it and try again; otherwise the app needs an update.",
+        ),
+        "source_gone" => {
+            Some("The download is no longer available from its source. The app needs an update.")
+        }
+        "source_moved" => Some(
+            "The download moved to a server this system doesn't allow yet. A system update is needed.",
+        ),
+        "app_defect" => Some("This app's download setup is broken. The app needs an update."),
+        "storage" => Some("Not enough storage space. Free some space and try again."),
+        "cancelled" => Some("Setup was cancelled."),
+        "setup_required" => Some("This app needs to finish setup."),
+        "unsupported" => Some("This app needs a newer system version."),
+        _ => None,
     }
 }

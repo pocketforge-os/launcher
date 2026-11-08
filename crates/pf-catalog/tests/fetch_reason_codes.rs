@@ -8,6 +8,30 @@ use serde_json::json;
 use std::fs;
 use tempfile::tempdir;
 
+/// The fixture's two shapes, read without a TOML dependency (a new dev-dependency
+/// would force a vendor refresh): `[classes]` `name = "text"` lines and
+/// `[codes.<code>]` tables with a `class = "<name>"` line.
+fn parse_fixture() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let (mut classes, mut codes) = (Vec::new(), Vec::new());
+    let mut section = String::new();
+    for line in TOML_TEXT.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.to_owned();
+        } else if let Some((key, value)) = line.split_once(" = ") {
+            let Some(value) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+                continue;
+            };
+            if section == "classes" {
+                classes.push((key.to_owned(), value.to_owned()));
+            } else if let (Some(code), "class") = (section.strip_prefix("codes."), key) {
+                codes.push((code.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    (classes, codes)
+}
+
 const TOML_TEXT: &str = include_str!("fixtures/infra-107.4-fetch-reason-codes.toml");
 const APP_ID: &str = "com.example.fetch";
 
@@ -80,23 +104,20 @@ fn failed(reason: &str, result_class: Option<&str>) -> (Availability, pf_catalog
 
 #[test]
 fn every_toml_code_maps_to_its_class_and_class_text() {
-    let doc: toml::Table = TOML_TEXT.parse().unwrap();
-    let classes = doc["classes"].as_table().unwrap();
-    let codes = doc["codes"].as_table().unwrap();
+    let (classes, codes) = parse_fixture();
     assert!(codes.len() >= 21, "fixture lost codes: {}", codes.len());
-    for (code, entry) in codes {
-        let class = entry["class"].as_str().unwrap();
-        let text = classes[class].as_str().unwrap();
+    for (code, class) in &codes {
+        let text = &classes.iter().find(|(name, _)| name == class).unwrap().1;
         // result.json carries no class, so the mapping must come from the code.
         let (availability, setup) = failed(code, None);
         assert_eq!(setup.state, FetchSetupState::Failed, "{code}");
-        assert_eq!(setup.class.as_deref(), Some(class), "{code}");
-        assert_eq!(setup.message, text, "{code}");
+        assert_eq!(setup.class.as_deref(), Some(class.as_str()), "{code}");
+        assert_eq!(&setup.message, text, "{code}");
         assert!(setup.retry_offered, "{code}: a retry is always offered");
         assert_eq!(
             availability,
             Availability::NeedsSetup {
-                reason: text.into()
+                reason: text.clone()
             },
             "{code}"
         );
@@ -105,13 +126,12 @@ fn every_toml_code_maps_to_its_class_and_class_text() {
 
 #[test]
 fn every_toml_class_text_is_surfaced_verbatim() {
-    let doc: toml::Table = TOML_TEXT.parse().unwrap();
-    let classes = doc["classes"].as_table().unwrap();
+    let (classes, _) = parse_fixture();
     assert_eq!(classes.len(), 10);
-    for (class, text) in classes {
+    for (class, text) in &classes {
         // An unknown code that carries a known class uses that class's text.
         let (_, setup) = failed("future_code", Some(class));
-        assert_eq!(setup.message, text.as_str().unwrap(), "{class}");
+        assert_eq!(&setup.message, text, "{class}");
         assert_eq!(setup.class.as_deref(), Some(class.as_str()));
     }
 }

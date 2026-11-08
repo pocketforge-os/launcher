@@ -43,6 +43,10 @@ name = "cli"
 path = "tests/cli.rs"
 
 [[test]]
+name = "fetch_dest"
+path = "tests/fetch_dest.rs"
+
+[[test]]
 name = "landlock"
 path = "tests/landlock.rs"
 

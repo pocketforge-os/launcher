@@ -3,8 +3,8 @@
 use super::*;
 use crate::{Route, ShellAction};
 use pf_catalog::{
-    AppKind, AppManifestRef, Availability, CatalogItem, CatalogSnapshot, FetchSetupState,
-    Presentation as CP, Provenance, UserProjection, Variant,
+    AppKind, AppManifestRef, Availability, CatalogItem, CatalogSnapshot, FetchSetupIntent,
+    FetchSetupState, Presentation as CP, Provenance, UserProjection, Variant,
 };
 use pf_scene::{Node, SurfaceMetrics};
 use std::path::PathBuf;
@@ -220,7 +220,7 @@ fn details_scene_draws_the_setup_button_focused() {
 // --- answer → UI state ----------------------------------------------------------------
 
 /// Activates setup, then applies `answer`.
-fn answered(answer: Result<SetupStart, String>) -> ShellCore {
+fn answered(answer: Result<SetupStart, &str>) -> ShellCore {
     let mut core = details(FetchSetupState::NotStarted, Some("run-0"));
     assert!(matches!(
         core.action(&ShellAction::Activate),
@@ -282,7 +282,7 @@ fn busy_and_errors_keep_a_retry() {
             "Close the running app, then set up Fetched",
         ),
         (
-            Err("command exited 5".to_owned()),
+            Err("command exited 5"),
             "Setup couldn't start for Fetched. Try again.",
         ),
     ] {
@@ -312,7 +312,7 @@ fn cancel_answers_map_to_status_and_keep_the_watch_until_the_run_ends() {
     assert!(core.setup_watching(APP), "the run reports cancelled itself");
 
     core.action(&ShellAction::Activate);
-    core.setup_cancel_result(Err("command exited 1".into()));
+    core.setup_cancel_result(Err("command exited 1"));
     assert_eq!(
         core.session_status(),
         Some("Setup couldn't be cancelled for Fetched. Try again.")

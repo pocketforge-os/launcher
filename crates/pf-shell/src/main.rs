@@ -2372,7 +2372,6 @@ fn run_interactive<H: RenderedFrameHost, I: InteractiveInput<H>>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -2380,23 +2379,42 @@ fn elapsed_ms(start: Instant) -> u64 {
 /// W4b (tsp-ziac.4.3.8): the W4 setup intent becomes the session authority's
 /// `start_setup` / `cancel_setup` call, and the answer becomes UI state.
 fn handle_setup_effect(
-    _core: &mut ShellCore,
-    _setup: &mut impl FetchSetupApi,
-    _effect: &Effect,
-    _now_ms: u64,
+    core: &mut ShellCore,
+    setup: &mut impl FetchSetupApi,
+    effect: &Effect,
+    now_ms: u64,
 ) {
+    let describe = |error: pf_session_authority::AuthorityError| {
+        let message = format!("{error:?}");
+        eprintln!("pf-shell: setup request failed: {message}");
+        message
+    };
+    match effect {
+        Effect::StartSetup(intent) => {
+            let result = setup.start_setup(&intent.app_id).map_err(describe);
+            core.setup_start_result(result.as_ref().copied().map_err(String::as_str), now_ms);
+        }
+        Effect::CancelSetup(intent) => {
+            let result = setup.cancel_setup(&intent.app_id).map_err(describe);
+            core.setup_cancel_result(result.as_ref().copied().map_err(String::as_str));
+        }
+        _ => {}
+    }
 }
 
 /// W4b N6: re-check each watched item's `.pf-fetch/` state on the tick. `true`
-/// means a run ended and the catalog must be re-scanned once.
-fn drive_setup_watches(
-    _core: &mut ShellCore,
-    _catalog: &dyn FavoriteCatalog,
-    _now_ms: u64,
-) -> bool {
-    false
+/// means a run ended and the catalog must be re-scanned once. A catalog without
+/// fetch state (fixtures) reads as "no run", so the watch ends at the start grace.
+fn drive_setup_watches(core: &mut ShellCore, catalog: &dyn FavoriteCatalog, now_ms: u64) -> bool {
+    let mut rescan = false;
+    for app_id in core.setup_probes_due(now_ms) {
+        let probe = catalog.probe_fetch_run(&app_id).unwrap_or_default();
+        rescan |= core.observe_setup(&app_id, now_ms, &probe);
+    }
+    rescan
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reload_catalog(
     catalog: &dyn FavoriteCatalog,
     host: &mut impl RenderedFrameHost,
@@ -14553,8 +14571,19 @@ mod setup_wiring_tests {
     fn details_core(state: &str) -> ShellCore {
         let mut core = ShellCore::boot(&fetch_snapshot(state), &pf_theme::flagship(), false);
         core.authority_snapshot(false);
-        // Home → Details (no Ready variant), focus lands on the setup button.
+        // The Home shelf lists Ready items only: Library → the item → Details, where focus
+        // lands on the setup button.
+        core.action(&ShellAction::Custom("Room.next".into()));
+        assert_eq!(core.route(), pf_shell_core::Route::Library);
+        for _ in 0..6 {
+            if core.focus() >= 5 {
+                break;
+            }
+            core.action(&ShellAction::Move(pf_scene::AxisMove::Down));
+        }
         assert_eq!(core.action(&ShellAction::Activate), None);
+        assert_eq!(core.route(), pf_shell_core::Route::Details);
+        assert_eq!(core.focus(), 0);
         core
     }
 

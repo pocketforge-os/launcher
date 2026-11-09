@@ -34,6 +34,10 @@ path = "src/lib.rs"
 name = "contract"
 path = "tests/contract.rs"
 
+[[test]]
+name = "golden_fixtures"
+path = "tests/golden_fixtures.rs"
+
 [dependencies.serde]
 version = "1"
 features = ["derive"]

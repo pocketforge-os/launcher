@@ -30,5 +30,9 @@ repository = "https://github.com/pocketforge-os/runtime"
 name = "pf_peer_identity"
 path = "src/lib.rs"
 
+[[test]]
+name = "app_id_table"
+path = "tests/app_id_table.rs"
+
 [dependencies.libc]
 version = "0.2"

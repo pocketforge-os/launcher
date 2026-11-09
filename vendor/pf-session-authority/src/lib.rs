@@ -52,7 +52,9 @@
 //! [`UrlHandoff`]; no command template ever expands it. The foreground switch itself belongs to
 //! the trusted session path (G2.2–G2.4); [`CommandSystem`] refuses it until that lands.
 
-use pf_app_manifest::{parse_capability_requirement, validate_app_id, ReasonCode, Resolver};
+use pf_app_manifest::{
+    parse_capability_requirement, validate_app_id, ReasonCode, ResolvedApp, Resolver,
+};
 use pf_ports::{
     Clock, LaunchRequest, LaunchResult, MonotonicTime, ObservedSessionState, RecoveryRequired,
     SessionEvent, TerminalReceipt,
@@ -883,6 +885,8 @@ impl<E: CommandExecutor> CommandSystem<E> {
 
     /// True when `pf-app-fetch@<id>` is running or has a start job queued. A unit that is
     /// deactivating (a cancel in flight) is not running: a new start queues behind the stop.
+    /// A unit still activating with a stop job queued counts as running: starting it would
+    /// replace that stop job and undo the cancel.
     fn setup_unit_running(&mut self, item_id: &str) -> Result<bool, String> {
         let unit = format!("pf-app-fetch@{item_id}.service");
         let output = self.query(&[
@@ -993,6 +997,11 @@ pub trait SessionSystem {
     /// it. The item id has already passed the resolver. The default has no setup unit.
     fn start_setup(&mut self, _item_id: &str) -> Result<SetupLaunch, String> {
         Err(SETUP_UNAVAILABLE.to_owned())
+    }
+    /// Whether the item's setup unit is activating, active or has a start job queued (the
+    /// state `Conflicts=pf-app@%i` would cancel on a launch). The default has no setup unit.
+    fn setup_running(&mut self, _item_id: &str) -> Result<bool, String> {
+        Ok(false)
     }
     /// Ask the item's setup unit to stop; stopping an inactive unit is not an error.
     fn cancel_setup(&mut self, _item_id: &str) -> Result<(), String> {
@@ -1198,6 +1207,14 @@ impl<E: CommandExecutor> SessionSystem for CommandSystem<E> {
         let template = self.templates.start_setup.clone();
         command_ok(self.run(&template, item_id, "")?)?;
         Ok(SetupLaunch::Started)
+    }
+
+    fn setup_running(&mut self, item_id: &str) -> Result<bool, String> {
+        if self.templates.systemd_reconciliation && !self.templates.start_setup.is_empty() {
+            self.setup_unit_running(item_id)
+        } else {
+            Ok(false)
+        }
     }
 
     fn cancel_setup(&mut self, item_id: &str) -> Result<(), String> {
@@ -1493,6 +1510,8 @@ pub enum RpcResponse {
     SetupRunning,
     /// `StartSetup`/`CancelSetup`: the item has no enabled `[fetch]` block.
     SetupNotEnabled,
+    /// `Launch`/`OpenUrl`: the target's fetch setup unit is running; nothing was started.
+    RejectedSetupRunning,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2289,6 +2308,7 @@ fn handle_rpc_from<S: StateStore, B: SessionSystem, C: Clock>(
             LaunchResult::Accepted { session_id } => RpcResponse::Accepted { session_id },
             LaunchResult::RejectedBusy => RpcResponse::RejectedBusy,
             LaunchResult::ItemUnavailable => RpcResponse::ItemUnavailable,
+            LaunchResult::RejectedSetupRunning => RpcResponse::RejectedSetupRunning,
         },
         RpcRequest::SafeReturn => {
             if matches!(
@@ -4140,9 +4160,19 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
                 )))
             }
         };
-        if let Err(error) = self.resolver.resolve(&handler) {
-            self.refuse_url(VERB, "no_handler", &caller_key, Some(&error.to_string()));
-            return Ok(RpcResponse::NoHandler);
+        let handler_app = match self.resolver.resolve(&handler) {
+            Ok(app) => app,
+            Err(error) => {
+                self.refuse_url(VERB, "no_handler", &caller_key, Some(&error.to_string()));
+                return Ok(RpcResponse::NoHandler);
+            }
+        };
+        // A hand-off that launches the handler would stop its running fetch (Conflicts=); the
+        // handler already in front (delivery, no launch) cannot have one. Fails closed.
+        if handler != caller_key
+            && self.fetch_blocks_launch(&handler_app, &handler, "url_refused")?
+        {
+            return Ok(RpcResponse::RejectedSetupRunning);
         }
         let url = url.to_owned();
         match slot_caller {
@@ -4634,10 +4664,17 @@ impl<S: StateStore, B: SessionSystem, C: Clock> AuthorityApi for Authority<S, B,
             self.log(&line);
             return Ok(LaunchResult::RejectedBusy);
         }
-        if let Err(error) = self.resolver.resolve(&request.item_id) {
-            let line = launch_refusal_line(error.reason.as_str(), &request.item_id);
-            self.log(&line);
-            return Ok(LaunchResult::ItemUnavailable);
+        match self.resolver.resolve(&request.item_id) {
+            Err(error) => {
+                let line = launch_refusal_line(error.reason.as_str(), &request.item_id);
+                self.log(&line);
+                return Ok(LaunchResult::ItemUnavailable);
+            }
+            Ok(app) => {
+                if self.fetch_blocks_launch(&app, &request.item_id, "launch_refused")? {
+                    return Ok(LaunchResult::RejectedSetupRunning);
+                }
+            }
         }
         let item_id = request.item_id.clone();
         let (session_id, _) = self.start_session(&item_id, None, |system, session_id| {
@@ -4715,6 +4752,44 @@ impl<S: StateStore, B: SessionSystem, C: Clock> Authority<S, B, C> {
         Some(refusal)
     }
 
+    /// The Launch / open_url guard: `pf-app-fetch@<id>` has `Conflicts=pf-app@%i`, so starting
+    /// the item mid-fetch would make systemd stop the fetch. True (logged) when the item's fetch
+    /// unit is activating, active or has a start job queued.
+    ///
+    /// Only an item that *declares* a `[fetch]` block (enabled or not, the predicate
+    /// `cancel_setup` uses) pays the read-only `systemctl show`: a run outlives a manifest update
+    /// that disables `[fetch]`, and a launch would cancel it through `Conflicts=`. An item with
+    /// no `[fetch]` block runs no query.
+    ///
+    /// FAIL CLOSED: when the query fails or is unparseable on such an item the launch is refused with a
+    /// backend error (logged `setup_state_unknown`) and nothing starts, because proceeding could silently cancel a running fetch; a retry is harmless.
+    fn fetch_blocks_launch(
+        &mut self,
+        app: &ResolvedApp,
+        item_id: &str,
+        event: &str,
+    ) -> Result<bool, AuthorityError> {
+        if app.manifest.fetch.is_none() {
+            return Ok(false);
+        }
+        let (reason, outcome) = match self.system.setup_running(item_id) {
+            Ok(false) => return Ok(false),
+            Ok(true) => ("setup_running", Ok(true)),
+            Err(error) => (
+                "setup_state_unknown",
+                Err(AuthorityError::Backend(format!(
+                    "fetch setup state unavailable: {error}"
+                ))),
+            ),
+        };
+        let line = format!(
+            "pf-session-authorityd: {event} reason={reason} item_id={}",
+            json_string(item_id)
+        );
+        self.log(&line);
+        outcome
+    }
+
     fn setup_failed(&mut self, verb: &str, item_id: &str, error: String) -> AuthorityError {
         let line = format!(
             "{} verb={verb} detail={}",
@@ -4760,7 +4835,28 @@ impl<S: StateStore, B: SessionSystem, C: Clock> FetchSetupApi for Authority<S, B
     fn cancel_setup(&mut self, item_id: &str) -> Result<SetupCancel, AuthorityError> {
         match self.setup_refusal("cancel_setup", item_id) {
             Some(SetupRefusal::ItemUnavailable) => return Ok(SetupCancel::ItemUnavailable),
-            Some(SetupRefusal::NotFetchEnabled) => return Ok(SetupCancel::NotFetchEnabled),
+            // A manifest update can disable `[fetch]` while a run is in flight; the user must
+            // still be able to cancel it (runtime#189 N3). Only an installed item that still
+            // declares a `[fetch]` block qualifies, and only while its unit is running.
+            Some(SetupRefusal::NotFetchEnabled) => {
+                let declares_fetch = self
+                    .resolver
+                    .resolve(item_id)
+                    .is_ok_and(|app| app.manifest.fetch.is_some());
+                let running = if declares_fetch {
+                    match self.system.setup_running(item_id) {
+                        Ok(running) => running,
+                        Err(error) => {
+                            return Err(self.setup_failed("cancel_setup", item_id, error))
+                        }
+                    }
+                } else {
+                    false
+                };
+                if !running {
+                    return Ok(SetupCancel::NotFetchEnabled);
+                }
+            }
             None => {}
         }
         match self.system.cancel_setup(item_id) {

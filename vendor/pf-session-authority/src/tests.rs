@@ -42,6 +42,9 @@ struct FakeSystem {
     fail_open_url: bool,
     fail_restore: bool,
     delivered: bool,
+    /// Every `setup_running` query the authority made, and the answer to give (`Err` = failed).
+    setup_queries: Vec<String>,
+    setup_query_fails: bool,
 }
 
 #[derive(Default)]
@@ -807,6 +810,14 @@ impl FakeSystem {
     }
 }
 impl SessionSystem for FakeSystem {
+    fn setup_running(&mut self, item_id: &str) -> Result<bool, String> {
+        self.setup_queries.push(item_id.to_owned());
+        if self.setup_query_fails {
+            Err("systemctl unavailable".into())
+        } else {
+            Ok(false)
+        }
+    }
     fn start_foreground(&mut self, _: &LaunchRequest, _: &str) -> Result<(), String> {
         self.calls.push("start".into());
         if self.fail_start {
@@ -2894,10 +2905,16 @@ fn short_socket_dir(name: &str) -> PathBuf {
 }
 
 fn raw_rpc(socket: &Path, request: &RpcRequest) -> RpcResponse {
+    raw_rpc_with_read_timeout(socket, request, Duration::from_secs(5))
+}
+
+fn raw_rpc_with_read_timeout(
+    socket: &Path,
+    request: &RpcRequest,
+    read_timeout: Duration,
+) -> RpcResponse {
     let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(read_timeout)).unwrap();
     pf_wire::write_frame(&mut stream, &serde_json::to_vec(request).unwrap()).unwrap();
     serde_json::from_slice(&pf_wire::read_frame(&mut stream).unwrap()).unwrap()
 }
@@ -3373,6 +3390,15 @@ fn stalled_clients_never_block_the_service_loop_tick() {
 #[test]
 fn full_orientation_waiter_bound_does_not_delay_safe_return_lane() {
     const N: usize = 8;
+    // Outer hang guard only: every wait below is released by observed causal state (all N
+    // permits occupied, the lifecycle request appearing on the channel, a published serial),
+    // never by an elapsed-time budget. This bound exists so a product regression fails instead
+    // of hanging the harness, and sits far above any loaded-run scheduler delay.
+    const HANG_GUARD: Duration = Duration::from_secs(10);
+    // Release valve only: in a passing run `publish` releases the parked waiters. It must
+    // outlast the guarded setup and lifecycle round trip so a slow scheduler cannot make the
+    // waiters time out and free their permits while the test still expects them parked.
+    const WAITER_RELEASE: Duration = Duration::from_secs(30);
     let dir = short_socket_dir("orientation-lane");
     let socket = dir.join("a.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -3394,40 +3420,55 @@ fn full_orientation_waiter_bound_does_not_delay_safe_return_lane() {
     for _ in 0..N {
         let socket = socket.clone();
         waiters.push(std::thread::spawn(move || {
-            raw_rpc(
+            raw_rpc_with_read_timeout(
                 &socket,
                 &RpcRequest::Orientation {
                     version: 1,
                     after_serial: Some(serial),
-                    wait_ms: 1_000,
+                    wait_ms: WAITER_RELEASE.as_millis() as u64,
                 },
+                WAITER_RELEASE + HANG_GUARD,
             )
         }));
     }
-    let fill_deadline = Instant::now() + Duration::from_millis(200);
-    while watch.active_waiters() != N && Instant::now() < fill_deadline {
+    // Park all N waiters and observe the watcher's own admission state: `active_waiters()`
+    // counts permits that are actually occupied, so this is the saturation condition itself,
+    // not a proxy measured with elapsed time.
+    let parked_by = Instant::now() + HANG_GUARD;
+    while watch.active_waiters() != N {
+        assert!(
+            Instant::now() < parked_by,
+            "only {} of {N} orientation permits were taken",
+            watch.active_waiters()
+        );
         std::thread::yield_now();
     }
-    assert_eq!(watch.active_waiters(), N);
+    assert!(!waiters.iter().any(|waiter| waiter.is_finished()));
 
     let socket_for_lifecycle = socket.clone();
     let lifecycle = std::thread::spawn(move || {
-        let started = Instant::now();
-        let response = raw_rpc(&socket_for_lifecycle, &RpcRequest::SafeReturn);
-        (started.elapsed(), response)
+        raw_rpc_with_read_timeout(&socket_for_lifecycle, &RpcRequest::SafeReturn, HANG_GUARD)
     });
+    // The lifecycle lane never shares the orientation permit pool. The causal property is
+    // that a safe_return request reaches the authority's lifecycle channel while all N
+    // orientation waiters are still parked. If lifecycle work queued behind a waiter this
+    // receive could not succeed until a waiter was woken or timed out and released its
+    // permit, so observing the request together with `active_waiters() == N` is the assertion;
+    // `HANG_GUARD` only bounds how long we wait for it.
     let pending = incoming
-        .recv_timeout(Duration::from_millis(100))
-        .expect("safe_return must reach the lifecycle lane")
+        .recv_timeout(HANG_GUARD)
+        .expect("safe_return must reach the lifecycle lane while orientation waiters are parked")
         .unwrap();
     assert!(matches!(pending.request, RpcRequest::SafeReturn));
-    pending.respond(RpcResponse::Ok);
-    let (elapsed, response) = lifecycle.join().unwrap();
-    assert!(matches!(response, RpcResponse::Ok));
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "safe_return took {elapsed:?}"
+    assert_eq!(
+        watch.active_waiters(),
+        N,
+        "safe_return reached the lifecycle lane only after an orientation waiter stopped waiting"
     );
+    assert!(!waiters.iter().any(|waiter| waiter.is_finished()));
+    pending.respond(RpcResponse::Ok);
+    let response = lifecycle.join().unwrap();
+    assert!(matches!(response, RpcResponse::Ok));
 
     let mut changed = watch.snapshot();
     changed.serial += 1;
@@ -6316,6 +6357,26 @@ fn a_repeat_start_while_the_unit_is_running_is_idempotent() {
 }
 
 #[test]
+fn a_start_while_a_cancel_is_queued_on_a_running_unit_answers_running_and_starts_nothing() {
+    // runtime#189 review N1: `activating` (a oneshot mid-run) with a stop job queued is a cancel
+    // that has not taken effect yet. A start here would replace the queued stop job and undo the
+    // user's cancel, so the documented answer stands: setup_running, no command. The launcher's
+    // watch ends when the cancelled run releases its lock, and a retry is then offered.
+    let (mut a, log, dir) = setup_authority(vec![fetch_unit_state("activating", "31")]);
+    assert!(matches!(
+        handle_rpc(&mut a, start_setup(FETCH_ID)).unwrap(),
+        RpcResponse::SetupRunning
+    ));
+    assert_eq!(a.system.executor.calls, [state_query()]);
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains("setup_running") && line.contains(FETCH_ID)));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn start_setup_is_refused_while_a_foreground_session_is_active() {
     // pf-app-fetch@ has Conflicts=pf-app@%i: starting it under a session could stop that app.
     let (resolver, dir) = setup_resolver();
@@ -6471,5 +6532,317 @@ fn authority_setup_api_matches_the_rpc_answers() {
         SetupStart::ItemUnavailable
     );
     assert_eq!(a.cancel_setup(FETCH_ID).unwrap(), SetupCancel::Requested);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// tsp-ziac.4.3.10: Launch / open_url refuse while pf-app-fetch@<id> is running
+// (pf-app-fetch@ has Conflicts=pf-app@%i, so a launch would make systemd stop the fetch).
+// ---------------------------------------------------------------------------
+
+fn launch_setup_item(a: &mut SetupAuthority, id: &str) -> Result<LaunchResult, AuthorityError> {
+    a.launch(LaunchRequest { item_id: id.into() })
+}
+
+#[test]
+fn launch_of_a_fetch_enabled_item_is_refused_while_its_fetch_unit_is_running() {
+    for (state, job) in [
+        ("activating", ""),
+        ("active", ""),
+        ("reloading", ""),
+        ("inactive", "12"),
+    ] {
+        let (mut a, log, dir) = setup_authority(vec![fetch_unit_state(state, job)]);
+        let persisted = a.store.snapshot().cloned();
+        assert_eq!(
+            launch_setup_item(&mut a, FETCH_ID),
+            Ok(LaunchResult::RejectedSetupRunning),
+            "{state} {job}"
+        );
+        // No command beyond the read-only query, no session, nothing persisted.
+        assert_eq!(a.system.executor.calls, [state_query()], "{state} {job}");
+        assert!(matches!(a.state.phase, Phase::Idle));
+        assert_eq!(a.store.snapshot().cloned(), persisted);
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("launch_refused reason=setup_running")
+                && line.contains(FETCH_ID)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn launch_of_a_fetch_enabled_item_proceeds_when_its_fetch_unit_is_not_running() {
+    for (state, job) in [("inactive", ""), ("failed", ""), ("deactivating", "")] {
+        let (mut a, _, dir) = setup_authority(vec![fetch_unit_state(state, job)]);
+        assert!(
+            matches!(
+                launch_setup_item(&mut a, FETCH_ID),
+                Ok(LaunchResult::Accepted { .. })
+            ),
+            "{state}"
+        );
+        assert_eq!(a.system.executor.calls[0], state_query(), "{state}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn launch_of_a_non_fetch_item_runs_no_state_query() {
+    let (mut a, _, dir) = setup_authority(Vec::new());
+    assert!(matches!(
+        launch_setup_item(&mut a, APP_ID),
+        Ok(LaunchResult::Accepted { .. })
+    ));
+    assert!(
+        !a.system
+            .executor
+            .calls
+            .iter()
+            .any(|call| call.1.iter().any(|arg| arg == "show")),
+        "{:?}",
+        a.system.executor.calls
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_state_query_fails_closed_for_a_fetch_enabled_item() {
+    // Documented rule: when the fetch unit's state cannot be read, Launch refuses (a backend
+    // error, nothing started) rather than risk Conflicts= cancelling a running fetch.
+    for output in [
+        CommandOutput {
+            code: 1,
+            stdout: String::new(),
+        },
+        CommandOutput {
+            code: 0,
+            stdout: "garbage\n".into(),
+        },
+    ] {
+        let (mut a, log, dir) = setup_authority(vec![output]);
+        assert!(matches!(
+            launch_setup_item(&mut a, FETCH_ID),
+            Err(AuthorityError::Backend(_))
+        ));
+        assert_eq!(a.system.executor.calls, [state_query()]);
+        assert!(matches!(a.state.phase, Phase::Idle));
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("launch_refused reason=setup_state_unknown")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn the_launch_rpc_answers_rejected_setup_running() {
+    let (mut a, _, dir) = setup_authority(vec![fetch_unit_state("activating", "")]);
+    let response = handle_rpc(
+        &mut a,
+        RpcRequest::Launch {
+            item_id: FETCH_ID.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&response).unwrap(),
+        r#"{"result":"rejected_setup_running"}"#
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_open_url_hand_off_into_a_running_fetch_item_is_refused_the_same_way() {
+    let (a, log, dir) = setup_authority(vec![fetch_unit_state("activating", "")]);
+    let mut a = a.with_url_handler(FixedUrlHandler(FETCH_ID.into()));
+    let response = dispatch_rpc_from(&mut a, RpcOrigin::Shell, open_url_request(None, URL, 0));
+    assert!(
+        matches!(response, RpcResponse::RejectedSetupRunning),
+        "{response:?}"
+    );
+    assert_eq!(a.system.executor.calls, [state_query()]);
+    assert!(matches!(a.state.phase, Phase::Idle));
+    assert!(a.state.return_slot.is_none());
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains("url_refused reason=setup_running")));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancel_setup_is_allowed_for_an_installed_item_whose_fetch_was_disabled_but_is_running() {
+    // runtime#189 review N3.
+    let (resolver, dir) = setup_resolver();
+    let manifest = dir.join("apps").join(APP_ID).join("app.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("[fetch]\nenabled = false\n");
+    fs::write(&manifest, text).unwrap();
+    let app_unit = "pf-app-fetch@org.example.game.service";
+    let query = (
+        "systemctl".to_owned(),
+        words(&format!(
+            "show --property ActiveState --property Job {app_unit}"
+        )),
+    );
+    let mut a = Authority::open_with_resolver(
+        MemoryStore::default(),
+        CommandSystem::with_executor(CommandTemplates::default(), FakeExecutor::default()),
+        TestClock::new(),
+        3,
+        Duration::from_millis(10),
+        resolver,
+    )
+    .unwrap();
+    a.system.executor.outputs = vec![fetch_unit_state("activating", "")].into();
+    assert!(matches!(
+        handle_rpc(&mut a, cancel_setup(APP_ID)).unwrap(),
+        RpcResponse::Ok
+    ));
+    assert_eq!(
+        a.system.executor.calls,
+        [
+            query.clone(),
+            systemctl(&format!("stop --no-block {app_unit}"))
+        ]
+    );
+    // Not running: still refused.
+    a.system.executor.calls.clear();
+    a.system.executor.outputs = vec![fetch_unit_state("inactive", "")].into();
+    assert!(matches!(
+        handle_rpc(&mut a, cancel_setup(APP_ID)).unwrap(),
+        RpcResponse::SetupNotEnabled
+    ));
+    assert_eq!(a.system.executor.calls, [query]);
+    // Start still requires fetch-enabled, running or not.
+    a.system.executor.calls.clear();
+    assert!(matches!(
+        handle_rpc(&mut a, start_setup(APP_ID)).unwrap(),
+        RpcResponse::SetupNotEnabled
+    ));
+    assert!(a.system.executor.calls.is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// runtime#191 review r1: coverage for the open_url guard, and the Launch predicate (N3).
+// ---------------------------------------------------------------------------
+
+/// `setup_resolver` with `FETCH_ID` also declaring `open_url`, so it can be caller and handler.
+fn fetch_url_resolver() -> (Resolver, PathBuf) {
+    let (resolver, dir) = setup_resolver();
+    let manifest = dir.join("apps").join(FETCH_ID).join("app.toml");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("use = [\"input\"]", "use = [\"input\", \"open_url\"]");
+    fs::write(&manifest, text).unwrap();
+    let platform = dir.join("platform.toml");
+    let text = fs::read_to_string(&platform)
+        .unwrap()
+        .replace("[\"input\"]", "[\"input\", \"open_url\"]");
+    fs::write(&platform, text).unwrap();
+    (resolver, dir)
+}
+
+fn fetch_url_authority(
+    system: FakeSystem,
+) -> (Authority<MemoryStore, FakeSystem, TestClock>, PathBuf) {
+    let (resolver, dir) = fetch_url_resolver();
+    let a = Authority::open_with_resolver(
+        MemoryStore::default(),
+        system,
+        TestClock::new(),
+        3,
+        Duration::from_millis(10),
+        resolver,
+    )
+    .unwrap()
+    .with_url_handler(FixedUrlHandler(FETCH_ID.into()));
+    (a, dir)
+}
+
+#[test]
+fn an_app_open_url_to_itself_in_front_is_delivered_with_no_setup_query() {
+    // The handler already in front is a delivery, not a launch: Conflicts= cannot apply, so the
+    // guard must not spend a systemctl query (or refuse on a failing one).
+    let (mut a, dir) = fetch_url_authority(FakeSystem {
+        setup_query_fails: true,
+        ..FakeSystem::available()
+    });
+    a.system.setup_query_fails = false;
+    assert!(matches!(
+        a.launch(LaunchRequest {
+            item_id: FETCH_ID.into()
+        }),
+        Ok(LaunchResult::Accepted { .. })
+    ));
+    a.system.setup_queries.clear();
+    a.system.setup_query_fails = true; // any query now would also fail the delivery
+    let response = dispatch_rpc_from(
+        &mut a,
+        front(FETCH_ID),
+        open_url_request(Some(FETCH_ID), URL, 0),
+    );
+    assert!(matches!(response, RpcResponse::Delivered), "{response:?}");
+    assert!(
+        a.system.setup_queries.is_empty(),
+        "{:?}",
+        a.system.setup_queries
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_open_url_hand_off_to_a_fetch_item_whose_state_query_fails_changes_nothing() {
+    let (mut a, dir) = fetch_url_authority(FakeSystem {
+        setup_query_fails: true,
+        ..FakeSystem::available()
+    });
+    let persisted = a.store.snapshot().cloned();
+    let response = dispatch_rpc_from(&mut a, RpcOrigin::Shell, open_url_request(None, URL, 0));
+    assert!(
+        matches!(response, RpcResponse::Error { .. }),
+        "{response:?}"
+    );
+    assert_eq!(a.system.setup_queries, [FETCH_ID]);
+    assert!(a.system.handoffs.is_empty());
+    assert!(matches!(a.state.phase, Phase::Idle));
+    assert!(a.state.return_slot.is_none());
+    assert_eq!(a.store.snapshot().cloned(), persisted);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn launch_is_refused_for_a_disabled_fetch_block_whose_unit_is_still_running() {
+    // N3: Launch must use the predicate cancel uses (the item *declares* `[fetch]`), or a launch
+    // could cancel, through Conflicts=, a run the user can still cancel but not protect.
+    let (resolver, dir) = setup_resolver();
+    let manifest = dir.join("apps").join(APP_ID).join("app.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("[fetch]\nenabled = false\n");
+    fs::write(&manifest, text).unwrap();
+    let mut a = Authority::open_with_resolver(
+        MemoryStore::default(),
+        CommandSystem::with_executor(CommandTemplates::default(), FakeExecutor::default()),
+        TestClock::new(),
+        3,
+        Duration::from_millis(10),
+        resolver,
+    )
+    .unwrap();
+    a.system.executor.outputs = vec![fetch_unit_state("activating", "")].into();
+    assert_eq!(
+        a.launch(LaunchRequest {
+            item_id: APP_ID.into()
+        }),
+        Ok(LaunchResult::RejectedSetupRunning)
+    );
+    assert_eq!(a.system.executor.calls.len(), 1);
+    assert!(matches!(a.state.phase, Phase::Idle));
     fs::remove_dir_all(dir).unwrap();
 }
